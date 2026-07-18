@@ -299,3 +299,35 @@ def test_build_transport_security_adds_to_localhost_defaults_not_replaces():
     assert "localhost:*" in settings.allowed_hosts
     assert "[::1]:*" in settings.allowed_hosts
     assert "namu-cloud.onnamu.kr" in settings.allowed_hosts
+
+
+# ---------------------------------------------------------------------------
+# resolve_streamable_path — path_secret(URL 경로 시크릿) 기반 헤더 없는 인증.
+# claude.ai 웹 커스텀 커넥터는 임의 헤더(x-api-key)를 못 넣고 URL만 받으므로,
+# 개인용 NAMU처럼 시크릿을 URL 경로(/mcp/<secret>)에 실어 인증한다.
+# ---------------------------------------------------------------------------
+def test_resolve_streamable_path_without_secret_stays_mcp():
+    assert rs.resolve_streamable_path(_settings()) == "/mcp"
+
+
+def test_resolve_streamable_path_with_secret_appends_it():
+    assert (
+        rs.resolve_streamable_path(_settings(path_secret="s3cr3t"))
+        == "/mcp/s3cr3t"
+    )
+
+
+def test_build_app_sets_path_secret_into_streamable_http_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
+    monkeypatch.setenv("NAMU_HTTP_PATH_SECRET", "s3cr3t")
+    rs.build_app()
+    assert rs.mcp.settings.streamable_http_path == "/mcp/s3cr3t"
+
+
+def test_build_app_without_path_secret_keeps_mcp(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
+    monkeypatch.delenv("NAMU_HTTP_PATH_SECRET", raising=False)
+    rs.build_app()
+    assert rs.mcp.settings.streamable_http_path == "/mcp"

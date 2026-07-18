@@ -263,8 +263,8 @@ def namu_record(
 # (62~77줄) / _send_json (80~89줄) / AuthMiddleware (92~130줄) /
 # _LOCALHOST_ALLOWED_HOSTS·_LOCALHOST_ALLOWED_ORIGINS (196~197줄) /
 # _build_transport_security (200~226줄)를 그대로 미러링(import 아님 — 사용자 결정).
-# 라우팅은 path_secret을 쓰지 않으므로, token 또는 allow_noauth가 실질적으로
-# 유일한 인증 경로다.
+# path_secret은 resolve_streamable_path(경로 라우팅)에서만 쓰이고, validate_settings
+# 자체는 미러링하지 않아 token/allow_noauth만 검사한다(기존 동작 보존).
 # ---------------------------------------------------------------------------
 def validate_settings(s: dict) -> None:
     """무인증 공개 노출을 막는다. token이 비어 있고 allow_noauth도 아니면 기동
@@ -361,14 +361,28 @@ def _build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySett
     )
 
 
+def resolve_streamable_path(settings: dict) -> str:
+    """vendor/namu-agent/namu-plugin/http_server.py의 동명 함수를 그대로 미러링.
+
+    NAMU_HTTP_PATH_SECRET(settings["path_secret"])이 설정돼 있으면 경로에
+    시크릿을 실어 `/mcp/<secret>`을 반환한다 — claude.ai 웹 커스텀 커넥터처럼
+    임의 헤더(x-api-key)를 못 넣고 URL만 받는 클라이언트를 위한 헤더 없는
+    인증 경로다. 미설정 시 기존과 동일한 `/mcp`.
+    """
+    if settings["path_secret"]:
+        return f"/mcp/{settings['path_secret']}"
+    return "/mcp"
+
+
 # ---------------------------------------------------------------------------
-# 기동 엔트리포인트 — stateless HTTP, 고정 경로 /mcp.
+# 기동 엔트리포인트 — stateless HTTP, 경로는 path_secret 유무에 따라 /mcp 또는
+# /mcp/<secret>.
 # ---------------------------------------------------------------------------
 def build_app():
     settings = cfg.http_settings()
     validate_settings(settings)
     mcp.settings.stateless_http = True
-    mcp.settings.streamable_http_path = "/mcp"  # 라우팅은 고정 /mcp + ?user 쿼리, path_secret 미사용
+    mcp.settings.streamable_http_path = resolve_streamable_path(settings)
     ts = _build_transport_security(settings.get("allowed_hosts", []))
     if ts is not None:
         mcp.settings.transport_security = ts
