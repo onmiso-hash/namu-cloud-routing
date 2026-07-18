@@ -27,6 +27,10 @@ COPY pyproject.toml uv.lock ./
 # 라우팅 서버 본체.
 COPY src/ ./src/
 
+# entrypoint(STORE clone/pull → routing_server.py exec 기동).
+COPY deploy/entrypoint.sh ./deploy/entrypoint.sh
+RUN chmod +x /app/deploy/entrypoint.sh
+
 # 메모리 코어(config.py/db.py/profile.py 등)는 git submodule을 sys.path로 재사용한다.
 # routing_server.py가 `Path(__file__).resolve().parent.parent / "vendor" / "namu-agent" / "namu-plugin"`
 # 를 sys.path에 얹으므로, 이 이미지에서도 동일한 상대 경로(/app/vendor/namu-agent/namu-plugin)가
@@ -52,4 +56,4 @@ ENV NAMU_HTTP_PORT=8770
 
 EXPOSE 8770
 
-CMD ["python", "src/routing_server.py"]
+CMD ["bash", "/app/deploy/entrypoint.sh"]

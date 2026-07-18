@@ -16,6 +16,9 @@
 포함) 저장/조회를 거부하고, resolve() 후 STORE_ROOT/users 밖으로 벗어나지
 않는지 이중으로 재확인한다.
 """
+import hmac
+import json
+import logging
 import os
 import re
 import sqlite3
@@ -35,8 +38,11 @@ import config as cfg  # noqa: E402
 import db  # noqa: E402
 import profile  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
+from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
 mcp = FastMCP("namu-cloud-routing")
+
+logger = logging.getLogger("namu.routing_server")
 
 
 # ---------------------------------------------------------------------------
@@ -253,12 +259,122 @@ def namu_record(
 
 
 # ---------------------------------------------------------------------------
+# 인증/전송 보안 — vendor/namu-agent/namu-plugin/http_server.py의 validate_settings
+# (62~77줄) / _send_json (80~89줄) / AuthMiddleware (92~130줄) /
+# _LOCALHOST_ALLOWED_HOSTS·_LOCALHOST_ALLOWED_ORIGINS (196~197줄) /
+# _build_transport_security (200~226줄)를 그대로 미러링(import 아님 — 사용자 결정).
+# 라우팅은 path_secret을 쓰지 않으므로, token 또는 allow_noauth가 실질적으로
+# 유일한 인증 경로다.
+# ---------------------------------------------------------------------------
+def validate_settings(s: dict) -> None:
+    """무인증 공개 노출을 막는다. token이 비어 있고 allow_noauth도 아니면 기동
+    자체를 거부한다 — 값 자체는 절대 출력하지 않는다."""
+    if s["allow_noauth"]:
+        return
+    if s["token"]:
+        return
+    print(
+        "[namu-routing-http] 기동 거부: 인증 설정이 없습니다.\n"
+        "  NAMU_HTTP_TOKEN=<임의의 강한 토큰 문자열>을 환경변수로 설정하세요\n"
+        "  (헤더 인증, x-api-key / Authorization: Bearer).\n"
+        "  로컬 테스트 목적으로만 무인증 기동을 허용하려면 NAMU_HTTP_ALLOW_NOAUTH=1을 설정하세요\n"
+        "  (공개 인터넷에 노출하는 배포에서는 절대 사용하지 마세요).",
+    )
+    raise SystemExit(2)
+
+
+async def _send_json(send, status: int, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", b"application/json")],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+class AuthMiddleware:
+    """토큰 헤더 검증. 순수 ASGI 3-인자 callable.
+
+    token이 비어 있으면(무인증 로컬 테스트 구성) 무조건 통과시킨다.
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not self.token:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        api_key = headers.get(b"x-api-key", b"").decode("latin-1")
+        auth_header = headers.get(b"authorization", b"").decode("latin-1")
+        token_bytes = self.token.encode("utf-8")
+
+        authorized = False
+        if api_key and hmac.compare_digest(api_key.encode("utf-8"), token_bytes):
+            authorized = True
+        elif auth_header.startswith("Bearer "):
+            candidate = auth_header[len("Bearer ") :]
+            if hmac.compare_digest(candidate.encode("utf-8"), token_bytes):
+                authorized = True
+
+        if not authorized:
+            client = scope.get("client")
+            addr = f"{client[0]}:{client[1]}" if client else "unknown"
+            # 조용한 실패 금지 — 단 헤더 값 자체(토큰 후보)는 로그에 남기지 않는다.
+            logger.warning("NAMU 라우팅 HTTP 인증 실패 (client=%s)", addr)
+            await _send_json(send, 401, {"error": "unauthorized"})
+            return
+
+        await self.app(scope, receive, send)
+
+
+# FastMCP가 host in (127.0.0.1/localhost/::1)일 때 자동 적용하는 기본값. 터널 경유
+# 요청 허용을 위해 NAMU_HTTP_ALLOWED_HOSTS를 넣더라도 로컬 curl 스모크가 계속
+# 동작해야 하므로, 이 기본값을 "대체"가 아니라 사용자 항목에 "합쳐서" 쓴다.
+_LOCALHOST_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+_LOCALHOST_ALLOWED_ORIGINS = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+
+def _build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySettings | None:
+    """NAMU_HTTP_ALLOWED_HOSTS(터널 경유 421 Misdirected Request 수정)로부터
+    TransportSecuritySettings를 만든다.
+
+    - allowed_hosts == ["*"]: DNS rebinding 보호 자체를 끈다.
+    - 그 외 비어있지 않은 값: 보호는 유지한 채 FastMCP localhost 기본 3종에
+      사용자 항목을 더한다(대체 금지).
+    - 빈 리스트(미설정): None을 반환해 FastMCP 자동 기본값을 그대로 둔다.
+    """
+    if not allowed_hosts:
+        return None
+    if allowed_hosts == ["*"]:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_LOCALHOST_ALLOWED_HOSTS + allowed_hosts,
+        allowed_origins=_LOCALHOST_ALLOWED_ORIGINS,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 기동 엔트리포인트 — stateless HTTP, 고정 경로 /mcp.
 # ---------------------------------------------------------------------------
 def build_app():
+    settings = cfg.http_settings()
+    validate_settings(settings)
     mcp.settings.stateless_http = True
-    mcp.settings.streamable_http_path = "/mcp"
-    return mcp.streamable_http_app()
+    mcp.settings.streamable_http_path = "/mcp"  # 라우팅은 고정 /mcp + ?user 쿼리, path_secret 미사용
+    ts = _build_transport_security(settings.get("allowed_hosts", []))
+    if ts is not None:
+        mcp.settings.transport_security = ts
+    app = mcp.streamable_http_app()
+    app = AuthMiddleware(app, settings["token"])
+    return app
 
 
 def main() -> None:

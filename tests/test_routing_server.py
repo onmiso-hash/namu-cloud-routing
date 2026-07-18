@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from starlette.testclient import TestClient
 
 import routing_server as rs
 
@@ -207,3 +208,94 @@ def test_fact_kind_missing_source_rejected():
             kind="fact", subject="alice", statement="stmt", source="",
             ctx=_ctx("alice"),
         )
+
+
+# ---------------------------------------------------------------------------
+# validate_settings / AuthMiddleware / _build_transport_security — 순수 로직만
+# 테스트(mcp_server import 없이, vendor/namu-agent/namu-plugin/test_http_server.py
+# 방식 참고). mcp_server가 아닌 routing_server 모듈 자체를 대상으로 한다.
+# ---------------------------------------------------------------------------
+async def _dummy_app(scope, receive, send):
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"ok"})
+
+
+def _settings(**overrides) -> dict:
+    base = {
+        "token": "",
+        "path_secret": "",
+        "host": "127.0.0.1",
+        "port": 8770,
+        "pull_interval": 60.0,
+        "allow_noauth": False,
+        "allowed_hosts": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_settings_rejects_noauth():
+    with pytest.raises(SystemExit) as exc_info:
+        rs.validate_settings(_settings())
+    assert exc_info.value.code == 2
+
+
+def test_validate_settings_allows_explicit_noauth():
+    rs.validate_settings(_settings(allow_noauth=True))  # SystemExit 없이 통과
+
+
+def test_validate_settings_allows_token():
+    rs.validate_settings(_settings(token="t"))  # SystemExit 없이 통과
+
+
+def test_auth_middleware_x_api_key_match():
+    app = rs.AuthMiddleware(_dummy_app, token="tok123")
+    client = TestClient(app)
+    r = client.get("/mcp", headers={"x-api-key": "tok123"})
+    assert r.status_code == 200
+
+
+def test_auth_middleware_x_api_key_mismatch():
+    app = rs.AuthMiddleware(_dummy_app, token="tok123")
+    client = TestClient(app)
+    r = client.get("/mcp", headers={"x-api-key": "wrong"})
+    assert r.status_code == 401
+
+
+def test_auth_middleware_bearer_match():
+    app = rs.AuthMiddleware(_dummy_app, token="tok123")
+    client = TestClient(app)
+    r = client.get("/mcp", headers={"Authorization": "Bearer tok123"})
+    assert r.status_code == 200
+
+
+def test_auth_middleware_no_header_rejected():
+    app = rs.AuthMiddleware(_dummy_app, token="tok123")
+    client = TestClient(app)
+    r = client.get("/mcp")
+    assert r.status_code == 401
+
+
+def test_auth_middleware_no_token_configured_passes_through():
+    app = rs.AuthMiddleware(_dummy_app, token="")
+    client = TestClient(app)
+    r = client.get("/mcp")
+    assert r.status_code == 200
+
+
+def test_build_transport_security_empty_returns_none():
+    assert rs._build_transport_security([]) is None
+
+
+def test_build_transport_security_star_disables_protection():
+    settings = rs._build_transport_security(["*"])
+    assert settings.enable_dns_rebinding_protection is False
+
+
+def test_build_transport_security_adds_to_localhost_defaults_not_replaces():
+    settings = rs._build_transport_security(["namu-cloud.onnamu.kr"])
+    assert settings.enable_dns_rebinding_protection is True
+    assert "127.0.0.1:*" in settings.allowed_hosts
+    assert "localhost:*" in settings.allowed_hosts
+    assert "[::1]:*" in settings.allowed_hosts
+    assert "namu-cloud.onnamu.kr" in settings.allowed_hosts
