@@ -1,0 +1,3 @@
+[submodule "vendor/namu-agent"]
+	path = vendor/namu-agent
+	url = https://github.com/onmiso-hash/namu-agent.git

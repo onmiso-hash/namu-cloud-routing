@@ -1,0 +1,21 @@
+[project]
+name = "namu-cloud-routing"
+version = "0.1.0"
+description = "NAMU 공용 라우팅 MCP 서비스 — 요청별 사용자 디렉토리로 포터블 메모리 코어(namu-agent)를 라우팅한다"
+requires-python = ">=3.12"
+# 코어(vendor/namu-agent/namu-plugin의 config/db/profile)가 요구하는 의존성과 동일 집합 +
+# 라우팅 서버 자체(FastMCP stateless HTTP). 코어는 submodule로 재사용하므로 여기 deps에
+# 코어를 넣지 않는다(sys.path로 import).
+dependencies = [
+    "mcp[cli]>=1.28,<2",
+    "python-ulid>=3.0.0",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

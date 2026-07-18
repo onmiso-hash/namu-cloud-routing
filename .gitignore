@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.sqlite
+.env
+.pytest_cache/
+# 로컬 STORE clone(테스트/개발용) — 실 데이터는 namu-cloud-memory에 있다
+/store/
