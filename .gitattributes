@@ -1,0 +1,4 @@
+# 셸 스크립트는 항상 LF로 checkout한다. Windows git의 core.autocrlf=true가
+# entrypoint.sh를 CRLF로 바꾸면 리눅스 컨테이너 bash가 파싱 실패로 크래시한다
+# (set -euo pipefail\r → "invalid option name"). 배포 대상이 리눅스뿐이므로 강제.
+*.sh text eol=lf

@@ -28,8 +28,11 @@ COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 
 # entrypoint(STORE clone/pull → routing_server.py exec 기동).
+# CRLF 제거: Windows checkout(core.autocrlf)이 .sh를 CRLF로 바꾸면 리눅스
+# bash가 'set -euo pipefail\r'을 파싱 못 해 크래시한다. .gitattributes로 LF를
+# 고정하지만, 클론 환경이 이를 무시해도 안전하도록 빌드 단계에서 CR을 한 번 더 제거.
 COPY deploy/entrypoint.sh ./deploy/entrypoint.sh
-RUN chmod +x /app/deploy/entrypoint.sh
+RUN sed -i 's/\r$//' /app/deploy/entrypoint.sh && chmod +x /app/deploy/entrypoint.sh
 
 # 메모리 코어(config.py/db.py/profile.py 등)는 git submodule을 sys.path로 재사용한다.
 # routing_server.py가 `Path(__file__).resolve().parent.parent / "vendor" / "namu-agent" / "namu-plugin"`
