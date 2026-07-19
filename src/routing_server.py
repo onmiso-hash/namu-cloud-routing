@@ -87,10 +87,13 @@ def _validate_user_key(key: str) -> str:
 _VIA_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
 
 _VIA_ERROR_MSG = (
-    "출처(client) 식별값이 없거나 형식이 올바르지 않습니다 — NAMU 공용 MCP 주소 끝에 "
-    "&client=<당신의 AI 이름>을 붙여 주세요. 예: "
-    "https://.../mcp/<secret>?user=<키>&client=claude  |  Missing/invalid 'client' "
-    "provenance tag: append &client=<your-ai-name> to the MCP URL."
+    "출처(client) 식별값이 없거나 형식이 올바르지 않습니다 — 주소 끝에 "
+    "&client=<AI 이름>을 붙이고, 사용하는 AI 이름을 정확히 넣으세요. "
+    "예: claude, chatgpt, gemini, cursor, copilot. 애칭·약칭도 되지만, 나중에 "
+    "'그 AI가 남긴 기억'을 조회하려면 입력했던 값과 똑같이 넣어야 찾을 수 있습니다 "
+    "(claude 와 cld 는 서로 다른 값으로 저장됨).  |  Missing/invalid 'client': "
+    "append &client=<your-ai-name> (e.g. claude, chatgpt, gemini). Use the exact "
+    "same value later to look up that AI's memories."
 )
 
 
