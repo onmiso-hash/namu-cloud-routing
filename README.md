@@ -33,6 +33,10 @@ clone 후:
 git submodule update --init --recursive
 ```
 
+## 문서
+
+- [`docs/namu_cloud_guide.md`](docs/namu_cloud_guide.md) — 공용 클라우드 MCP(경로 A) 사용 가이드
+
 ## 범위 (현 단계)
 
 임시 사용자 1명 디렉토리 + 요청별 라우팅 동작까지. git 발급·사용자 write의 STORE
