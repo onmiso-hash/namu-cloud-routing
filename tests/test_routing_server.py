@@ -30,8 +30,14 @@ class _FakeCtx:
         self.request_context = _FakeRequestContext(_FakeRequest(query_params))
 
 
-def _ctx(user: str | None = None) -> _FakeCtx:
-    params = {} if user is None else {"user": user}
+def _ctx(user: str | None = None, client: str | None = "claude") -> _FakeCtx:
+    # 공용 서버는 개인용을 미러해 ?user=(라우팅)와 ?client=(출처/via)를 함께 받는다.
+    # 정상 경로 테스트가 항상 유효한 client를 싣도록 기본값 "claude"를 준다.
+    params: dict = {}
+    if user is not None:
+        params["user"] = user
+    if client is not None:
+        params["client"] = client
     return _FakeCtx(params)
 
 
@@ -135,6 +141,42 @@ def test_record_missing_user_key_rejected(tmp_path):
         )
     # STORE_ROOT/users 자체가 생기지 않았어야 함
     assert not (tmp_path / "users").exists()
+
+
+# ---------------------------------------------------------------------------
+# 출처(client/via) — 개인용 미러: ?client= 없거나 형식 틀리면 거부, 있으면 저장
+# ---------------------------------------------------------------------------
+def test_missing_client_rejected():
+    with pytest.raises(ValueError):
+        rs.namu_recall(ctx=_ctx("alice", client=None))
+
+
+def test_invalid_client_rejected():
+    with pytest.raises(ValueError):
+        rs.namu_recall(ctx=_ctx("alice", client="bad name!"))
+
+
+def test_record_missing_client_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        rs.namu_record(
+            task="t", outcome="success", reason="r",
+            ctx=_ctx("alice", client=None),
+        )
+
+
+def test_via_stored_on_record(tmp_path):
+    # ?client=gemini 로 기록하면 그 항목의 via 컬럼에 'gemini'가 저장돼야 한다.
+    # 이 검증이 없으면 공용 서버가 AI 출처를 흘리는 회귀(개인용 미러 누락)가 재발한다.
+    entry_id = rs.namu_record(
+        task="출처 저장 작업", outcome="success", reason="via 저장 확인",
+        ctx=_ctx("alice", client="gemini"),
+    )
+    db_path = tmp_path / "users" / "alice" / "db" / "namu.db"
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT via FROM learnings WHERE id = ?", (entry_id,)
+        ).fetchone()
+    assert row == ("gemini",)
 
 
 # ---------------------------------------------------------------------------

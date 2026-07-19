@@ -84,6 +84,36 @@ def _validate_user_key(key: str) -> str:
     return key
 
 
+_VIA_RE = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
+
+_VIA_ERROR_MSG = (
+    "출처(client) 식별값이 없거나 형식이 올바르지 않습니다 — NAMU 공용 MCP 주소 끝에 "
+    "&client=<당신의 AI 이름>을 붙여 주세요. 예: "
+    "https://.../mcp/<secret>?user=<키>&client=claude  |  Missing/invalid 'client' "
+    "provenance tag: append &client=<your-ai-name> to the MCP URL."
+)
+
+
+def _resolve_via(ctx: "Context | None") -> str | None:
+    """URL 쿼리(`?client=`)에서 출처(via) 태그를 읽어 검증한다 — 개인용
+    mcp_server._resolve_via(namu-50)를 그대로 미러. '어느 AI가 남긴 기억인지'를
+    각 기록에 함께 저장·구분하기 위한 출처 태그다.
+
+    이 서버는 stateless HTTP 전용이라 요청 경로에선 req가 항상 존재한다 →
+    `?client=`가 없거나 형식이 틀리면 거부한다(개인용의 웹 경로 동작과 동일).
+    ctx/req가 없는 경우(테스트/직접 호출)만 면제하고 None을 반환한다.
+    """
+    if ctx is None:
+        return None
+    req = getattr(getattr(ctx, "request_context", None), "request", None)
+    if req is None:
+        return None
+    client = (req.query_params.get("client") or "").strip()
+    if not _VIA_RE.match(client):
+        raise ValueError(_VIA_ERROR_MSG)
+    return client
+
+
 def _resolve_user(ctx: "Context | None") -> str:
     """URL 쿼리(`?user=`)에서 사용자 키를 읽어 검증한다.
 
@@ -167,6 +197,7 @@ def namu_recall(
     Returns: {"profile": [...], "learnings": [...]}
     """
     key = _resolve_user(ctx)
+    _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
@@ -194,6 +225,7 @@ def namu_search(
     Returns: {"results": [...dicts...], "summary": {"success": N, "failure": M, "partial": K}}
     """
     key = _resolve_user(ctx)
+    _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
@@ -241,18 +273,19 @@ def namu_record(
     Returns: the new entry's ULID (str)
     """
     key = _resolve_user(ctx)
+    via = _resolve_via(ctx)  # ?client= 출처 태그 (개인용 미러 — 기록에 함께 저장)
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     if kind in ("lesson", "note"):
         return db.record(
             task, outcome, reason, task_type, verified_by,
-            _normalize_tags(tags), kind=kind, paths=paths,
+            _normalize_tags(tags), kind=kind, via=via, paths=paths,
         )
     elif kind == "fact":
         vb = verified_by if verified_by in ("human", "ai", "unverified") else "human"
         return profile.record_fact(
             subject, statement, source, supersedes=supersedes,
-            verified_by=vb, tags=_normalize_tags(tags), paths=paths,
+            verified_by=vb, tags=_normalize_tags(tags), via=via, paths=paths,
         )
     else:
         raise ValueError("kind는 'lesson'/'note'/'fact' 중 하나여야 합니다")
