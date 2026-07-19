@@ -248,6 +248,12 @@ def test_validate_settings_allows_token():
     rs.validate_settings(_settings(token="t"))  # SystemExit 없이 통과
 
 
+def test_validate_settings_allows_path_secret():
+    # v0.1.3 회귀 방지: token 없이 path_secret만 있어도(claude.ai 웹 호환 URL 경로
+    # 인증) 기동을 허용해야 한다. 이 검사를 s["token"]만 보도록 원복하면 실패한다.
+    rs.validate_settings(_settings(path_secret="s3cr3t"))  # SystemExit 없이 통과
+
+
 def test_auth_middleware_x_api_key_match():
     app = rs.AuthMiddleware(_dummy_app, token="tok123")
     client = TestClient(app)

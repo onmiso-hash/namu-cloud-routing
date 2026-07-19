@@ -263,20 +263,21 @@ def namu_record(
 # (62~77줄) / _send_json (80~89줄) / AuthMiddleware (92~130줄) /
 # _LOCALHOST_ALLOWED_HOSTS·_LOCALHOST_ALLOWED_ORIGINS (196~197줄) /
 # _build_transport_security (200~226줄)를 그대로 미러링(import 아님 — 사용자 결정).
-# path_secret은 resolve_streamable_path(경로 라우팅)에서만 쓰이고, validate_settings
-# 자체는 미러링하지 않아 token/allow_noauth만 검사한다(기존 동작 보존).
+# v0.1.3부터 path_secret(URL 경로 인증, claude.ai 웹 호환)도 유효 인증으로 인정하도록
+# validate_settings가 개인용과 동일하게 token 또는 path_secret을 검사한다(미러링).
 # ---------------------------------------------------------------------------
 def validate_settings(s: dict) -> None:
-    """무인증 공개 노출을 막는다. token이 비어 있고 allow_noauth도 아니면 기동
-    자체를 거부한다 — 값 자체는 절대 출력하지 않는다."""
+    """무인증 공개 노출을 막는다. token·path_secret 둘 다 비어 있고 allow_noauth도
+    아니면 기동 자체를 거부한다 — 값 자체는 절대 출력하지 않는다."""
     if s["allow_noauth"]:
         return
-    if s["token"]:
+    if s["token"] or s["path_secret"]:
         return
     print(
-        "[namu-routing-http] 기동 거부: 인증 설정이 없습니다.\n"
-        "  NAMU_HTTP_TOKEN=<임의의 강한 토큰 문자열>을 환경변수로 설정하세요\n"
-        "  (헤더 인증, x-api-key / Authorization: Bearer).\n"
+        "[namu-routing-http] 기동 거부: 인증 설정이 하나도 없습니다.\n"
+        "  다음 중 하나 이상을 환경변수로 설정하세요:\n"
+        "    NAMU_HTTP_TOKEN=<임의의 강한 토큰 문자열>   (헤더 인증, x-api-key / Authorization: Bearer)\n"
+        "    NAMU_HTTP_PATH_SECRET=<임의의 경로 문자열>  (시크릿 URL 경로, /mcp/<secret>)\n"
         "  로컬 테스트 목적으로만 무인증 기동을 허용하려면 NAMU_HTTP_ALLOW_NOAUTH=1을 설정하세요\n"
         "  (공개 인터넷에 노출하는 배포에서는 절대 사용하지 마세요).",
     )
