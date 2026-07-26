@@ -1,0 +1,262 @@
+"""사용자 신원 장부 — "누가 어느 installation·repo를 쓰는지"를 기록하는
+로컬 SQLite (사용자 신원 계층 1차).
+
+이 장부는 **기억이 아니라 서버 운영 데이터**다. 그래서 두 가지가 코어
+(vendor/namu-agent)와 다르다.
+
+1) 저장 위치: 전용 환경변수 `NAMU_IDENTITY_DB_PATH`로만 정한다.
+   `NAMU_STORE_ROOT` 안쪽을 기본값으로 삼지 않는다 — 그 폴더는 사용자 기억을
+   담은 **git 작업 트리**라서, 장부를 그 안에 두면 가입자 명단·GitHub
+   installation id가 공용 저장소에 커밋돼 통째로 새어 나간다. 기본값을 아예
+   두지 않고 미설정 시 RuntimeError를 던지는 것도 같은 이유다(실수로 아무 데나
+   만들어지는 것보다 기동이 멈추는 편이 안전하다).
+
+2) 시각 표기: `datetime.now(timezone.utc)` 기반 ISO 8601 **UTC**로 저장한다.
+   namu-agent 코어는 기록 시각을 `cfg.now()`(기준 시간대 Asia/Seoul)로 찍지만,
+   그건 사람이 읽는 기억 기록이기 때문이다. 이 장부는 30일 미접속 정리 같은
+   기계 판정에 쓰이므로 호스트 시간대 설정과 무관하게 비교 가능해야 한다
+   (컨테이너는 UTC, 개발기는 KST여도 같은 값이 나와야 한다).
+
+커넥션 취급: 코어 db.py는 "읽기는 conn을 받고 쓰기는 내부에서 연다"는 의도된
+분리를 쓰지만, identity는 그 코어가 아닌 신규 모듈이라 **읽기/쓰기 모두 conn을
+인자로 받는 방식으로 일관되게** 만들었다(테스트가 `:memory:`를 주입할 수 있고,
+2차 웹 라우트가 한 요청 안에서 여러 갱신을 한 트랜잭션으로 묶을 수 있다).
+편의용 `connect()` 헬퍼를 따로 둔다.
+"""
+import os
+import re
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# routing_server._USER_KEY_RE와 **같은 패턴이어야 한다**. import로 공유하지
+# 않는 이유는 순환 참조다 — 2차에서 routing_server가 identity를 import하게
+# 되므로 반대 방향 의존을 만들지 않는다. 두 정규식이 어긋나면
+# tests/test_identity.py가 실패한다.
+_USER_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    user_key        TEXT PRIMARY KEY,
+    github_id       INTEGER NOT NULL UNIQUE,
+    login           TEXT NOT NULL,
+    installation_id INTEGER,
+    repo_full_name  TEXT,
+    created_at      TEXT NOT NULL,
+    last_seen_at    TEXT NOT NULL
+);
+"""
+
+
+# ---------------------------------------------------------------------------
+# 경로/커넥션
+# ---------------------------------------------------------------------------
+def identity_db_path() -> Path:
+    """장부 파일 경로. 환경변수를 매 호출 시 읽는다(routing_server.store_root()와
+    동일한 지연 평가 원칙 — 모듈 로드 시점 상수로 굳히면 테스트 격리가 안 된다).
+
+    기본값은 의도적으로 없다(위 모듈 docstring 1번 참고).
+    """
+    raw = os.environ.get("NAMU_IDENTITY_DB_PATH", "").strip()
+    if not raw:
+        raise RuntimeError(
+            "NAMU_IDENTITY_DB_PATH 환경변수가 설정되지 않았습니다 — 사용자 신원 장부를 "
+            "둘 파일 경로를 지정하세요. NAMU_STORE_ROOT(사용자 기억 git 작업 트리) "
+            "안쪽은 절대 지정하지 마세요(가입자 명단이 공용 저장소로 커밋됩니다). "
+            "Missing NAMU_IDENTITY_DB_PATH: point it at a private volume path "
+            "OUTSIDE NAMU_STORE_ROOT."
+        )
+    return Path(raw)
+
+
+def connect(db_path: "str | Path | None" = None) -> sqlite3.Connection:
+    """장부 커넥션을 연다(테이블 없으면 만든다).
+
+    db_path를 주면 그 경로를 쓴다 — 테스트가 `:memory:`나 tmp_path를 주입하는
+    통로다. 미지정이면 `identity_db_path()`.
+    """
+    target = str(db_path) if db_path is not None else str(identity_db_path())
+    if target != ":memory:":
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(target)
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    """테이블 생성(멱등)."""
+    conn.executescript(_SCHEMA)
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 키/시각 유틸
+# ---------------------------------------------------------------------------
+def user_key_for(github_id: int) -> str:
+    """사용자 식별 키 `gh-<GitHub 숫자 id>`.
+
+    GitHub login(계정 이름)을 키로 쓰지 않는 이유가 이 함수의 존재 이유다 —
+    사용자가 이름을 바꾸면 서랍이 끊기고, 버려진 이름은 타인이 재취득할 수
+    있어 남의 서랍에 접근하는 결함이 된다. 숫자 id는 불변이다.
+    """
+    if isinstance(github_id, bool) or not isinstance(github_id, int):
+        raise ValueError(
+            "github_id는 정수여야 합니다. github_id must be an integer."
+        )
+    if github_id <= 0:
+        raise ValueError(
+            "github_id는 양수여야 합니다. github_id must be positive."
+        )
+    key = f"gh-{github_id}"
+    if not _USER_KEY_RE.match(key):
+        # 현실적으로 도달하지 않지만, 라우팅 서버의 사용자 키 검증을 통과하지
+        # 못하는 키를 장부에 넣는 사고를 여기서 끊는다(방어선 이중화).
+        raise ValueError(
+            f"생성된 user_key가 허용 형식이 아닙니다: github_id={github_id}. "
+            "Generated user_key does not match the allowed format."
+        )
+    return key
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _row_to_dict(row: "sqlite3.Row | None") -> "dict | None":
+    return dict(row) if row is not None else None
+
+
+def _validate_user_key(user_key: str) -> str:
+    if not isinstance(user_key, str) or "\x00" in user_key or not _USER_KEY_RE.match(user_key):
+        raise ValueError(
+            "user_key 형식이 올바르지 않습니다(영숫자·하이픈·언더스코어 1~64자). "
+            "Invalid user_key format."
+        )
+    return user_key
+
+
+# ---------------------------------------------------------------------------
+# 조회
+# ---------------------------------------------------------------------------
+def get_by_user_key(conn: sqlite3.Connection, user_key: str) -> "dict | None":
+    row = conn.execute(
+        "SELECT * FROM users WHERE user_key = ?", (user_key,)
+    ).fetchone()
+    return _row_to_dict(row)
+
+
+def get_by_github_id(conn: sqlite3.Connection, github_id: int) -> "dict | None":
+    row = conn.execute(
+        "SELECT * FROM users WHERE github_id = ?", (github_id,)
+    ).fetchone()
+    return _row_to_dict(row)
+
+
+# ---------------------------------------------------------------------------
+# 기록
+# ---------------------------------------------------------------------------
+def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
+    """로그인 시점에 호출한다. 없으면 새로 만들고, 있으면 **login과
+    last_seen_at만** 갱신한다.
+
+    user_key는 절대 다시 계산해 덮어쓰지 않는다(github_id가 불변이므로 값 자체는
+    같지만, "표시 이름이 바뀌어도 서랍은 그대로"라는 설계를 코드로 못 박는다).
+    installation_id/repo_full_name도 여기서 건드리지 않는다 — 앱 설치는 별개
+    단계라 로그인만 다시 했다고 연결이 풀려선 안 된다.
+    """
+    if not isinstance(login, str) or not login.strip():
+        raise ValueError(
+            "login은 비어 있을 수 없습니다. login must be a non-empty string."
+        )
+    key = user_key_for(github_id)
+    now = _utc_now_iso()
+    existing = get_by_github_id(conn, github_id)
+    if existing is None:
+        conn.execute(
+            "INSERT INTO users (user_key, github_id, login, installation_id, "
+            "repo_full_name, created_at, last_seen_at) VALUES (?, ?, ?, NULL, NULL, ?, ?)",
+            (key, github_id, login.strip(), now, now),
+        )
+    else:
+        conn.execute(
+            "UPDATE users SET login = ?, last_seen_at = ? WHERE github_id = ?",
+            (login.strip(), now, github_id),
+        )
+        key = existing["user_key"]
+    conn.commit()
+    return key
+
+
+def set_installation(
+    conn: sqlite3.Connection,
+    user_key: str,
+    installation_id: int,
+    repo_full_name: str,
+) -> None:
+    """사용자가 앱을 설치하고 기억 repo를 고른 뒤 호출한다.
+
+    등록되지 않은 user_key면 조용히 넘어가지 않고 거부한다 — 오타 하나로
+    installation이 어디에도 붙지 않은 채 "설정 완료"로 보이는 상태를 막는다.
+    """
+    _validate_user_key(user_key)
+    if isinstance(installation_id, bool) or not isinstance(installation_id, int) or installation_id <= 0:
+        raise ValueError(
+            "installation_id는 양의 정수여야 합니다. installation_id must be a positive integer."
+        )
+    if not isinstance(repo_full_name, str) or repo_full_name.count("/") != 1 or not all(
+        part.strip() for part in repo_full_name.split("/")
+    ):
+        raise ValueError(
+            "repo_full_name은 'owner/repo' 형식이어야 합니다. "
+            "repo_full_name must be 'owner/repo'."
+        )
+    cur = conn.execute(
+        "UPDATE users SET installation_id = ?, repo_full_name = ?, last_seen_at = ? "
+        "WHERE user_key = ?",
+        (installation_id, repo_full_name.strip(), _utc_now_iso(), user_key),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(
+            f"등록되지 않은 user_key입니다: {user_key} — 먼저 upsert_user로 등록하세요. "
+            "Unknown user_key: call upsert_user() first."
+        )
+    conn.commit()
+
+
+def touch(conn: sqlite3.Connection, user_key: str) -> None:
+    """접속 흔적 갱신. 30일 미접속 정리(stale_users)의 기준값을 미룬다."""
+    _validate_user_key(user_key)
+    cur = conn.execute(
+        "UPDATE users SET last_seen_at = ? WHERE user_key = ?",
+        (_utc_now_iso(), user_key),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(
+            f"등록되지 않은 user_key입니다: {user_key}. Unknown user_key."
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 정리 대상 조회
+# ---------------------------------------------------------------------------
+def stale_users(conn: sqlite3.Connection, days: int = 30) -> list[str]:
+    """last_seen_at이 N일보다 오래된 user_key 목록.
+
+    **조회만 한다** — 실제 서버 사본 삭제는 3차 user_repo.py 소관이다. 원본은
+    사용자 GitHub repo에 있으므로 서버 사본은 언제든 지워도 되지만, 지우는
+    행위와 고르는 행위를 한 함수에 섞으면 실수로 전량 삭제되는 사고를 막을 수
+    없다(조회 결과를 사람이/호출부가 확인한 뒤 지우게 분리).
+
+    저장 형식이 항상 같은 오프셋(+00:00)의 ISO 8601이라 문자열 비교로 시각
+    비교가 성립한다.
+    """
+    if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+        raise ValueError("days는 0 이상의 정수여야 합니다. days must be a non-negative int.")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT user_key FROM users WHERE last_seen_at < ? ORDER BY last_seen_at",
+        (cutoff,),
+    ).fetchall()
+    return [row["user_key"] for row in rows]
