@@ -379,3 +379,85 @@ def test_build_app_without_path_secret_keeps_mcp(monkeypatch, tmp_path):
     monkeypatch.delenv("NAMU_HTTP_PATH_SECRET", raising=False)
     rs.build_app()
     assert rs.mcp.settings.streamable_http_path == "/mcp"
+
+
+# ---------------------------------------------------------------------------
+# _AuthOrMcpDispatcher — namu-59 2차: '/auth/'는 web_auth 앱, 그 외 전부는
+# MCP+Auth 앱. 여기서는 rs.build_app()이 조립하는 실제 web_auth/FastMCP 앱이
+# 아니라 대역(dummy) ASGI 콜러블 두 개로 디스패치 로직 자체만 단위 검증한다
+# (web_auth 라우트 자체의 동작·보안은 tests/test_web_auth.py 소관).
+# ---------------------------------------------------------------------------
+def _make_labelled_app(label: str):
+    async def _app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": label.encode("utf-8")})
+
+    return _app
+
+
+def test_dispatcher_routes_auth_prefix_to_auth_app():
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    client = TestClient(dispatcher)
+    r = client.get("/auth/github/login")
+    assert r.text == "auth"
+
+
+def test_dispatcher_routes_everything_else_to_mcp_app():
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    client = TestClient(dispatcher)
+    for path in ["/mcp", "/mcp/some-secret", "/", "/authx/notreallyauth", "/auth"]:
+        r = client.get(path)
+        assert r.text == "mcp", f"path={path!r}가 auth_app으로 잘못 라우팅됐다"
+
+
+def test_dispatcher_default_is_the_authenticated_side():
+    """디스패처 생성 시 mcp_app 자리에 실제 AuthMiddleware를 넣으면, '/auth/'가
+    아닌 모든 요청이 여전히 인증을 요구해야 한다 — 기본값이 안전한 쪽인지
+    회귀 방지로 한 번 더 확인(위 테스트는 대역 앱이라 인증 자체는 검증 못 함)."""
+    auth_app = _make_labelled_app("auth")
+    mcp_app = rs.AuthMiddleware(_dummy_app, token="tok123")
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    client = TestClient(dispatcher)
+    r = client.get("/mcp")
+    assert r.status_code == 401
+    r2 = client.get("/mcp", headers={"x-api-key": "tok123"})
+    assert r2.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# lifespan 스모크 — TestClient를 **컨텍스트 매니저로 열어 lifespan을 실제로
+# 트리거**한다(2차 검수 지적 ⑤). 위의 모든 dispatcher/build_app 테스트는
+# `client.get(...)`만 호출하는데, Starlette TestClient는 컨텍스트 매니저로
+# 진입하지 않으면 ASGI lifespan(startup/shutdown) 이벤트 자체를 보내지 않는다
+# — 그래서 `_AuthOrMcpDispatcher.__call__`의 `scope.get("path", "")`를
+# `scope["path"]`로 바꿔 lifespan scope(“path” 키가 없다)에서 KeyError가 나게
+# 만들어도 그 회귀를 하나도 못 잡았다(실측: 위 테스트들은 전부 여전히 통과).
+#
+# 이 테스트 하나만 실제로 `with TestClient(...) as client:`를 쓴다 — FastMCP의
+# StreamableHTTPSessionManager는 `routing_server.mcp`에 귀속된 모듈 싱글턴이라
+# 같은 프로세스에서 lifespan을 두 번 열면(session_manager.run()이 인스턴스당
+# 한 번만 허용돼) "can only be called once per instance"로 실패한다
+# (vendor/namu-agent/namu-plugin/test_http_server.py 주석·실측과 동일한 제약).
+# 그래서 이 파일(및 이 프로젝트 tests/ 전체)에서 lifespan을 여는 곳은 여기
+# 하나뿐이어야 한다.
+# ---------------------------------------------------------------------------
+def test_build_app_lifespan_starts_and_stops_mcp_session_manager(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
+    app = rs.build_app()
+    # `with` 진입 자체가 lifespan startup을 보낸다 — 디스패처가 lifespan scope를
+    # 처리하다 예외를 내면 이 줄에서 바로 실패한다(요청을 굳이 보낼 필요도 없다).
+    with TestClient(app) as client:
+        r = client.get(
+            "/mcp", headers={"Accept": "application/json, text/event-stream"}
+        )
+        # 정확한 상태코드(호스트 헤더 검증 등 부수 조건에 따라 달라질 수 있다)를
+        # 못 박기보다, "lifespan 진입 후에도 서버가 죽지 않고 요청에 응답한다"만
+        # 확인한다 — 이 테스트의 목적은 프로토콜 성공이 아니라 lifespan 배선이다.
+        assert r.status_code != 500
+    # `with` 블록을 정상적으로 빠져나왔다는 것 자체가 shutdown도 예외 없이
+    # 끝났다는 증거다.

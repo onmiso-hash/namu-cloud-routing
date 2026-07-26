@@ -37,6 +37,7 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
 import config as cfg  # noqa: E402
 import db  # noqa: E402
 import profile  # noqa: E402
+import web_auth  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
@@ -411,9 +412,44 @@ def resolve_streamable_path(settings: dict) -> str:
     return "/mcp"
 
 
+class _AuthOrMcpDispatcher:
+    """`/auth/`(웹 로그인) vs 그 외 전부(MCP+Auth)를 가르는 순수 ASGI 3-인자
+    디스패처(AuthMiddleware와 같은 관례).
+
+    Starlette `Mount`로 감싸지 않는 이유: FastMCP의 streamable HTTP 앱은
+    lifespan 이벤트에서 세션 매니저(StreamableHTTPSessionManager)를 기동한다.
+    Mount 경유는 하위 앱까지 lifespan을 전달하는 라우팅 규칙에 기대야 해서
+    실수하기 쉽다 — 여기서는 scope 자체를 직접 봐서 실수의 여지를 없앤다.
+    lifespan scope에 대한 별도 분기가 없어도 안전한 이유: lifespan scope에는
+    "path" 키가 없어 아래 `path.startswith("/auth/")` 검사가 항상 거짓이 되고,
+    그 결과 자연히 mcp_app(=AuthMiddleware) 쪽으로 넘어간다. AuthMiddleware는
+    http가 아닌 scope를 무조건 통과시키므로(92~130줄 참고), lifespan은 결국
+    FastMCP의 streamable_http_app()에만 전달된다 — "lifespan은 MCP 앱에만"
+    요구사항이 이 else 분기 하나로 충족된다.
+
+    보안 회귀 방지: 기본값(else 분기)이 "인증 있는 쪽"이다 — 어떤 경로 조작
+    (`/auth/../mcp` 등)으로도 리터럴 문자열이 `/auth/`로 시작하지 않으면 곧장
+    AuthMiddleware를 거치므로, 인증 없이 MCP에 닿을 방법이 없다(auth_app 쪽으로
+    잘못 분류되는 경우도 마찬가지로 안전한 방향 — auth_app에는 애초에 MCP 라우트가
+    없다).
+    """
+
+    def __init__(self, auth_app, mcp_app):
+        self.auth_app = auth_app
+        self.mcp_app = mcp_app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if scope["type"] == "http" and path.startswith("/auth/"):
+            await self.auth_app(scope, receive, send)
+            return
+        await self.mcp_app(scope, receive, send)
+
+
 # ---------------------------------------------------------------------------
 # 기동 엔트리포인트 — stateless HTTP, 경로는 path_secret 유무에 따라 /mcp 또는
-# /mcp/<secret>.
+# /mcp/<secret>. `/auth/`로 시작하는 요청은 인증 우회(로그인 전이라 토큰이 없는
+# 것이 정상)로 web_auth 앱에, 그 외 전부는 기존 MCP 앱 + AuthMiddleware로 간다.
 # ---------------------------------------------------------------------------
 def build_app():
     settings = cfg.http_settings()
@@ -423,9 +459,9 @@ def build_app():
     ts = _build_transport_security(settings.get("allowed_hosts", []))
     if ts is not None:
         mcp.settings.transport_security = ts
-    app = mcp.streamable_http_app()
-    app = AuthMiddleware(app, settings["token"])
-    return app
+    mcp_app = AuthMiddleware(mcp.streamable_http_app(), settings["token"])
+    auth_app = web_auth.build_auth_app()
+    return _AuthOrMcpDispatcher(auth_app, mcp_app)
 
 
 def main() -> None:
