@@ -129,6 +129,64 @@ def test_login_sets_signed_state_cookie_with_httponly_and_samesite(client):
 
 
 # ---------------------------------------------------------------------------
+# /auth/github/install
+# ---------------------------------------------------------------------------
+def test_install_redirects_to_app_install_page_with_state(client):
+    r = client.get("/auth/github/install", follow_redirects=False)
+    assert r.status_code == 302
+    location = r.headers["location"]
+    # 외부(GitHub) 계약값 — 설치 엔드포인트 경로는 리터럴로 못 박는다.
+    assert location.startswith("https://github.com/apps/namu-memory-app/installations/new?")
+    qs = parse_qs(urlparse(location).query)
+    assert qs["state"][0]
+
+
+def test_install_sets_state_cookie_like_login(client):
+    """설치 왕복도 로그인과 같은 도장을 찍어야 한다 — 쿠키 속성이 한쪽만
+    달라지면 왕복이 조용히 깨진다."""
+    r = client.get("/auth/github/install", follow_redirects=False)
+    cookie_headers = r.headers.get_list("set-cookie")
+    assert len(cookie_headers) == 1
+    cookie_header = cookie_headers[0]
+    assert cookie_header.startswith(wa._STATE_COOKIE_NAME + "=")
+    assert "HttpOnly" in cookie_header
+    assert "samesite=lax" in cookie_header.lower()
+    assert "secure" in cookie_header.lower()
+
+
+def test_install_roundtrip_passes_callback_state_check(client, monkeypatch):
+    """설치 왕복 회귀 테스트.
+
+    2026-07-26 실사용에서 안내 화면이 GitHub 설치 주소를 직접 링크한 탓에
+    설치 후 콜백이 state 없이 돌아와 400 Bad Request로 거절됐다(로그 실측:
+    `callback?code=...&installation_id=149156594&setup_action=install`).
+    install을 경유하면 같은 왕복이 통과해 저장소 목록 조회까지 가야 한다.
+    """
+    r = client.get("/auth/github/install", follow_redirects=False)
+    state = _extract_state(r.headers["location"])
+    fake, calls = _make_fake_http_json(repos=["octocat/namu-memory"])
+    monkeypatch.setattr(wa, "_http_json", fake)
+
+    r = client.get(
+        "/auth/github/callback",
+        params={
+            "state": state,
+            "code": "goodcode",
+            "installation_id": "149156594",
+            "setup_action": "install",
+        },
+    )
+
+    assert r.status_code == 200
+    # state 검증을 통과해 설치 분기까지 들어갔다는 증거 — 저장소 목록을 실제로
+    # 조회했다(400에서 멈췄다면 이 호출 자체가 없다).
+    assert any(
+        c["url"].startswith("https://api.github.com/user/installations/149156594/")
+        for c in calls
+    )
+
+
+# ---------------------------------------------------------------------------
 # /auth/github/callback — state 검증
 # ---------------------------------------------------------------------------
 def test_callback_without_state_cookie_rejected(client):
@@ -250,9 +308,10 @@ def test_callback_login_only_return_shows_install_and_prefilled_create_links(cli
 
     assert r.status_code == 200
     body = r.text
-    # 설치 링크
-    assert "https://github.com/apps/" in body
-    assert "/installations/new" in body
+    # 설치 링크 — GitHub 설치 주소로 직접 걸면 state 쿠키를 심지 못해 설치 후
+    # 콜백이 400으로 거절된다(2026-07-26 실측). 반드시 우리 경로를 경유한다.
+    assert 'href="/auth/github/install"' in body
+    assert "https://github.com/apps/" not in body
     # 미리 채운 저장소 생성 링크 — 계약값 리터럴로 확인
     assert "https://github.com/new?" in body
     assert "name=namu-memory" in body

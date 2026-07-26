@@ -2,8 +2,10 @@
 
 1차(github_app.py/identity.py)가 "나무 서버가 그 앱임을 증명하는" 서버 대 서버
 인증을 끝냈다면, 이 모듈은 "이 브라우저를 쥔 사람이 누구인지"를 알아내는
-사용자 대 서버 인증(OAuth)이다. 라우트 3개(`/auth/github/login` →
-`/auth/github/callback` → 필요 시 `/auth/github/select-repo`)로 구성된다.
+사용자 대 서버 인증(OAuth)이다. 라우트 4개(`/auth/github/login` →
+`/auth/github/callback` → 앱 설치가 필요하면 `/auth/github/install`을 거쳐
+다시 `/auth/github/callback` → 저장소가 여럿이면 `/auth/github/select-repo`)로
+구성된다.
 
 설계 전제(핵심 — routing_server.py/github_app.py 모듈 docstring과 동일한 원칙):
   - 사용자 access token은 **저장하지 않는다**. 콜백 요청 처리 중 지역 변수로만
@@ -51,6 +53,7 @@ GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_USER_INSTALLATIONS_REPOS_URL_TMPL = (
     "https://api.github.com/user/installations/{iid}/repositories"
 )
+GITHUB_INSTALL_URL_TMPL = "https://github.com/apps/{slug}/installations/new"
 
 _STATE_COOKIE_NAME = "namu_oauth_state"
 _SESSION_COOKIE_NAME = "namu_session"
@@ -363,7 +366,10 @@ def _html_no_repos(installation_id: int) -> str:
 
 
 def _html_next_steps(user_key: str) -> str:
-    install_url = f"https://github.com/apps/{_app_slug()}/installations/new"
+    # GitHub 설치 주소로 곧장 걸지 않는다 — 링크는 쿠키를 심을 수 없어 설치 후
+    # 콜백이 state 없이 돌아오고, callback이 이를 거절해 400이 난다(실측). 우리
+    # /auth/github/install을 한 번 경유시켜 state 쿠키를 심고 보낸다.
+    install_url = "/auth/github/install"
     new_repo_url = "https://github.com/new?" + urlencode(
         {"name": "namu-memory", "visibility": "private"}
     )
@@ -398,6 +404,34 @@ async def login(request: Request) -> Response:
     # 설정 항목을 하나 줄이는 것과 동시에, "코드의 redirect_uri와 앱 등록값이
     # 어긋나 GitHub이 거부하는" 흔한 버그 클래스 자체를 제거하기 위한 의도적
     # 선택이다.
+    resp.set_cookie(
+        _STATE_COOKIE_NAME,
+        _sign_with_expiry(state, _STATE_COOKIE_TTL_SEC),
+        max_age=_STATE_COOKIE_TTL_SEC,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/auth",
+    )
+    return resp
+
+
+async def install(request: Request) -> Response:
+    """앱 설치 화면으로 보내되, login과 똑같이 state 도장을 찍어 보낸다.
+
+    설치를 마치면 GitHub은 등록된 Callback URL로 `code`·`installation_id`·
+    `setup_action=install`을 실어 돌려보낸다. 이때 state는 **설치를 시작한
+    URL에 실린 것만** 되돌아오므로, 안내 화면에서 GitHub 설치 주소를 직접
+    링크하면 state 없이 돌아와 callback이 400으로 거절한다(2026-07-26 실측).
+    쿠키는 링크가 아니라 응답만 심을 수 있어, 이 경로를 한 번 경유시키는 것이
+    설치 왕복에 도장을 붙이는 유일한 방법이다.
+
+    쿠키 설정은 login과 동일해야 한다 — 한쪽만 바꾸면 왕복이 조용히 깨진다.
+    """
+    state = secrets.token_urlsafe(24)
+    query = urlencode({"state": state})
+    url = f"{GITHUB_INSTALL_URL_TMPL.format(slug=_app_slug())}?{query}"
+    resp = RedirectResponse(url=url, status_code=302)
     resp.set_cookie(
         _STATE_COOKIE_NAME,
         _sign_with_expiry(state, _STATE_COOKIE_TTL_SEC),
@@ -542,7 +576,7 @@ async def select_repo(request: Request) -> Response:
 
 
 def build_auth_app() -> Starlette:
-    """web_auth 라우트 3개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
+    """web_auth 라우트 4개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
 
     lifespan 훅을 선언하지 않는다 — routing_server._AuthOrMcpDispatcher가
     lifespan scope를 이 앱으로 보내지 않는다(FastMCP 세션 매니저를 기동하는
@@ -551,6 +585,7 @@ def build_auth_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/auth/github/login", login, methods=["GET"]),
+            Route("/auth/github/install", install, methods=["GET"]),
             Route("/auth/github/callback", callback, methods=["GET"]),
             Route("/auth/github/select-repo", select_repo, methods=["GET"]),
         ]
