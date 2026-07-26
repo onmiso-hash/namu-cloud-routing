@@ -50,6 +50,7 @@ logger = logging.getLogger("namu.web_auth")
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
+GITHUB_USER_INSTALLATIONS_URL = "https://api.github.com/user/installations"
 GITHUB_USER_INSTALLATIONS_REPOS_URL_TMPL = (
     "https://api.github.com/user/installations/{iid}/repositories"
 )
@@ -240,6 +241,57 @@ _INSTALLATION_REPOS_PER_PAGE = 100
 _INSTALLATION_REPOS_MAX_PAGES = 50  # per_page(100) 기준 최대 5000개까지 수집
 
 
+def _fetch_user_installations(user_token: str) -> "tuple[list[int], bool]":
+    """이 사용자가 **이미 설치해 둔** installation id 목록을 전부 모은다.
+
+    GitHub은 설치가 새로 일어난 왕복에만 콜백에 `installation_id`를 실어준다.
+    이미 설치한 사용자는 설치 링크가 설치 화면이 아니라 설정 화면으로 넘어가고,
+    바꿀 것이 없으면 Save 버튼이 비활성이라 우리 서버로 되돌아오는 왕복 자체가
+    생기지 않는다(2026-07-26 실측). 그 경우 콜백은 설치 번호를 알 길이 없으므로
+    여기서 사용자 토큰으로 직접 조회한다.
+
+    응답 스키마(`total_count`/`installations`, 각 항목의 `id`)와 페이지네이션
+    기본값은 GitHub 공식 OpenAPI 스펙(`GET /user/installations`) 기준이다.
+    반환값 `(ids, truncated)`의 truncated 의미는 `_fetch_installation_repos`와 같다.
+    """
+    ids: list[int] = []
+    total_count: "int | None" = None
+    truncated = False
+    page = 1
+    while True:
+        url = (
+            f"{GITHUB_USER_INSTALLATIONS_URL}?"
+            f"{urlencode({'per_page': _INSTALLATION_REPOS_PER_PAGE, 'page': page})}"
+        )
+        status, data = _http_json("GET", url, headers=_bearer_headers(user_token))
+        if status >= 400:
+            raise RuntimeError(
+                f"GitHub 설치 목록 조회에 실패했습니다 (status={status})."
+            )
+        if total_count is None:
+            raw_total = data.get("total_count")
+            if isinstance(raw_total, int):
+                total_count = raw_total
+
+        installs_raw = data.get("installations")
+        page_ids = []
+        if isinstance(installs_raw, list):
+            for item in installs_raw:
+                if isinstance(item, dict) and isinstance(item.get("id"), int):
+                    page_ids.append(item["id"])
+        ids.extend(page_ids)
+
+        if not page_ids:
+            break
+        if total_count is not None and len(ids) >= total_count:
+            break
+        if page >= _INSTALLATION_REPOS_MAX_PAGES:
+            truncated = True
+            break
+        page += 1
+    return ids, truncated
+
+
 def _fetch_installation_repos(user_token: str, installation_id: int) -> "tuple[list[str], bool]":
     """installation이 허용한 저장소들의 `owner/repo` 목록을, 페이지네이션을 끝까지
     따라가며 전부 모은다.
@@ -348,6 +400,43 @@ def _html_select_repo(
         f"{warning}"
         "<p>앱을 설치하며 여러 저장소를 허용했습니다. 기억을 저장할 저장소를 하나 "
         "고르세요.</p>"
+        f"<ul>{''.join(items)}</ul>"
+    )
+    return _html_page("NAMU 저장소 선택", body)
+
+
+def _html_select_repo_multi(
+    user_key: str,
+    pairs: "list[tuple[int, str]]",
+    *,
+    truncated: bool = False,
+) -> str:
+    """설치가 여러 개인 계정용 — `(installation_id, repo)` 쌍 목록을 한 화면에 모은다.
+
+    개인 계정과 조직에 각각 설치한 경우처럼 설치가 둘 이상이면 저장소 이름만으로는
+    어느 설치를 거쳐야 하는지 알 수 없다. 링크마다 그 저장소가 속한 설치 번호를
+    실어 보내야 select-repo의 서명 검증이 통과한다.
+    """
+    items = []
+    for installation_id, repo in pairs:
+        sig = _repo_link_sig(user_key, installation_id, repo)
+        qs = urlencode({"installation_id": installation_id, "repo": repo, "sig": sig})
+        items.append(
+            f'<li><a href="/auth/github/select-repo?{qs}">{html.escape(repo)}</a></li>'
+        )
+    warning = ""
+    if truncated:
+        warning = (
+            '<p style="color:#b00020;"><strong>주의(Notice)</strong>: 목록이 너무 많아 '
+            "전부 불러오지 못했습니다(안전 상한 도달) — 찾는 저장소가 아래에 없다면 "
+            "GitHub 설치 설정에서 허용 범위를 좁히세요. The list was truncated "
+            "(safety limit reached); some repositories may be missing below.</p>"
+        )
+    body = (
+        "<h1>저장소 선택 (Choose a repository)</h1>"
+        f"{warning}"
+        "<p>이미 설치된 앱에서 접근 가능한 저장소를 모두 찾았습니다. 기억을 저장할 "
+        "저장소를 하나 고르세요.</p>"
         f"<ul>{''.join(items)}</ul>"
     )
     return _html_page("NAMU 저장소 선택", body)
@@ -484,6 +573,7 @@ async def callback(request: Request) -> Response:
             user_key = identity.upsert_user(conn, github_id, login_name)
 
             installation_id_raw = request.query_params.get("installation_id") or ""
+            installs_truncated = False
             if installation_id_raw:
                 try:
                     installation_id = int(installation_id_raw)
@@ -494,7 +584,19 @@ async def callback(request: Request) -> Response:
                     )
                     resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
                     return resp
+                installation_ids = [installation_id]
+            else:
+                # GitHub은 **설치가 새로 일어난** 왕복에만 installation_id를 실어
+                # 준다. 이미 설치한 사용자는 설치 링크가 설정 화면으로 넘어가고
+                # 바꿀 것이 없으면 Save가 비활성이라 되돌아오는 왕복 자체가 없어,
+                # 저장소 연결을 영영 끝낼 수 없었다(2026-07-26 실측). 그래서 여기서
+                # 사용자 토큰으로 기존 설치를 직접 조회한다.
+                installation_ids, installs_truncated = _fetch_user_installations(user_token)
 
+            if not installation_ids:
+                body_html = _html_next_steps(user_key)
+            elif len(installation_ids) == 1:
+                installation_id = installation_ids[0]
                 repos, truncated = _fetch_installation_repos(user_token, installation_id)
                 if truncated:
                     # 목록이 잘렸을 수 있으므로 몇 개가 잡혔든 자동 연결(1개일 때
@@ -512,7 +614,24 @@ async def callback(request: Request) -> Response:
                 else:
                     body_html = _html_select_repo(user_key, installation_id, repos)
             else:
-                body_html = _html_next_steps(user_key)
+                # 설치가 둘 이상(개인 계정 + 조직 등) — 저장소 이름만으로는 어느
+                # 설치를 거쳐야 하는지 알 수 없으므로 쌍으로 모아 한 화면에 낸다.
+                pairs: "list[tuple[int, str]]" = []
+                truncated = installs_truncated
+                for iid in installation_ids:
+                    repos, repos_truncated = _fetch_installation_repos(user_token, iid)
+                    truncated = truncated or repos_truncated
+                    pairs.extend((iid, repo) for repo in repos)
+                if not pairs:
+                    body_html = _html_no_repos(installation_ids[0])
+                elif len(pairs) == 1 and not truncated:
+                    # 목록이 잘리지 않은 상태에서 후보가 하나뿐이면 고를 것이
+                    # 없다 — 설치가 1개일 때와 같은 기준으로 곧장 연결한다.
+                    only_iid, only_repo = pairs[0]
+                    identity.set_installation(conn, user_key, only_iid, only_repo)
+                    body_html = _html_connected(user_key, only_repo)
+                else:
+                    body_html = _html_select_repo_multi(user_key, pairs, truncated=truncated)
     except (ValueError, RuntimeError) as exc:
         resp = PlainTextResponse(str(exc), status_code=400)
         resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")

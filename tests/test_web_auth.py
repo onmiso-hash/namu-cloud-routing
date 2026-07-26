@@ -50,6 +50,8 @@ def _make_fake_http_json(
     login_name="octocat",
     repos=None,
     repos_total_count=None,
+    installations=None,
+    repos_by_installation=None,
 ):
     """web_auth._http_json 대역. 호출 인자를 기록해 나중에 검증할 수 있게 한다.
 
@@ -74,13 +76,32 @@ def _make_fake_http_json(
             return 200, {"access_token": "user-token-abcdef", "token_type": "bearer", "scope": ""}
         if url == "https://api.github.com/user":
             return 200, {"id": github_id, "login": login_name}
+        if url.startswith("https://api.github.com/user/installations?"):
+            # 설치 목록 조회(`GET /user/installations`) — installation_id 없이
+            # 돌아온 콜백이 기존 설치를 찾을 때 쓴다. 기본값은 빈 목록이라
+            # "설치 안 함" 흐름이 그대로 유지된다.
+            qs = parse_qs(urlparse(url).query)
+            page = int(qs.get("page", ["1"])[0])
+            per_page = int(qs.get("per_page", ["30"])[0])
+            start = (page - 1) * per_page
+            all_installs = installations or []
+            page_items = all_installs[start : start + per_page]
+            return 200, {
+                "total_count": len(all_installs),
+                "installations": [{"id": i} for i in page_items],
+            }
         if url.startswith("https://api.github.com/user/installations/"):
             qs = parse_qs(urlparse(url).query)
             page = int(qs.get("page", ["1"])[0])
             per_page = int(qs.get("per_page", ["30"])[0])
             start = (page - 1) * per_page
-            page_items = all_repos[start : start + per_page]
-            total = repos_total_count if repos_total_count is not None else len(all_repos)
+            if repos_by_installation is not None:
+                iid = int(urlparse(url).path.split("/")[3])
+                all_repos_here = repos_by_installation.get(iid, [])
+            else:
+                all_repos_here = all_repos
+            page_items = all_repos_here[start : start + per_page]
+            total = repos_total_count if repos_total_count is not None else len(all_repos_here)
             return 200, {
                 "total_count": total,
                 "repositories": [{"full_name": r} for r in page_items],
@@ -318,6 +339,85 @@ def test_callback_login_only_return_shows_install_and_prefilled_create_links(cli
     assert "visibility=private" in body
     # installation_id가 없었으니 저장소 목록 조회는 아예 없었어야 한다.
     assert not any(c["url"].startswith("https://api.github.com/user/installations/") for c in calls)
+
+
+def test_callback_without_installation_id_finds_existing_installation(client, monkeypatch):
+    """이미 설치한 사용자 회귀 테스트.
+
+    2026-07-26 실사용에서, 앱을 이미 설치한 계정은 설치 링크가 설정 화면으로
+    넘어가고 바꿀 것이 없어 Save가 비활성이라 GitHub이 installation_id를 실은
+    왕복을 만들어 주지 않았다 — 저장소 연결을 영영 끝낼 수 없었다. 이제
+    콜백이 사용자 토큰으로 기존 설치를 직접 조회해 이어가야 한다.
+    """
+    state = _do_login(client)
+    fake, calls = _make_fake_http_json(
+        installations=[149156594], repos=["octocat/namu-memory"]
+    )
+    monkeypatch.setattr(wa, "_http_json", fake)
+
+    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+
+    assert r.status_code == 200
+    # 설치 하나 + 저장소 하나 = 고를 것이 없으므로 곧장 연결까지 간다.
+    assert "연결 완료" in r.text
+    assert "octocat/namu-memory" in r.text
+    assert any(c["url"].startswith("https://api.github.com/user/installations?") for c in calls)
+
+
+def test_callback_without_installation_id_multiple_repos_shows_picker(client, monkeypatch):
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(
+        installations=[149156594], repos=["octocat/namu-memory", "octocat/other"]
+    )
+    monkeypatch.setattr(wa, "_http_json", fake)
+
+    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+
+    assert r.status_code == 200
+    assert "저장소 선택" in r.text
+    assert "octocat/namu-memory" in r.text
+    assert "octocat/other" in r.text
+
+
+def test_callback_without_installation_id_multiple_installations_merged(client, monkeypatch):
+    """설치가 여러 개(개인 + 조직)면 한 화면에 모으되, 링크마다 그 저장소가 속한
+    설치 번호를 실어야 select-repo 서명 검증을 통과한다."""
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(
+        installations=[111, 222],
+        repos_by_installation={111: ["octocat/personal"], 222: ["acme/team"]},
+    )
+    monkeypatch.setattr(wa, "_http_json", fake)
+
+    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+
+    assert r.status_code == 200
+    body = r.text
+    assert "octocat/personal" in body
+    assert "acme/team" in body
+    # 각 저장소 링크가 자기 설치 번호를 달고 있는지 — 뒤바뀌면 서명이 어긋난다.
+    personal_link = re.search(r'href="([^"]*)"[^>]*>octocat/personal<', body).group(1)
+    team_link = re.search(r'href="([^"]*)"[^>]*>acme/team<', body).group(1)
+    assert parse_qs(urlparse(personal_link).query)["installation_id"] == ["111"]
+    assert parse_qs(urlparse(team_link).query)["installation_id"] == ["222"]
+
+
+def test_callback_merged_picker_links_pass_select_repo_signature(client, monkeypatch):
+    """모아 보여준 링크를 그대로 눌렀을 때 실제로 연결까지 되는지 — 서명 계산이
+    설치 번호와 짝이 맞는지를 왕복으로 확인한다."""
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(
+        installations=[111, 222],
+        repos_by_installation={111: ["octocat/personal"], 222: ["acme/team"]},
+    )
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    link = re.search(r'href="([^"]*)"[^>]*>acme/team<', r.text).group(1)
+
+    r2 = client.get(link, follow_redirects=False)
+
+    assert r2.status_code == 200
+    assert "연결 완료" in r2.text
 
 
 def test_callback_session_cookie_set_after_login(client, monkeypatch):
