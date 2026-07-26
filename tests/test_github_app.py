@@ -384,3 +384,84 @@ def test_post_json_error_does_not_leak_auth_token(fake_httpx_post):
     with pytest.raises(RuntimeError) as exc:
         ga._post_json("https://api.github.com/x", "super-secret-jwt")
     assert "super-secret-jwt" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# _get_json / repo_size_kb — namu-cloud-routing 3차 재검수 §3: clone 전 사전
+# 용량 관문이 저장소 크기를 조회하는 데 쓴다. httpx.get을 가로채는 것은
+# fake_httpx_post와 대칭 구조다(GET 버전).
+# ---------------------------------------------------------------------------
+class _FakeGetResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = str(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+@pytest.fixture
+def fake_httpx_get(monkeypatch):
+    import httpx
+
+    captured: dict = {}
+
+    def _make(status_code: int, payload: dict):
+        def _get(url, headers=None, timeout=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["timeout"] = timeout
+            return _FakeGetResponse(status_code, payload)
+
+        monkeypatch.setattr(httpx, "get", _get)
+        return captured
+
+    return _make
+
+
+def test_get_json_returns_payload_and_sends_bearer(fake_httpx_get):
+    captured = fake_httpx_get(200, {"size": 1234})
+    result = ga._get_json("https://api.github.com/repos/o/r", "jwt-value")
+    assert result == {"size": 1234}
+    assert captured["url"] == "https://api.github.com/repos/o/r"
+    assert captured["headers"]["Authorization"] == "Bearer jwt-value"
+
+
+def test_get_json_error_does_not_leak_response_body(fake_httpx_get):
+    marker = "SENSITIVE_BODY_MARKER_repo"
+    fake_httpx_get(403, {"message": marker})
+    with pytest.raises(RuntimeError) as exc:
+        ga._get_json("https://api.github.com/repos/o/r", "jwt-value")
+    message = str(exc.value)
+    assert marker not in message
+    assert "403" in message
+
+
+def test_repo_size_kb_reads_size_field(monkeypatch):
+    def fake_get_json(url, token):
+        assert url == "https://api.github.com/repos/owner/repo"
+        assert token == "installation-token"
+        return {"size": 4567, "full_name": "owner/repo"}
+
+    monkeypatch.setattr(ga, "_get_json", fake_get_json)
+    assert ga.repo_size_kb("owner/repo", "installation-token") == 4567
+
+
+def test_repo_size_kb_missing_size_raises(monkeypatch):
+    monkeypatch.setattr(ga, "_get_json", lambda url, token: {"full_name": "owner/repo"})
+    with pytest.raises(RuntimeError) as exc:
+        ga.repo_size_kb("owner/repo", "tok")
+    assert "owner/repo" in str(exc.value)
+
+
+def test_repo_size_kb_non_numeric_size_raises(monkeypatch):
+    monkeypatch.setattr(ga, "_get_json", lambda url, token: {"size": "not-a-number"})
+    with pytest.raises(RuntimeError):
+        ga.repo_size_kb("owner/repo", "tok")
+
+
+def test_repo_size_kb_zero_size_is_valid(monkeypatch):
+    # 갓 만든 빈 저장소는 size=0이다 — 0을 "값 없음"으로 취급해 잘못 거부하면 안 된다.
+    monkeypatch.setattr(ga, "_get_json", lambda url, token: {"size": 0})
+    assert ga.repo_size_kb("owner/repo", "tok") == 0

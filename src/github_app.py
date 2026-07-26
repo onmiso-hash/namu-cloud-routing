@@ -187,6 +187,59 @@ def _post_json(url: str, token: str, body: dict | None = None) -> dict:
     return resp.json()
 
 
+def _get_json(url: str, token: str) -> dict:
+    """`_post_json`의 GET 버전 — 조회 전용 엔드포인트(예: 저장소 메타데이터)에
+    쓴다. body가 없다는 점만 다르고 인증 헤더·타임아웃·오류 처리 방식은 동일하게
+    맞춘다(namu-cloud-routing 3차 재검수 §3 — 사전 용량 관문이 저장소 크기를
+    조회하려고 추가했다). httpx import를 함수 안에 두는 이유도 `_post_json`과
+    같다(테스트가 이 함수를 통째로 갈아끼울 때 httpx를 굳이 로드하지 않게).
+    """
+    import httpx
+
+    resp = httpx.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=_HTTP_TIMEOUT_SEC,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub API 호출이 실패했습니다 (status={resp.status_code}, url={url}) — "
+            "App ID/개인키/installation 설치 상태를 확인하세요. "
+            f"GitHub API request failed with status {resp.status_code}."
+        )
+    return resp.json()
+
+
+def repo_size_kb(repo_full_name: str, token: str) -> int:
+    """`GET /repos/{owner}/{repo}`의 `size` 필드(KB 단위, 히스토리를 포함한
+    저장소 전체 크기)를 installation token으로 조회한다.
+
+    `user_repo.ensure_ready`의 clone 전 사전 용량 관문이 쓴다 — 왜 KB가 우리가
+    실제로 받을 얕은 복제 크기를 과대평가하는지, 그 오차가 어느 방향으로
+    안전한지는 `user_repo._PRECLONE_MAX_DECLARED_SIZE_BYTES` 주석 참고.
+
+    `token`은 여기서 새로 발급받지 않고 호출부(`user_repo`)가 이미 들고 있는
+    installation token을 그대로 받는다 — `_post_json`이 `token`을 인자로 받는
+    기존 관례와 맞춘다(installation_token()이 자체적으로 app_jwt를 발급해
+    호출하는 것과는 계층이 다르다: 그건 "누가 나무 서버인지" 증명하는 앱 JWT,
+    이건 "그 설치에 한해 무엇을 볼 수 있는지"의 installation token).
+    """
+    url = f"{GITHUB_API_BASE}/repos/{repo_full_name}"
+    payload = _get_json(url, token)
+    size = payload.get("size") if isinstance(payload, dict) else None
+    if not isinstance(size, int) or isinstance(size, bool):
+        raise RuntimeError(
+            f"GitHub 저장소 메타데이터 응답에 size가 없습니다 (repo={repo_full_name}) — "
+            "GitHub API 응답 형식이 바뀌었을 수 있습니다. "
+            "GitHub repository metadata response did not contain a numeric size."
+        )
+    return size
+
+
 # ---------------------------------------------------------------------------
 # installation token 캐시 — 프로세스 메모리에만 둔다(디스크 기록 금지).
 # ---------------------------------------------------------------------------
