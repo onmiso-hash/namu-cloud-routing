@@ -865,13 +865,19 @@ def test_build_app_auth_route_reachable_without_token(monkeypatch, tmp_path):
     assert r.status_code == 302  # 인증 없이도 도달 — 로그인 전이라 토큰이 없는 게 정상
 
 
-def test_build_app_mcp_route_still_requires_token(monkeypatch, tmp_path):
+def test_build_app_mcp_route_rejects_request_without_per_user_secret(monkeypatch, tmp_path):
+    """열쇠 없는 맨 `/mcp`는 도구에 닿지 못한다.
+
+    namu-59 이전에는 여기서 401(토큰 없음)이 나왔다. 지금은 토큰 검사에 닿기
+    전에 사용자별 열쇠 검사가 먼저 끊으므로 404다 — 어느 쪽이든 '통과 아님'이고,
+    "없는 열쇠와 형식 오류를 구분해 주지 않는다"는 설계와 응답이 일치한다.
+    """
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("NAMU_HTTP_TOKEN", "supersecrettoken")
     app = rs.build_app()
     client = TestClient(app, base_url="https://testserver")
     r = client.get("/mcp")
-    assert r.status_code == 401
+    assert r.status_code == 404
 
 
 async def _raw_asgi_get(app, path: str) -> int:
@@ -909,13 +915,16 @@ async def _raw_asgi_get(app, path: str) -> int:
 def test_build_app_path_traversal_toward_mcp_stays_out_of_auth_app(monkeypatch, tmp_path):
     """리터럴 경로 문자열이 `/auth/`로 시작하지 않으면(정규화 여부와 무관하게)
     반드시 MCP+Auth 쪽으로 가야 한다 — '/mcp/../auth/...'는 문자 그대로
-    `/auth/`로 시작하지 않으므로 auth_app을 절대 타면 안 된다(401이어야 함,
-    200이면 우회 성공 = 회귀)."""
+    `/auth/`로 시작하지 않으므로 auth_app을 절대 타면 안 된다.
+
+    200이면 우회 성공 = 회귀. namu-59부터는 401이 아니라 404다(열쇠 조각이
+    '..'이라 장부에서 찾을 수 없어 사용자별 열쇠 검사에서 먼저 끊긴다)."""
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("NAMU_HTTP_TOKEN", "supersecrettoken")
     app = rs.build_app()
     status = asyncio.run(_raw_asgi_get(app, "/mcp/../auth/github/login"))
-    assert status == 401
+    assert status == 404
+    assert status != 200  # 우회 성공 여부가 이 테스트의 본질
 
 
 def test_build_app_path_traversal_toward_auth_never_reaches_mcp(monkeypatch, tmp_path):
@@ -928,3 +937,65 @@ def test_build_app_path_traversal_toward_auth_never_reaches_mcp(monkeypatch, tmp
     app = rs.build_app()
     status = asyncio.run(_raw_asgi_get(app, "/auth/../mcp"))
     assert status == 404
+
+
+# ---------------------------------------------------------------------------
+# 연결 완료 화면이 완성된 MCP 접속 주소를 보여준다 (namu-59)
+#
+# 이 화면이 주소를 안 주면 사용자는 주소를 조립할 방법이 없다 — 예전에는
+# "별도 대시보드에서 확인하세요"라고만 적혀 있었고 그 대시보드가 없었다.
+# ---------------------------------------------------------------------------
+def test_connected_page_shows_full_mcp_url(client, monkeypatch):
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(github_id=7007, repos=["erin/memories"])
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode", "installation_id": "777"},
+    )
+    assert r.status_code == 200
+    assert "연결 완료" in r.text
+
+    conn = identity.connect()
+    try:
+        secret = identity.get_by_github_id(conn, 7007)["mcp_secret"]
+    finally:
+        conn.close()
+
+    # 화면에 그 사용자의 진짜 열쇠가 실린 완성 주소가 통째로 있어야 한다.
+    assert f"/mcp/{secret}?client=claude" in r.text
+    assert "testserver" in r.text          # 바깥 호스트가 붙어 있어야 복붙이 된다
+    assert "대시보드에서 확인" not in r.text  # 옛 안내 문구가 남아 있으면 회귀
+
+
+def test_connected_page_url_is_per_user_not_shared(client, monkeypatch):
+    """두 사용자의 완료 화면에 서로 다른 주소가 떠야 한다 — 같은 값이 뜨면
+    전원 공용 열쇠 시절로 되돌아간 것이다."""
+    urls = []
+    for gh_id in (8008, 9009):
+        state = _do_login(client)
+        fake, _ = _make_fake_http_json(github_id=gh_id, repos=[f"u{gh_id}/mem"])
+        monkeypatch.setattr(wa, "_http_json", fake)
+        r = client.get(
+            "/auth/github/callback",
+            params={"state": state, "code": "goodcode", "installation_id": str(gh_id)},
+        )
+        match = re.search(r"https?://[^\s\"<]+/mcp/[^\s\"<]+", r.text)
+        assert match, "완료 화면에서 접속 주소를 찾지 못했다"
+        urls.append(match.group(0))
+    assert urls[0] != urls[1]
+
+
+def test_connected_page_respects_forwarded_proto(client, monkeypatch):
+    """Cloudflare 터널 뒤라 원래 scheme이 http로 보일 수 있다 — 프록시가 붙여
+    주는 x-forwarded-proto를 따르지 않으면 http:// 주소를 내주게 되고,
+    사용자가 그대로 붙이면 커넥터가 붙지 않는다."""
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(github_id=10010, repos=["frank/mem"])
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode", "installation_id": "1010"},
+        headers={"x-forwarded-proto": "https", "x-forwarded-host": "namu-cloud.onnamu.kr"},
+    )
+    assert "https://namu-cloud.onnamu.kr/mcp/" in r.text

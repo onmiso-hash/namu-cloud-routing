@@ -25,6 +25,7 @@
 """
 import os
 import re
+import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,16 @@ from pathlib import Path
 # tests/test_identity.py가 실패한다.
 _USER_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# MCP 접속 열쇠(사용자별). token_urlsafe(32)의 출력 문자 집합과 길이(43자)를
+# 그대로 받는 패턴이다. user_key와 달리 **추측 불가능해야** 하므로 짧은 값은
+# 형식 검사 단계에서 거부한다 — 라우팅 서버가 경로 조각을 그대로 이 패턴에
+# 물려 조회 전에 걸러낸다(DB를 두드리기 전 1차 방어선).
+_MCP_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+
+# mcp_secret에 UNIQUE 제약을 컬럼 정의가 아니라 별도 인덱스로 거는 이유:
+# SQLite의 ALTER TABLE ADD COLUMN은 UNIQUE 컬럼 추가를 허용하지 않는다. 이미
+# 가입자가 들어 있는 운영 장부(namu_cloud_identity 볼륨)를 마이그레이션해야
+# 하므로, 신규 생성과 기존 이관이 **같은 모양**이 되도록 양쪽 다 인덱스로 건다.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_key        TEXT PRIMARY KEY,
@@ -43,9 +54,20 @@ CREATE TABLE IF NOT EXISTS users (
     installation_id INTEGER,
     repo_full_name  TEXT,
     created_at      TEXT NOT NULL,
-    last_seen_at    TEXT NOT NULL
+    last_seen_at    TEXT NOT NULL,
+    mcp_secret      TEXT
 );
 """
+
+# 색인은 _SCHEMA와 **반드시 분리해서** 실행해야 한다. 옛 장부(mcp_secret 칸이
+# 없는 표)에서는 CREATE TABLE IF NOT EXISTS가 아무것도 하지 않고 넘어가므로,
+# 같은 스크립트에 색인이 붙어 있으면 "no such column: mcp_secret"으로 그 자리에서
+# 깨진다 — 즉 이관해야 할 장부가 이관 시작도 못 하고 죽는다. 칸을 먼저 붙이고
+# 그 다음에 색인을 건다.
+_MCP_SECRET_INDEX_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mcp_secret "
+    "ON users (mcp_secret) WHERE mcp_secret IS NOT NULL"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +107,21 @@ def connect(db_path: "str | Path | None" = None) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """테이블 생성(멱등)."""
+    """테이블 생성(멱등) + 기존 장부 이관.
+
+    `CREATE TABLE IF NOT EXISTS`는 **이미 있는 표에 새 칸을 붙여주지 않는다** —
+    운영 중인 장부(namu_cloud_identity 볼륨)에는 mcp_secret 칸이 없는 채로
+    가입자가 들어 있으므로, 칸이 없으면 여기서 붙이고 빈 값을 채운다. 이
+    이관이 없으면 기존 가입자는 접속 열쇠가 영영 NULL이라 로그인은 되는데
+    MCP 주소는 못 받는 상태로 남는다.
+    """
     conn.executescript(_SCHEMA)
+    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+    if "mcp_secret" not in existing_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN mcp_secret TEXT")
+    conn.execute(_MCP_SECRET_INDEX_SQL)
     conn.commit()
+    backfill_mcp_secrets(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +151,32 @@ def user_key_for(github_id: int) -> str:
             "Generated user_key does not match the allowed format."
         )
     return key
+
+
+def generate_mcp_secret() -> str:
+    """사용자별 MCP 접속 열쇠를 새로 만든다.
+
+    이 값이 곧 신분증이다 — 라우팅 서버는 주소 경로에 실려 온 이 열쇠 하나로
+    "누구의 서랍인가"를 판정하고, 요청자가 스스로 밝히는 이름표(`?user=`)는
+    더 이상 믿지 않는다. 따라서 **추측·열거가 불가능해야** 하며, user_key
+    (`gh-<GitHub 숫자 id>`, 공개 정보라 누구나 알아낼 수 있다)를 재료로 삼아선
+    안 된다. token_urlsafe(32) = 256비트 난수, URL 경로에 그대로 실을 수 있는
+    문자만 나온다.
+    """
+    return secrets.token_urlsafe(32)
+
+
+def _validate_mcp_secret(mcp_secret: str) -> str:
+    if (
+        not isinstance(mcp_secret, str)
+        or "\x00" in mcp_secret
+        or not _MCP_SECRET_RE.match(mcp_secret)
+    ):
+        raise ValueError(
+            "mcp_secret 형식이 올바르지 않습니다(영숫자·하이픈·언더스코어 32~128자). "
+            "Invalid mcp_secret format."
+        )
+    return mcp_secret
 
 
 def _utc_now_iso() -> str:
@@ -153,6 +213,27 @@ def get_by_github_id(conn: sqlite3.Connection, github_id: int) -> "dict | None":
     return _row_to_dict(row)
 
 
+def get_by_mcp_secret(conn: sqlite3.Connection, mcp_secret: str) -> "dict | None":
+    """MCP 접속 열쇠로 사용자를 찾는다 — 라우팅 서버의 인증 진입점.
+
+    형식이 틀린 값은 DB를 두드리지 않고 곧장 None으로 떨군다(예외를 던지지
+    않는 이유: 호출부인 문지기는 "형식 오류"와 "없는 열쇠"를 구분해 알려주면
+    안 된다 — 구분해 주면 공격자에게 열거 단서를 주므로 둘 다 똑같이 404다).
+
+    빈 값/NULL 대조로 미발급 사용자가 걸려 나오는 사고를 막기 위해
+    `mcp_secret IS NOT NULL` 조건을 명시한다.
+    """
+    try:
+        _validate_mcp_secret(mcp_secret)
+    except ValueError:
+        return None
+    row = conn.execute(
+        "SELECT * FROM users WHERE mcp_secret = ? AND mcp_secret IS NOT NULL",
+        (mcp_secret,),
+    ).fetchone()
+    return _row_to_dict(row)
+
+
 # ---------------------------------------------------------------------------
 # 기록
 # ---------------------------------------------------------------------------
@@ -164,6 +245,11 @@ def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
     같지만, "표시 이름이 바뀌어도 서랍은 그대로"라는 설계를 코드로 못 박는다).
     installation_id/repo_full_name도 여기서 건드리지 않는다 — 앱 설치는 별개
     단계라 로그인만 다시 했다고 연결이 풀려선 안 된다.
+
+    mcp_secret도 같은 원칙이다 — 신규 가입 때 한 번 발급하고, 재로그인 때는
+    **절대 새로 굴리지 않는다.** 매번 갈면 사용자가 클로드에 등록해 둔 커넥터
+    주소가 로그인할 때마다 죽는다(재발급이 필요하면 별도 경로로 명시적으로
+    한다). 다만 이관 등으로 비어 있으면 그때는 채운다.
     """
     if not isinstance(login, str) or not login.strip():
         raise ValueError(
@@ -175,8 +261,9 @@ def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
     if existing is None:
         conn.execute(
             "INSERT INTO users (user_key, github_id, login, installation_id, "
-            "repo_full_name, created_at, last_seen_at) VALUES (?, ?, ?, NULL, NULL, ?, ?)",
-            (key, github_id, login.strip(), now, now),
+            "repo_full_name, created_at, last_seen_at, mcp_secret) "
+            "VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)",
+            (key, github_id, login.strip(), now, now, generate_mcp_secret()),
         )
     else:
         conn.execute(
@@ -184,8 +271,34 @@ def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
             (login.strip(), now, github_id),
         )
         key = existing["user_key"]
+        if not existing.get("mcp_secret"):
+            conn.execute(
+                "UPDATE users SET mcp_secret = ? WHERE user_key = ? AND "
+                "(mcp_secret IS NULL OR mcp_secret = '')",
+                (generate_mcp_secret(), key),
+            )
     conn.commit()
     return key
+
+
+def backfill_mcp_secrets(conn: sqlite3.Connection) -> int:
+    """접속 열쇠가 비어 있는 가입자에게 발급한다. 발급한 명수를 반환(멱등).
+
+    `init_db`가 매 접속마다 부르므로, 이 기능 이전에 가입한 사용자도 서버가
+    한 번 뜨는 것만으로 열쇠를 갖게 된다. 이미 값이 있는 사람은 건드리지
+    않는다 — 덮어쓰면 등록해 둔 커넥터 주소가 죽는다.
+    """
+    rows = conn.execute(
+        "SELECT user_key FROM users WHERE mcp_secret IS NULL OR mcp_secret = ''"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE users SET mcp_secret = ? WHERE user_key = ?",
+            (generate_mcp_secret(), row["user_key"]),
+        )
+    if rows:
+        conn.commit()
+    return len(rows)
 
 
 def set_installation(

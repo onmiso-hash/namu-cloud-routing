@@ -351,8 +351,14 @@ def _fetch_installation_repos(user_token: str, installation_id: int) -> "tuple[l
 
 
 # ---------------------------------------------------------------------------
-# 화면 — 최소 인라인 HTML. 외부 CSS/JS/CDN 없음. MCP 접속 주소는 표시하지 않는다
-# (namu-60 대시보드 소관).
+# 화면 — 최소 인라인 HTML. 외부 CSS/JS/CDN 없음.
+#
+# 연결 완료 화면은 **완성된 MCP 접속 주소를 그대로 보여준다**(namu-59). 이전에는
+# "별도 대시보드에서 확인하세요"라고만 적어 두었는데, 그 대시보드(namu-60)가
+# 아직 없어서 사용자가 주소를 조립할 방법이 없었다 — 서버가 아는 값을 안 알려
+# 주고 사용자더러 찾아오라고 하는 상태였다. 사용자별 열쇠로 바뀐 지금은 그
+# 값이 그 사람 전용이므로 본인 화면에 띄워도 안전하다(예전 공용 열쇠였다면
+# 로그인한 사람 전원에게 남의 서랍 여는 열쇠를 나눠주는 셈이라 불가능했다).
 # ---------------------------------------------------------------------------
 def _html_page(title: str, body_html: str) -> str:
     return (
@@ -363,15 +369,81 @@ def _html_page(title: str, body_html: str) -> str:
     )
 
 
-def _html_connected(user_key: str, repo_full_name: str) -> str:
-    body = (
-        "<h1>연결 완료 (Connected)</h1>"
-        f"<p>사용자 키: <code>{html.escape(user_key)}</code></p>"
-        f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>"
-        "<p>이제부터 이 저장소가 회원님 기억의 원본입니다. "
-        "MCP 접속 주소는 별도 대시보드에서 확인하세요.</p>"
+def _public_origin(request: Request) -> str:
+    """이 서비스의 바깥 주소(`https://호스트`)를 요청에서 알아낸다.
+
+    전용 환경변수를 새로 만들지 않는 이유가 있다 — 이 배포는 값을 .env에 넣는
+    것과 컨테이너에 전달되는 것이 별개라(docker-compose의 environment 블록에
+    같은 이름을 또 적어야 한다) 한쪽만 하면 조용히 빈 값이 되는 사고가 이
+    프로젝트에서 반복됐다. 요청에서 끌어내면 그 배선 자체가 필요 없다.
+
+    Cloudflare 터널 뒤라 원래 scheme이 http로 보일 수 있으므로 프록시가 붙여
+    주는 x-forwarded-proto를 우선한다.
+    """
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    scheme = forwarded_proto if forwarded_proto in ("http", "https") else request.url.scheme
+    host = (
+        (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+        or (request.headers.get("host") or "").strip()
+        or request.url.netloc
     )
-    return _html_page("NAMU 연결 완료", body)
+    return f"{scheme}://{host}"
+
+
+def _mcp_url_for(request: Request, conn, user_key: str) -> "str | None":
+    """그 사용자의 완성된 MCP 접속 주소. 열쇠가 아직 없으면 None."""
+    row = identity.get_by_user_key(conn, user_key)
+    mcp_secret = (row or {}).get("mcp_secret")
+    if not mcp_secret:
+        return None
+    return f"{_public_origin(request)}/mcp/{mcp_secret}?client=claude"
+
+
+def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = None) -> str:
+    body = [
+        "<h1>연결 완료 (Connected)</h1>",
+        f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
+        "<p>이제부터 이 저장소가 회원님 기억의 원본입니다.</p>",
+    ]
+    if mcp_url:
+        safe_url = html.escape(mcp_url)
+        body += [
+            "<h2>접속 주소</h2>",
+            "<p>아래 주소를 복사해 사용하는 AI의 커넥터에 붙여 넣으세요.</p>",
+            f'<textarea id="mcp-url" readonly rows="3" onclick="this.select()" '
+            f'style="width:100%;box-sizing:border-box;font-family:monospace;'
+            f'font-size:13px;padding:8px;">{safe_url}</textarea>',
+            '<p><button type="button" id="copy-btn" style="padding:8px 16px;'
+            'font-size:15px;cursor:pointer;">주소 복사</button> '
+            '<span id="copy-msg"></span></p>',
+            "<p><small>이 주소가 회원님의 신분증입니다 — <b>남에게 알려주지 "
+            "마세요.</b> 아는 사람은 회원님 기억을 읽고 쓸 수 있습니다.</small></p>",
+            "<p><small>클로드가 아닌 다른 AI에 붙일 때는 주소 끝의 "
+            "<code>client=claude</code>를 그 AI 이름으로 바꾸세요"
+            "(예: <code>client=chatgpt</code>). 나중에 '어느 AI가 남긴 기억인지' "
+            "골라 찾을 때 쓰는 이름표라, 한 번 정하면 계속 같은 값을 쓰셔야 "
+            "합니다.</small></p>",
+            # 복사 버튼. 외부 스크립트 없음. navigator.clipboard는 보안 컨텍스트
+            # (https)에서만 있으므로, 없으면 execCommand로 물러난다.
+            "<script>"
+            "document.getElementById('copy-btn').addEventListener('click',function(){"
+            "var t=document.getElementById('mcp-url');t.select();"
+            "var done=function(ok){document.getElementById('copy-msg').textContent="
+            "ok?'복사했습니다':'복사하지 못했습니다 — 직접 선택해 복사하세요';};"
+            "if(navigator.clipboard&&navigator.clipboard.writeText){"
+            "navigator.clipboard.writeText(t.value).then(function(){done(true);},"
+            "function(){done(false);});}else{try{done(document.execCommand('copy'));}"
+            "catch(e){done(false);}}});"
+            "</script>",
+        ]
+    else:
+        # 접속 열쇠가 없는 상태(이관 실패 등). 조용히 빈 화면을 내지 않는다.
+        body.append(
+            "<p><b>접속 주소를 만들지 못했습니다.</b> 로그아웃 후 다시 로그인해 "
+            "주세요. 계속 같은 화면이 나오면 관리자에게 알려주세요.</p>"
+        )
+    body.append(f"<p><small>사용자 키: <code>{html.escape(user_key)}</code></small></p>")
+    return _html_page("NAMU 연결 완료", "".join(body))
 
 
 def _html_select_repo(
@@ -608,7 +680,9 @@ async def callback(request: Request) -> Response:
                     )
                 elif len(repos) == 1:
                     identity.set_installation(conn, user_key, installation_id, repos[0])
-                    body_html = _html_connected(user_key, repos[0])
+                    body_html = _html_connected(
+                        user_key, repos[0], _mcp_url_for(request, conn, user_key)
+                    )
                 elif len(repos) == 0:
                     body_html = _html_no_repos(installation_id)
                 else:
@@ -629,7 +703,9 @@ async def callback(request: Request) -> Response:
                     # 없다 — 설치가 1개일 때와 같은 기준으로 곧장 연결한다.
                     only_iid, only_repo = pairs[0]
                     identity.set_installation(conn, user_key, only_iid, only_repo)
-                    body_html = _html_connected(user_key, only_repo)
+                    body_html = _html_connected(
+                        user_key, only_repo, _mcp_url_for(request, conn, user_key)
+                    )
                 else:
                     body_html = _html_select_repo_multi(user_key, pairs, truncated=truncated)
     except (ValueError, RuntimeError) as exc:
@@ -688,10 +764,11 @@ async def select_repo(request: Request) -> Response:
     try:
         with closing(identity.connect()) as conn:
             identity.set_installation(conn, user_key, installation_id, repo)
+            mcp_url = _mcp_url_for(request, conn, user_key)
     except ValueError as exc:
         return PlainTextResponse(str(exc), status_code=400)
 
-    return HTMLResponse(_html_connected(user_key, repo))
+    return HTMLResponse(_html_connected(user_key, repo, mcp_url))
 
 
 def build_auth_app() -> Starlette:

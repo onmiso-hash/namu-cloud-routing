@@ -241,3 +241,122 @@ def test_connect_creates_parent_dirs_and_persists(monkeypatch, tmp_path):
         assert identity.get_by_user_key(c2, key)["login"] == "onmiso"
     finally:
         c2.close()
+
+
+# ---------------------------------------------------------------------------
+# mcp_secret — 사용자별 MCP 접속 열쇠 (namu-59)
+#
+# 이 열쇠가 곧 신분증이다. 지켜야 할 성질이 넷 있고 아래 테스트가 하나씩 맡는다.
+#   ① 가입하면 반드시 발급된다(없으면 주소를 못 받는다)
+#   ② 사람마다 다르고 추측 불가능하다
+#   ③ 재로그인해도 안 바뀐다(바뀌면 등록해 둔 커넥터가 죽는다)
+#   ④ 옛 장부에도 소급 발급된다(이 기능 이전 가입자가 영영 못 쓰게 되면 안 된다)
+# ---------------------------------------------------------------------------
+def test_signup_issues_mcp_secret(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    row = identity.get_by_user_key(conn, key)
+    assert row["mcp_secret"], "가입했는데 접속 열쇠가 발급되지 않았다"
+
+
+def test_mcp_secret_is_long_and_url_safe(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    secret = identity.get_by_user_key(conn, key)["mcp_secret"]
+    # 길이가 짧으면 추측·열거가 가능해진다. URL 경로에 그대로 실리므로
+    # 슬래시·물음표 같은 문자가 섞이면 라우팅이 깨진다.
+    assert len(secret) >= 32
+    assert identity._MCP_SECRET_RE.match(secret)
+
+
+def test_mcp_secret_is_not_derived_from_public_user_key(conn):
+    """user_key(gh-<GitHub 숫자 id>)는 공개 정보다 — 열쇠가 그것을 재료로
+    만들어졌다면 누구나 남의 열쇠를 계산해낼 수 있다."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    secret = identity.get_by_user_key(conn, key)["mcp_secret"]
+    assert "261774889" not in secret
+    assert key not in secret
+
+
+def test_two_users_get_different_secrets(conn):
+    key_a = identity.upsert_user(conn, 111, "alice")
+    key_b = identity.upsert_user(conn, 222, "bob")
+    secret_a = identity.get_by_user_key(conn, key_a)["mcp_secret"]
+    secret_b = identity.get_by_user_key(conn, key_b)["mcp_secret"]
+    assert secret_a != secret_b
+
+
+def test_relogin_does_not_rotate_secret(conn):
+    """재로그인 때 열쇠를 새로 굴리면 사용자가 클로드에 등록해 둔 커넥터
+    주소가 조용히 죽는다 — 이 프로젝트에서 가장 티 안 나는 회귀 후보다."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    first = identity.get_by_user_key(conn, key)["mcp_secret"]
+    identity.upsert_user(conn, 261774889, "onmiso-renamed")
+    assert identity.get_by_user_key(conn, key)["mcp_secret"] == first
+
+
+def test_get_by_mcp_secret_finds_the_owner(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    secret = identity.get_by_user_key(conn, key)["mcp_secret"]
+    assert identity.get_by_mcp_secret(conn, secret)["user_key"] == key
+
+
+def test_get_by_mcp_secret_rejects_unknown_and_malformed(conn):
+    identity.upsert_user(conn, 261774889, "onmiso")
+    assert identity.get_by_mcp_secret(conn, "a" * 43) is None       # 없는 열쇠
+    assert identity.get_by_mcp_secret(conn, "short") is None        # 형식 미달
+    assert identity.get_by_mcp_secret(conn, "") is None
+    assert identity.get_by_mcp_secret(conn, "..") is None
+    assert identity.get_by_mcp_secret(conn, "a/b" + "c" * 40) is None
+
+
+def test_get_by_mcp_secret_never_matches_users_without_secret(conn):
+    """빈 값/NULL 대조로 미발급 사용자가 걸려 나오면 '아무 열쇠나 통과'가 된다."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    conn.execute("UPDATE users SET mcp_secret = NULL WHERE user_key = ?", (key,))
+    conn.commit()
+    assert identity.get_by_mcp_secret(conn, "") is None
+    assert identity.get_by_mcp_secret(conn, "x" * 43) is None
+
+
+def test_legacy_ledger_without_column_is_migrated(tmp_path):
+    """이 기능 이전에 만들어진 장부(mcp_secret 칸 자체가 없음)를 그대로 열면
+    칸이 생기고 기존 가입자에게 열쇠가 소급 발급돼야 한다.
+
+    운영 장부는 볼륨(namu_cloud_identity)에 남아 있으므로 이 이관이 없으면
+    기존 가입자는 로그인은 되는데 주소는 영영 못 받는 상태가 된다.
+    """
+    import sqlite3
+
+    target = tmp_path / "legacy.db"
+    old = sqlite3.connect(str(target))
+    old.executescript(
+        """
+        CREATE TABLE users (
+            user_key        TEXT PRIMARY KEY,
+            github_id       INTEGER NOT NULL UNIQUE,
+            login           TEXT NOT NULL,
+            installation_id INTEGER,
+            repo_full_name  TEXT,
+            created_at      TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL
+        );
+        INSERT INTO users VALUES
+            ('gh-261774889', 261774889, 'onmiso', NULL, NULL, '2026-01-01', '2026-01-01');
+        """
+    )
+    old.commit()
+    old.close()
+
+    c = identity.connect(target)
+    try:
+        row = identity.get_by_user_key(c, "gh-261774889")
+        assert row["mcp_secret"], "옛 장부의 기존 가입자에게 열쇠가 발급되지 않았다"
+        assert identity.get_by_mcp_secret(c, row["mcp_secret"])["user_key"] == "gh-261774889"
+    finally:
+        c.close()
+
+
+def test_backfill_is_idempotent_and_preserves_existing(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    secret = identity.get_by_user_key(conn, key)["mcp_secret"]
+    assert identity.backfill_mcp_secrets(conn) == 0  # 채울 것이 없다
+    assert identity.get_by_user_key(conn, key)["mcp_secret"] == secret

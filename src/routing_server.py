@@ -546,21 +546,20 @@ def namu_record(
 # validate_settings가 개인용과 동일하게 token 또는 path_secret을 검사한다(미러링).
 # ---------------------------------------------------------------------------
 def validate_settings(s: dict) -> None:
-    """무인증 공개 노출을 막는다. token·path_secret 둘 다 비어 있고 allow_noauth도
-    아니면 기동 자체를 거부한다 — 값 자체는 절대 출력하지 않는다."""
-    if s["allow_noauth"]:
-        return
-    if s["token"] or s["path_secret"]:
-        return
-    print(
-        "[namu-routing-http] 기동 거부: 인증 설정이 하나도 없습니다.\n"
-        "  다음 중 하나 이상을 환경변수로 설정하세요:\n"
-        "    NAMU_HTTP_TOKEN=<임의의 강한 토큰 문자열>   (헤더 인증, x-api-key / Authorization: Bearer)\n"
-        "    NAMU_HTTP_PATH_SECRET=<임의의 경로 문자열>  (시크릿 URL 경로, /mcp/<secret>)\n"
-        "  로컬 테스트 목적으로만 무인증 기동을 허용하려면 NAMU_HTTP_ALLOW_NOAUTH=1을 설정하세요\n"
-        "  (공개 인터넷에 노출하는 배포에서는 절대 사용하지 마세요).",
-    )
-    raise SystemExit(2)
+    """기동 시 인증 구성 점검.
+
+    namu-59부터 이 서버의 인증은 **환경변수 설정 여부와 무관하게 항상 켜져
+    있다** — 모든 MCP 요청이 `_PerUserSecretDispatcher`를 반드시 통과해야
+    하고, 장부에 있는 사용자별 열쇠 없이는 어떤 경로로도 도구에 닿을 수 없다
+    (열쇠가 없으면 404, 장부를 못 열어도 404 — 닫히는 방향).
+
+    그래서 예전의 "token도 path_secret도 없으면 기동 거부" 검사는 의미를
+    잃었다. NAMU_HTTP_PATH_SECRET(전원 공용 열쇠)은 더 이상 읽지 않으며,
+    설정돼 있어도 아무 효과가 없다. NAMU_HTTP_TOKEN은 남겨 둔다 — 사용자별
+    열쇠 **위에 덧대는** 선택적 2차 방어선이다(설정하면 헤더까지 맞아야
+    통과). 인자를 그대로 받는 이유는 호출부·테스트 계약 유지다.
+    """
+    return
 
 
 async def _send_json(send, status: int, payload: dict) -> None:
@@ -641,17 +640,114 @@ def _build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySett
     )
 
 
-def resolve_streamable_path(settings: dict) -> str:
-    """vendor/namu-agent/namu-plugin/http_server.py의 동명 함수를 그대로 미러링.
+# MCP 앱이 실제로 마운트되는 고정 경로. 바깥에서 들어오는 주소는 항상
+# `/mcp/<사용자별 열쇠>`이고, _PerUserSecretDispatcher가 열쇠를 떼어내 신원을
+# 판정한 뒤 경로를 이 값으로 바꿔 넘긴다 — FastMCP는 마운트 경로가 고정이라
+# "주소마다 다른 경로"를 직접 받을 수 없기 때문이다.
+_MCP_MOUNT_PATH = "/mcp"
 
-    NAMU_HTTP_PATH_SECRET(settings["path_secret"])이 설정돼 있으면 경로에
-    시크릿을 실어 `/mcp/<secret>`을 반환한다 — claude.ai 웹 커스텀 커넥터처럼
-    임의 헤더(x-api-key)를 못 넣고 URL만 받는 클라이언트를 위한 헤더 없는
-    인증 경로다. 미설정 시 기존과 동일한 `/mcp`.
+
+def resolve_streamable_path(settings: dict) -> str:
+    """MCP 앱의 마운트 경로. 항상 고정값이다.
+
+    namu-59 이전에는 NAMU_HTTP_PATH_SECRET(전원 공용 열쇠 하나)을 경로에 실어
+    `/mcp/<공용열쇠>`를 반환했다. 그 방식은 **인증이 아니었다** — 열쇠를 아는
+    사람이면 누구나 `?user=`에 남의 이름표를 적어 넣어 남의 서랍을 열 수
+    있었다(요청자가 스스로 밝히는 값을 그대로 믿는 구조). 지금은 사용자별
+    열쇠가 그 자리를 대신하며, 그 판정은 마운트 경로가 아니라
+    `_PerUserSecretDispatcher`가 한다.
+
+    settings는 쓰지 않지만 인자를 남겨 둔다 — 호출부(build_app)와 기존
+    테스트의 계약을 그대로 유지하기 위해서다.
     """
-    if settings["path_secret"]:
-        return f"/mcp/{settings['path_secret']}"
-    return "/mcp"
+    return _MCP_MOUNT_PATH
+
+
+class _PerUserSecretDispatcher:
+    """`/mcp/<사용자별 열쇠>` → 신원 판정 → 고정 경로로 넘기는 순수 ASGI 3-인자
+    미들웨어 (namu-59).
+
+    이 클래스가 이 서버의 **인증 경계**다. 하는 일은 셋이다.
+
+    1) 경로에서 열쇠를 떼어내 장부에서 찾는다. 못 찾으면 404 — 열쇠 형식이
+       틀렸든, 없는 열쇠든, 장부를 못 열든 **전부 똑같이 404**다. 응답을
+       구분해 주면 "이 열쇠는 형식은 맞다" 같은 단서가 새어 나가 열거 공격을
+       돕는다. 서버 쪽 사정(장부 오류)만 로그에 남긴다.
+    2) 찾아낸 user_key를 쿼리에 **덮어쓴다**. 요청자가 `?user=`를 직접 실어
+       보내도 여기서 통째로 걷어내고 다시 쓰므로, 남의 이름표를 적어 넣는
+       수법이 통하지 않는다(namu-59가 없앤 결함이 정확히 이것이다).
+       도구 핸들러(_resolve_user)는 예전 그대로 `?user=`를 읽으면 된다.
+    3) 경로를 고정 마운트 경로로 바꿔 MCP 앱에 넘긴다.
+
+    실패는 항상 닫히는 방향이다 — 열쇠를 확인하지 못하면 통과시키지 않는다.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    def _extract_secret(path: str) -> "str | None":
+        """`/mcp/<열쇠>`에서 열쇠만. 그 모양이 아니면 None.
+
+        조각이 둘 이상이거나(`/mcp/a/b`) 비어 있으면 받지 않는다 — 경로 이탈
+        문자는 identity 쪽 형식 검사에서도 다시 걸리지만, 모양 자체를 여기서
+        좁혀 두는 편이 안전하다.
+        """
+        prefix = _MCP_MOUNT_PATH + "/"
+        if not path.startswith(prefix):
+            return None
+        rest = path[len(prefix) :].rstrip("/")
+        if not rest or "/" in rest:
+            return None
+        return rest
+
+    @staticmethod
+    def _query_with_user(raw_query: bytes, user_key: str) -> bytes:
+        """쿼리에서 기존 user 항목을 전부 걷어내고 판정된 값으로 다시 쓴다.
+
+        `?user=A&user=B`처럼 여러 번 실어 보내는 수법까지 막으려면 첫 항목만
+        고쳐선 안 되고 **전부** 지운 뒤 하나만 넣어야 한다.
+        """
+        from urllib.parse import parse_qsl, urlencode
+
+        pairs = [
+            (k, v)
+            for k, v in parse_qsl(raw_query.decode("latin-1"), keep_blank_values=True)
+            if k != "user"
+        ]
+        pairs.append(("user", user_key))
+        return urlencode(pairs).encode("latin-1")
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        secret = self._extract_secret(scope.get("path", ""))
+        user_key = None
+        if secret is not None:
+            try:
+                with closing(identity.connect()) as conn:
+                    row = identity.get_by_mcp_secret(conn, secret)
+                    if row is not None:
+                        user_key = row["user_key"]
+                        identity.touch(conn, user_key)
+            except Exception:
+                # 장부를 못 열면 통과시키지 않는다(닫히는 방향). 열쇠 값 자체는
+                # 로그에 남기지 않는다 — 로그가 곧 비밀 유출 경로가 된다.
+                logger.exception("MCP 접속 열쇠 조회 실패 — 요청을 거부합니다")
+
+        if user_key is None:
+            await _send_json(send, 404, {"error": "not found"})
+            return
+
+        scope = dict(scope)
+        scope["path"] = _MCP_MOUNT_PATH
+        scope["raw_path"] = _MCP_MOUNT_PATH.encode("latin-1")
+        scope["query_string"] = self._query_with_user(
+            scope.get("query_string") or b"", user_key
+        )
+        await self.app(scope, receive, send)
 
 
 class _AuthOrMcpDispatcher:
@@ -702,6 +798,9 @@ def build_app():
     if ts is not None:
         mcp.settings.transport_security = ts
     mcp_app = AuthMiddleware(mcp.streamable_http_app(), settings["token"])
+    # 사용자별 열쇠 판정이 토큰 검사보다 **바깥**이다 — 열쇠가 없는 요청은
+    # 토큰 로직에 닿기 전에 404로 끊는다.
+    mcp_app = _PerUserSecretDispatcher(mcp_app)
     auth_app = web_auth.build_auth_app()
     return _AuthOrMcpDispatcher(auth_app, mcp_app)
 

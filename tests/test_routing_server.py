@@ -6,8 +6,10 @@ config/db/profile 자체가 import 시 side-effect 없음 — mcp_server.py의
 `_ensure_db()` 같은 부팅 로직은 미러링하지 않았다), in-process import로 충분하다.
 매 테스트는 `NAMU_STORE_ROOT`를 tmp_path 하위로 monkeypatch해 STORE_ROOT를 격리한다.
 """
+import asyncio
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -318,24 +320,17 @@ def _settings(**overrides) -> dict:
     return base
 
 
-def test_validate_settings_rejects_noauth():
-    with pytest.raises(SystemExit) as exc_info:
-        rs.validate_settings(_settings())
-    assert exc_info.value.code == 2
+def test_validate_settings_never_blocks_startup():
+    """namu-59: 환경변수 인증 설정이 하나도 없어도 기동을 막지 않는다.
 
-
-def test_validate_settings_allows_explicit_noauth():
-    rs.validate_settings(_settings(allow_noauth=True))  # SystemExit 없이 통과
-
-
-def test_validate_settings_allows_token():
-    rs.validate_settings(_settings(token="t"))  # SystemExit 없이 통과
-
-
-def test_validate_settings_allows_path_secret():
-    # v0.1.3 회귀 방지: token 없이 path_secret만 있어도(claude.ai 웹 호환 URL 경로
-    # 인증) 기동을 허용해야 한다. 이 검사를 s["token"]만 보도록 원복하면 실패한다.
-    rs.validate_settings(_settings(path_secret="s3cr3t"))  # SystemExit 없이 통과
+    예전에는 "token도 path_secret도 없으면 무인증 노출"이라 기동을 거부했다.
+    지금은 모든 MCP 요청이 사용자별 열쇠 검사를 반드시 통과해야 하므로
+    (열쇠 없으면 404) 무인증 노출 자체가 성립하지 않는다. 그 보장은 이 함수가
+    아니라 아래 _PerUserSecretDispatcher 테스트들이 지킨다.
+    """
+    rs.validate_settings(_settings())  # SystemExit 없이 통과
+    rs.validate_settings(_settings(allow_noauth=True))
+    rs.validate_settings(_settings(token="t"))
 
 
 def test_auth_middleware_x_api_key_match():
@@ -400,19 +395,19 @@ def test_resolve_streamable_path_without_secret_stays_mcp():
     assert rs.resolve_streamable_path(_settings()) == "/mcp"
 
 
-def test_resolve_streamable_path_with_secret_appends_it():
-    assert (
-        rs.resolve_streamable_path(_settings(path_secret="s3cr3t"))
-        == "/mcp/s3cr3t"
-    )
+def test_resolve_streamable_path_ignores_shared_path_secret():
+    """namu-59: 전원 공용 열쇠(NAMU_HTTP_PATH_SECRET)는 더 이상 경로에 실리지
+    않는다. 설정돼 있어도 마운트 경로는 고정이다 — 이 값을 되살려 경로에 넣으면
+    "열쇠 하나를 전원이 돌려쓰는" 예전 구멍이 그대로 돌아온다."""
+    assert rs.resolve_streamable_path(_settings(path_secret="s3cr3t")) == "/mcp"
 
 
-def test_build_app_sets_path_secret_into_streamable_http_path(monkeypatch, tmp_path):
+def test_build_app_ignores_shared_path_secret(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
     monkeypatch.setenv("NAMU_HTTP_PATH_SECRET", "s3cr3t")
     rs.build_app()
-    assert rs.mcp.settings.streamable_http_path == "/mcp/s3cr3t"
+    assert rs.mcp.settings.streamable_http_path == "/mcp"
 
 
 def test_build_app_without_path_secret_keeps_mcp(monkeypatch, tmp_path):
@@ -691,3 +686,140 @@ def test_namu_record_no_warning_on_success_keeps_plain_string_return(monkeypatch
         task="t", outcome="success", reason="r", ctx=_ctx("pushok")
     )
     assert isinstance(result, str) and result
+
+
+# ---------------------------------------------------------------------------
+# _PerUserSecretDispatcher — 이 서버의 인증 경계 (namu-59)
+#
+# namu-59 이전 구조의 결함: 경로에 실린 열쇠는 전원 공용이었고, "누구인가"는
+# 요청자가 스스로 적어내는 `?user=` 이름표로 정해졌다. 열쇠를 아는 사람이면
+# 남의 이름표를 적어 남의 서랍을 열 수 있었다. 아래 테스트들이 그 구멍이
+# 되돌아오지 않는지를 지킨다 — 특히 `_overrides_client_supplied_user`.
+# ---------------------------------------------------------------------------
+def _seen_scope_app():
+    """통과한 scope를 붙잡아 두는 더미 앱."""
+    seen: dict = {}
+
+    async def app(scope, receive, send):
+        seen["scope"] = scope
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    return app, seen
+
+
+def _dispatcher_get(app, path: str, query: bytes = b"") -> int:
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": path,
+        "raw_path": path.encode("utf-8"),
+        "query_string": query,
+        "headers": [],
+        "client": ("test", 1234),
+        "server": ("testserver", 443),
+        "scheme": "https",
+    }
+    status: dict = {}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status["code"] = message["status"]
+
+    asyncio.run(app(scope, receive, send))
+    return status["code"]
+
+
+@pytest.fixture
+def ledger(monkeypatch, tmp_path):
+    """실제 파일 장부 + 가입자 둘(alice/bob). 열쇠 두 개를 함께 돌려준다."""
+    monkeypatch.setenv("NAMU_IDENTITY_DB_PATH", str(tmp_path / "identity.db"))
+    with closing(identity.connect()) as conn:
+        key_a = identity.upsert_user(conn, 111, "alice")
+        key_b = identity.upsert_user(conn, 222, "bob")
+        secret_a = identity.get_by_user_key(conn, key_a)["mcp_secret"]
+        secret_b = identity.get_by_user_key(conn, key_b)["mcp_secret"]
+    return {"key_a": key_a, "key_b": key_b, "secret_a": secret_a, "secret_b": secret_b}
+
+
+def test_dispatcher_valid_secret_passes_and_injects_owner(ledger):
+    app, seen = _seen_scope_app()
+    status = _dispatcher_get(rs._PerUserSecretDispatcher(app), f"/mcp/{ledger['secret_a']}")
+    assert status == 200
+    assert seen["scope"]["path"] == "/mcp"  # 고정 마운트 경로로 바뀌어야 한다
+    assert f"user={ledger['key_a']}" in seen["scope"]["query_string"].decode()
+
+
+def test_dispatcher_overrides_client_supplied_user(ledger):
+    """★핵심 회귀 방지: 요청자가 남의 이름표를 실어 보내도 열쇠 주인으로 덮인다.
+
+    이 검사가 깨지면 namu-59가 없앤 결함(이름표만 바꿔 남의 서랍 열기)이
+    그대로 되살아난다.
+    """
+    app, seen = _seen_scope_app()
+    status = _dispatcher_get(
+        rs._PerUserSecretDispatcher(app),
+        f"/mcp/{ledger['secret_a']}",
+        query=f"user={ledger['key_b']}&client=claude".encode(),
+    )
+    assert status == 200
+    qs = seen["scope"]["query_string"].decode()
+    assert f"user={ledger['key_a']}" in qs, "열쇠 주인으로 덮이지 않았다"
+    assert ledger["key_b"] not in qs, "남의 이름표가 살아남았다"
+    assert "client=claude" in qs, "다른 쿼리 항목까지 지워졌다"
+
+
+def test_dispatcher_strips_every_duplicate_user_param(ledger):
+    """`?user=A&user=B`처럼 여러 번 실어 보내는 수법 — 첫 항목만 고치면 뚫린다."""
+    app, seen = _seen_scope_app()
+    _dispatcher_get(
+        rs._PerUserSecretDispatcher(app),
+        f"/mcp/{ledger['secret_a']}",
+        query=f"user={ledger['key_b']}&user={ledger['key_b']}".encode(),
+    )
+    qs = seen["scope"]["query_string"].decode()
+    assert qs.count("user=") == 1
+    assert ledger["key_b"] not in qs
+
+
+def test_dispatcher_rejects_unknown_or_malformed_secret(ledger):
+    app, _ = _seen_scope_app()
+    dispatcher = rs._PerUserSecretDispatcher(app)
+    for path in (
+        "/mcp",                       # 열쇠 없음
+        "/mcp/",                      # 빈 열쇠
+        "/mcp/" + "z" * 43,           # 없는 열쇠
+        "/mcp/short",                 # 형식 미달
+        "/mcp/..",                    # 경로 조작
+        f"/mcp/{ledger['secret_a']}/extra",   # 조각 2개
+        f"/mcpx/{ledger['secret_a']}",        # 다른 경로
+    ):
+        assert _dispatcher_get(dispatcher, path) == 404, f"통과하면 안 되는 경로: {path}"
+
+
+def test_dispatcher_fails_closed_when_ledger_unavailable(monkeypatch, ledger):
+    """장부를 못 열면 통과시키지 않는다(열리는 방향으로 실패하면 전면 개방)."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("장부 열기 실패")
+
+    monkeypatch.setattr(identity, "connect", _boom)
+    app, _ = _seen_scope_app()
+    status = _dispatcher_get(
+        rs._PerUserSecretDispatcher(app), f"/mcp/{ledger['secret_a']}"
+    )
+    assert status == 404
+
+
+def test_dispatcher_routes_each_secret_to_its_own_owner(ledger):
+    """열쇠가 다르면 서랍도 달라야 한다(멀티테넌트 격리의 최종 확인)."""
+    app, seen = _seen_scope_app()
+    dispatcher = rs._PerUserSecretDispatcher(app)
+
+    _dispatcher_get(dispatcher, f"/mcp/{ledger['secret_a']}")
+    assert f"user={ledger['key_a']}" in seen["scope"]["query_string"].decode()
+
+    _dispatcher_get(dispatcher, f"/mcp/{ledger['secret_b']}")
+    assert f"user={ledger['key_b']}" in seen["scope"]["query_string"].decode()
