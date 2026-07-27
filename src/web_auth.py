@@ -2,10 +2,11 @@
 
 1차(github_app.py/identity.py)가 "나무 서버가 그 앱임을 증명하는" 서버 대 서버
 인증을 끝냈다면, 이 모듈은 "이 브라우저를 쥔 사람이 누구인지"를 알아내는
-사용자 대 서버 인증(OAuth)이다. 라우트 4개(`/auth/github/login` →
+사용자 대 서버 인증(OAuth)이다. 라우트 6개(`/auth/github/login` →
 `/auth/github/callback` → 앱 설치가 필요하면 `/auth/github/install`을 거쳐
 다시 `/auth/github/callback` → 저장소가 여럿이면 `/auth/github/select-repo`)로
-구성된다.
+로그인·연결이 끝나고, 그 뒤로 언제든 `/auth/me`(내 페이지)로 접속 주소를 다시
+볼 수 있다. `/auth/logout`은 세션 쿠키를 지운다.
 
 설계 전제(핵심 — routing_server.py/github_app.py 모듈 docstring과 동일한 원칙):
   - 사용자 access token은 **저장하지 않는다**. 콜백 요청 처리 중 지역 변수로만
@@ -13,8 +14,9 @@
     전체의 존재 이유다.
   - 로그인 자체는 "신원 확인"일 뿐 저장소 접근권을 주지 않는다. 저장소 접근권은
     사용자가 별도로 앱을 설치(installation)하고 repo를 고를 때만 생긴다.
-  - 이 모듈은 MCP 접속 주소(path_secret 포함)를 다루지 않는다 — 그 화면은
-    namu-60 대시보드 소관이다. 여기서는 user_key와 연결 저장소명까지만 보여준다.
+  - 연결 완료 그 순간의 화면 하나로만 접속 주소를 볼 수 있었던 것(namu-60
+    이전)은 창을 닫으면 다시 볼 경로가 없는 결함이었다 — `/auth/me`가 그
+    영구 경로다(namu-60).
 
 쿠키 서명 규약(자체 구현, 외부 라이브러리 미사용):
   `value.hexhmac` 형태(HMAC-SHA256, `NAMU_SESSION_SECRET` 키). 만료가 필요한
@@ -399,6 +401,47 @@ def _mcp_url_for(request: Request, conn, user_key: str) -> "str | None":
     return f"{_public_origin(request)}/mcp/{mcp_secret}?client=claude"
 
 
+# 복사 버튼 스크립트. 외부 스크립트 없음. navigator.clipboard는 보안 컨텍스트
+# (https)에서만 있으므로, 없으면 execCommand로 물러난다. 연결 완료 화면과 내
+# 페이지(namu-60)가 같은 UX를 써야 하므로 공통 조각으로 뽑았다 — 두 화면이
+# 동시에 열리는 경우가 없어 id 중복은 문제되지 않는다.
+_MCP_URL_COPY_SCRIPT = (
+    "<script>"
+    "document.getElementById('copy-btn').addEventListener('click',function(){"
+    "var t=document.getElementById('mcp-url');t.select();"
+    "var done=function(ok){document.getElementById('copy-msg').textContent="
+    "ok?'복사했습니다':'복사하지 못했습니다 — 직접 선택해 복사하세요';};"
+    "if(navigator.clipboard&&navigator.clipboard.writeText){"
+    "navigator.clipboard.writeText(t.value).then(function(){done(true);},"
+    "function(){done(false);});}else{try{done(document.execCommand('copy'));}"
+    "catch(e){done(false);}}});"
+    "</script>"
+)
+
+
+def _html_mcp_url_section(mcp_url: str) -> str:
+    """접속 주소 + 복사 버튼 + 경고 문구 블록. 연결 완료 화면과 내 페이지가
+    공유한다(중복 붙여넣기 대신 한 곳만 고치면 양쪽에 반영되게)."""
+    safe_url = html.escape(mcp_url)
+    return (
+        "<h2>접속 주소</h2>"
+        "<p>아래 주소를 복사해 사용하는 AI의 커넥터에 붙여 넣으세요.</p>"
+        f'<textarea id="mcp-url" readonly rows="3" onclick="this.select()" '
+        f'style="width:100%;box-sizing:border-box;font-family:monospace;'
+        f'font-size:13px;padding:8px;">{safe_url}</textarea>'
+        '<p><button type="button" id="copy-btn" style="padding:8px 16px;'
+        'font-size:15px;cursor:pointer;">주소 복사</button> '
+        '<span id="copy-msg"></span></p>'
+        "<p><small>이 주소가 회원님의 신분증입니다 — <b>남에게 알려주지 "
+        "마세요.</b> 아는 사람은 회원님 기억을 읽고 쓸 수 있습니다.</small></p>"
+        "<p><small>클로드가 아닌 다른 AI에 붙일 때는 주소 끝의 "
+        "<code>client=claude</code>를 그 AI 이름으로 바꾸세요"
+        "(예: <code>client=chatgpt</code>). 나중에 '어느 AI가 남긴 기억인지' "
+        "골라 찾을 때 쓰는 이름표라, 한 번 정하면 계속 같은 값을 쓰셔야 "
+        "합니다.</small></p>" + _MCP_URL_COPY_SCRIPT
+    )
+
+
 def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = None) -> str:
     body = [
         "<h1>연결 완료 (Connected)</h1>",
@@ -406,36 +449,7 @@ def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = 
         "<p>이제부터 이 저장소가 회원님 기억의 원본입니다.</p>",
     ]
     if mcp_url:
-        safe_url = html.escape(mcp_url)
-        body += [
-            "<h2>접속 주소</h2>",
-            "<p>아래 주소를 복사해 사용하는 AI의 커넥터에 붙여 넣으세요.</p>",
-            f'<textarea id="mcp-url" readonly rows="3" onclick="this.select()" '
-            f'style="width:100%;box-sizing:border-box;font-family:monospace;'
-            f'font-size:13px;padding:8px;">{safe_url}</textarea>',
-            '<p><button type="button" id="copy-btn" style="padding:8px 16px;'
-            'font-size:15px;cursor:pointer;">주소 복사</button> '
-            '<span id="copy-msg"></span></p>',
-            "<p><small>이 주소가 회원님의 신분증입니다 — <b>남에게 알려주지 "
-            "마세요.</b> 아는 사람은 회원님 기억을 읽고 쓸 수 있습니다.</small></p>",
-            "<p><small>클로드가 아닌 다른 AI에 붙일 때는 주소 끝의 "
-            "<code>client=claude</code>를 그 AI 이름으로 바꾸세요"
-            "(예: <code>client=chatgpt</code>). 나중에 '어느 AI가 남긴 기억인지' "
-            "골라 찾을 때 쓰는 이름표라, 한 번 정하면 계속 같은 값을 쓰셔야 "
-            "합니다.</small></p>",
-            # 복사 버튼. 외부 스크립트 없음. navigator.clipboard는 보안 컨텍스트
-            # (https)에서만 있으므로, 없으면 execCommand로 물러난다.
-            "<script>"
-            "document.getElementById('copy-btn').addEventListener('click',function(){"
-            "var t=document.getElementById('mcp-url');t.select();"
-            "var done=function(ok){document.getElementById('copy-msg').textContent="
-            "ok?'복사했습니다':'복사하지 못했습니다 — 직접 선택해 복사하세요';};"
-            "if(navigator.clipboard&&navigator.clipboard.writeText){"
-            "navigator.clipboard.writeText(t.value).then(function(){done(true);},"
-            "function(){done(false);});}else{try{done(document.execCommand('copy'));}"
-            "catch(e){done(false);}}});"
-            "</script>",
-        ]
+        body.append(_html_mcp_url_section(mcp_url))
     else:
         # 접속 열쇠가 없는 상태(이관 실패 등). 조용히 빈 화면을 내지 않는다.
         body.append(
@@ -443,6 +457,7 @@ def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = 
             "주세요. 계속 같은 화면이 나오면 관리자에게 알려주세요.</p>"
         )
     body.append(f"<p><small>사용자 키: <code>{html.escape(user_key)}</code></small></p>")
+    body.append('<p><a href="/auth/me">내 페이지로 이동 (Go to My page)</a></p>')
     return _html_page("NAMU 연결 완료", "".join(body))
 
 
@@ -554,6 +569,69 @@ def _html_next_steps(user_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 내 페이지(namu-60) — 로그인 왕복이 끝난 "그 순간"에만 볼 수 있던 접속 주소를,
+# 창을 닫은 뒤에도 다시 볼 수 있는 영구 경로. 세 가지 이유로 상태를 엄격히
+# 나눈다:
+#   1) 세션이 없거나(로그인 안 함) 위조/만료됐으면 본인 정보를 한 글자도
+#      보여주지 않는다 — user_key/저장소명/접속 주소는 전부 그 사람 전용이라,
+#      "세션이 있는 척"만 해도 노출되면 인증을 건너뛴 것과 같다.
+#   2) 서명은 유효한데 장부에 그 사용자가 없으면(예: 장부 재구축) 500으로
+#      터뜨리지 않고 로그인 안내와 동일하게 취급한다.
+#   3) 저장소 미연결/열쇠 미발급은 각각 "설치 유도"/"그 자리에서 발급"으로
+#      풀어야 빈 화면이 나오지 않는다.
+# ---------------------------------------------------------------------------
+def _html_me_login_required() -> str:
+    body = (
+        "<h1>로그인이 필요합니다 (Login required)</h1>"
+        "<p>세션이 없거나 만료됐습니다(또는 유효하지 않습니다). 다시 로그인해 "
+        "주세요.</p>"
+        '<p><a href="/auth/github/login">GitHub로 로그인 (Log in with GitHub)</a></p>'
+    )
+    return _html_page("NAMU 로그인 필요", body)
+
+
+def _html_me_not_connected(user_key: str) -> str:
+    install_url = "/auth/github/install"
+    body = (
+        "<h1>내 페이지 (My page)</h1>"
+        f"<p>사용자 키: <code>{html.escape(user_key)}</code></p>"
+        "<p><b>아직 연결된 저장소가 없습니다.</b> 앱을 설치하고 기억을 저장할 "
+        "저장소를 하나 골라야 접속 주소가 만들어집니다.</p>"
+        f'<p><a href="{html.escape(install_url)}">NAMU 앱 설치하고 저장소 연결하기 '
+        "(Install the app)</a></p>"
+        '<p><a href="/auth/logout">로그아웃 (Log out)</a></p>'
+    )
+    return _html_page("NAMU 내 페이지", body)
+
+
+def _html_me_connected(user_key: str, repo_full_name: str, mcp_url: "str | None") -> str:
+    body = [
+        "<h1>내 페이지 (My page)</h1>",
+        f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
+    ]
+    if mcp_url:
+        body.append(_html_mcp_url_section(mcp_url))
+    else:
+        # 여기 도달하면 호출부가 열쇠 발급을 이미 시도했어야 정상이다 — 그래도
+        # 실패했다면(예: 장부 쓰기 실패) 빈 화면 대신 이유를 알린다.
+        body.append(
+            "<p><b>접속 주소를 만들지 못했습니다.</b> 잠시 후 새로고침해도 안 "
+            "되면 관리자에게 알려주세요.</p>"
+        )
+    body.append(f"<p><small>사용자 키: <code>{html.escape(user_key)}</code></small></p>")
+    body.append('<p><a href="/auth/logout">로그아웃 (Log out)</a></p>')
+    return _html_page("NAMU 내 페이지", "".join(body))
+
+
+def _html_logged_out() -> str:
+    body = (
+        "<h1>로그아웃했습니다 (Logged out)</h1>"
+        '<p><a href="/auth/github/login">다시 로그인 (Log in again)</a></p>'
+    )
+    return _html_page("NAMU 로그아웃", body)
+
+
+# ---------------------------------------------------------------------------
 # 라우트
 # ---------------------------------------------------------------------------
 async def login(request: Request) -> Response:
@@ -643,6 +721,28 @@ async def callback(request: Request) -> Response:
     try:
         with closing(identity.connect()) as conn:
             user_key = identity.upsert_user(conn, github_id, login_name)
+
+            # 이미 저장소가 연결된 사용자(installation_id/repo_full_name이 이전
+            # 로그인에서 이미 채워짐)라면 매번 GitHub 설치/저장소 목록을 다시
+            # 조회해 고르라고 하지 않는다 — 내 페이지로 곧장 보낸다. 세션
+            # 쿠키는 반드시 이 리다이렉트 응답 자체에 심는다(내 페이지가 쿠키
+            # 없이는 아무것도 보여주지 못하므로).
+            already_connected = identity.get_by_user_key(conn, user_key)
+            if already_connected and already_connected.get("installation_id") and \
+                    already_connected.get("repo_full_name"):
+                logger.info("GitHub 로그인 완료(기존 연결 유지, user_key=%s)", user_key)
+                resp = RedirectResponse(url="/auth/me", status_code=302)
+                resp.set_cookie(
+                    _SESSION_COOKIE_NAME,
+                    _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
+                    max_age=_SESSION_COOKIE_TTL_SEC,
+                    httponly=True,
+                    secure=True,
+                    samesite="lax",
+                    path="/auth",
+                )
+                resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
+                return resp
 
             installation_id_raw = request.query_params.get("installation_id") or ""
             installs_truncated = False
@@ -771,8 +871,56 @@ async def select_repo(request: Request) -> Response:
     return HTMLResponse(_html_connected(user_key, repo, mcp_url))
 
 
+async def me(request: Request) -> Response:
+    """내 페이지(namu-60) — 로그인한 본인의 접속 주소를 로그인 왕복 직후가
+    아니어도 다시 볼 수 있는 유일한 영구 경로.
+
+    세션이 없거나(로그인 안 함) 서명이 위조/만료됐으면, 또는 서명은 유효한데
+    장부에 그 사용자가 없으면(장부 재구축 등) 전부 같은 취급 — 본인 정보를
+    한 글자도 내보내지 않고 401로 로그인 안내만 준다. "왜 막혔는지"를 구분해
+    알려주면 공격자에게 열거 단서를 준다(select_repo의 서명 실패 처리와 같은
+    원칙).
+    """
+    user_key = _unsign_with_expiry(request.cookies.get(_SESSION_COOKIE_NAME))
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
+            # 서명은 유효했지만(즉 우리가 발급한 세션) 장부에 없다 — 500으로
+            # 터뜨리지 않고 로그인 안내와 동일하게 처리한다.
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+
+        if not row.get("installation_id") or not row.get("repo_full_name"):
+            return HTMLResponse(_html_me_not_connected(user_key))
+
+        mcp_url = _mcp_url_for(request, conn, user_key)
+        if not mcp_url:
+            # 저장소는 연결됐는데 mcp_secret이 없는 옛 계정 — 화면을 여는
+            # 시점에 발급해 저장한다. identity.backfill_mcp_secrets는 이미
+            # 값이 있는 사용자는 절대 건드리지 않고(WHERE mcp_secret IS NULL
+            # OR ''), UNIQUE 색인이 있는 컬럼에 새로 굴린 무작위값만 채우므로
+            # 동시 요청이 겹쳐도(SQLite가 쓰기를 직렬화) 예외로 깨지지 않는다
+            # — 새 발급/백필 함수를 새로 만들지 않고 기존 것을 그대로 재사용.
+            identity.backfill_mcp_secrets(conn)
+            mcp_url = _mcp_url_for(request, conn, user_key)
+
+        body_html = _html_me_connected(user_key, row["repo_full_name"], mcp_url)
+
+    return HTMLResponse(body_html)
+
+
+async def logout(request: Request) -> Response:
+    """세션 쿠키를 지운다. path가 set_cookie와 어긋나면 지워지지 않으므로
+    login/callback과 반드시 같은 `path="/auth"`를 쓴다."""
+    resp = HTMLResponse(_html_logged_out())
+    resp.delete_cookie(_SESSION_COOKIE_NAME, path="/auth")
+    return resp
+
+
 def build_auth_app() -> Starlette:
-    """web_auth 라우트 4개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
+    """web_auth 라우트 6개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
 
     lifespan 훅을 선언하지 않는다 — routing_server._AuthOrMcpDispatcher가
     lifespan scope를 이 앱으로 보내지 않는다(FastMCP 세션 매니저를 기동하는
@@ -784,5 +932,7 @@ def build_auth_app() -> Starlette:
             Route("/auth/github/install", install, methods=["GET"]),
             Route("/auth/github/callback", callback, methods=["GET"]),
             Route("/auth/github/select-repo", select_repo, methods=["GET"]),
+            Route("/auth/me", me, methods=["GET"]),
+            Route("/auth/logout", logout, methods=["GET"]),
         ]
     )

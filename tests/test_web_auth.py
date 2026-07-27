@@ -12,6 +12,7 @@
 """
 import asyncio
 import re
+import sqlite3
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -999,3 +1000,242 @@ def test_connected_page_respects_forwarded_proto(client, monkeypatch):
         headers={"x-forwarded-proto": "https", "x-forwarded-host": "namu-cloud.onnamu.kr"},
     )
     assert "https://namu-cloud.onnamu.kr/mcp/" in r.text
+
+
+# ---------------------------------------------------------------------------
+# /auth/me — 내 페이지(namu-60). 연결 완료 화면이 그 순간에만 보여주던 접속
+# 주소를, 창을 닫은 뒤에도 다시 볼 수 있어야 한다는 것이 이 기능의 존재
+# 이유다.
+# ---------------------------------------------------------------------------
+def _connect_via_login(client, monkeypatch, *, github_id, repo) -> dict:
+    """login → callback을 밟아 사용자를 저장소까지 연결하고 그 장부 행을
+    돌려준다(user_key/mcp_secret/repo_full_name을 포함) — 클라이언트 세션에는
+    로그인 쿠키가 남는다."""
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(github_id=github_id, repos=[repo])
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode", "installation_id": str(github_id)},
+    )
+    assert r.status_code == 200
+    assert "연결 완료" in r.text
+    conn = identity.connect()
+    try:
+        row = identity.get_by_github_id(conn, github_id)
+    finally:
+        conn.close()
+    assert row is not None
+    return row
+
+
+def test_me_shows_mcp_url_repo_and_user_key(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=20001, repo="paul/memories")
+
+    r = client.get("/auth/me")
+
+    assert r.status_code == 200
+    assert "paul/memories" in r.text
+    assert row["user_key"] in r.text
+    assert f"/mcp/{row['mcp_secret']}?client=claude" in r.text
+    assert 'href="/auth/logout"' in r.text
+    # 연결 완료 화면과 같은 경고 문구 재사용(중복 붙여넣기가 아니라 공통 조각).
+    assert "남에게 알려주지" in r.text
+
+
+def test_me_no_session_rejected_without_leaking_info(monkeypatch):
+    # 다른 클라이언트로 실제 연결된 사용자를 하나 만들어, 그 사람의 진짜
+    # 값(주소/저장소/키)을 알아둔다 — 세션 없는 요청의 응답에 그 값이 전혀
+    # 없어야 "노출 0"이 증명된다.
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=20002, repo="victim/secret-repo"
+    )
+
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = fresh_client.get("/auth/me")
+
+    assert r.status_code == 401
+    assert row["user_key"] not in r.text
+    assert row["mcp_secret"] not in r.text
+    assert "victim/secret-repo" not in r.text
+    assert 'href="/auth/github/login"' in r.text
+
+
+def test_me_forged_session_signature_rejected_without_leaking_info(monkeypatch):
+    """실제 로그인으로는 서명이 항상 맞으므로, 이 케이스는 반드시 로그인
+    없이 형식만 맞춘(HMAC은 틀린) 값을 직접 주입해야 진짜 서명 검증 경로를
+    태운다(모듈 안내에 있는 766~794줄 선례와 동일한 원칙)."""
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=20003, repo="victim/other-repo"
+    )
+    user_key = row["user_key"]
+
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    expires_at = int(time.time()) + 1800
+    forged = f"{expires_at}|{user_key}.{'0' * 64}"  # 형식(만료+payload)은 유효, mac은 틀림
+    fresh_client.cookies.set(wa._SESSION_COOKIE_NAME, forged)
+
+    r = fresh_client.get("/auth/me")
+
+    assert f"{wa._SESSION_COOKIE_NAME}={forged}" in r.request.headers.get("cookie", "")
+    assert r.status_code == 401
+    assert user_key not in r.text
+    assert row["mcp_secret"] not in r.text
+    assert "victim/other-repo" not in r.text
+
+
+def test_me_expired_session_rejected_without_leaking_info(monkeypatch):
+    """서명은 진짜(_sign_with_expiry로 실제 발급)지만 만료 시각이 과거인
+    세션 — 형식/서명 검증이 아니라 만료 검사 자체가 동작하는지를 본다."""
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=20004, repo="victim/third-repo"
+    )
+    user_key = row["user_key"]
+
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    expired = wa._sign_with_expiry(user_key, -10)  # 10초 전에 이미 만료
+    fresh_client.cookies.set(wa._SESSION_COOKIE_NAME, expired)
+
+    r = fresh_client.get("/auth/me")
+
+    assert f"{wa._SESSION_COOKIE_NAME}={expired}" in r.request.headers.get("cookie", "")
+    assert r.status_code == 401
+    assert user_key not in r.text
+    assert row["mcp_secret"] not in r.text
+    assert "victim/third-repo" not in r.text
+
+
+def test_me_valid_session_but_missing_from_ledger_treated_as_login_required(monkeypatch, tmp_path):
+    """서명은 유효한 세션이지만(우리가 실제로 발급) 장부에서 그 사용자가
+    사라진 경우(장부 재구축 등) — 500으로 터지지 않고 로그인 안내와 동일하게
+    처리해야 한다."""
+    client_a = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(client_a, monkeypatch, github_id=20005, repo="ghost/repo")
+
+    # 장부에서 그 사용자를 직접 지운다(개발자 본인 계정으로는 재현할 수 없는
+    # 상태를 의도적으로 만든다).
+    conn = sqlite3.connect(str(tmp_path / "identity.db"))
+    try:
+        conn.execute("DELETE FROM users WHERE user_key = ?", (row["user_key"],))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client_a.get("/auth/me")
+
+    assert r.status_code == 401
+    assert "GitHub로 로그인" in r.text
+    assert row["mcp_secret"] not in r.text
+
+
+def test_me_without_connected_repo_shows_install_guidance(client, monkeypatch):
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(github_id=20006, repos=[])  # 저장소 0개 → 미연결 상태
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode", "installation_id": "20006"},
+    )
+    assert r.status_code == 200
+
+    conn = identity.connect()
+    try:
+        row = identity.get_by_github_id(conn, 20006)
+    finally:
+        conn.close()
+    assert row["installation_id"] is None  # 미연결 상태를 실제로 만들었는지 확인
+
+    r2 = client.get("/auth/me")
+
+    assert r2.status_code == 200
+    assert row["user_key"] in r2.text  # 사용자 키는 보여도 된다
+    assert 'href="/auth/github/install"' in r2.text
+    assert "/mcp/" not in r2.text  # 접속 주소는 아직 없다
+
+
+def test_me_backfills_missing_mcp_secret_for_legacy_account(client, monkeypatch, tmp_path):
+    """옛 계정(가입은 됐지만 mcp_secret 칸이 비어 있음)은 개발자 본인 계정으로는
+    재현되지 않는 상태다 — DB를 직접 건드려 그 상태를 의도적으로 만든다."""
+    row = _connect_via_login(client, monkeypatch, github_id=20007, repo="helen/legacy-memories")
+
+    db_path = tmp_path / "identity.db"
+    raw_conn = sqlite3.connect(str(db_path))
+    try:
+        raw_conn.execute(
+            "UPDATE users SET mcp_secret = NULL WHERE user_key = ?", (row["user_key"],)
+        )
+        raw_conn.commit()
+        cleared = raw_conn.execute(
+            "SELECT mcp_secret FROM users WHERE user_key = ?", (row["user_key"],)
+        ).fetchone()
+        assert cleared[0] is None  # 옛 계정 상태가 실제로 만들어졌는지
+    finally:
+        raw_conn.close()
+
+    r = client.get("/auth/me")
+
+    assert r.status_code == 200
+    assert "helen/legacy-memories" in r.text
+    assert "/mcp/" in r.text  # 빈 화면이 아니라 주소가 실제로 채워졌는지
+
+    conn = identity.connect()
+    try:
+        healed = identity.get_by_user_key(conn, row["user_key"])
+    finally:
+        conn.close()
+    assert healed["mcp_secret"]  # 새 열쇠가 발급돼 저장됐는지
+    assert f"/mcp/{healed['mcp_secret']}?client=claude" in r.text
+
+
+# ---------------------------------------------------------------------------
+# /auth/logout
+# ---------------------------------------------------------------------------
+def test_logout_clears_session_cookie_and_shows_login_link(client, monkeypatch):
+    _connect_via_login(client, monkeypatch, github_id=20008, repo="ivan/memories")
+    assert client.get("/auth/me").status_code == 200  # 로그아웃 전에는 보인다
+
+    r = client.get("/auth/logout")
+    assert r.status_code == 200
+    assert "로그아웃" in r.text
+    assert 'href="/auth/github/login"' in r.text
+
+    r2 = client.get("/auth/me")
+    assert r2.status_code == 401  # 쿠키가 실제로 지워져 더는 인증되지 않는다
+
+
+# ---------------------------------------------------------------------------
+# 로그인 왕복 마무리 — 이미 연결된 사용자는 저장소를 다시 고르라고 하지 않고
+# 내 페이지로 이어진다.
+# ---------------------------------------------------------------------------
+def test_callback_already_connected_redirects_to_me_without_reselecting_repo(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=20009, repo="gina/memories")
+
+    # 두 번째 로그인 왕복 — installation_id 없이 돌아온 순수 재로그인.
+    state2 = _do_login(client)
+    fake2, calls2 = _make_fake_http_json(github_id=20009)
+    monkeypatch.setattr(wa, "_http_json", fake2)
+
+    r2 = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode-2"},
+        follow_redirects=False,
+    )
+
+    assert r2.status_code == 302
+    assert r2.headers["location"] == "/auth/me"
+    # 세션 쿠키가 이 리다이렉트 응답 자체에 실렸는지(내 페이지가 쿠키 없이는
+    # 아무것도 못 보여주므로).
+    assert any(
+        h.startswith(wa._SESSION_COOKIE_NAME + "=") for h in r2.headers.get_list("set-cookie")
+    )
+    # 이미 연결돼 있으니 설치/저장소 목록을 다시 조회하지 않았어야 한다(재선택
+    # 회피의 직접 증거).
+    assert not any("installations" in c["url"] for c in calls2)
+
+    r3 = client.get("/auth/me")
+    assert r3.status_code == 200
+    assert "gina/memories" in r3.text
+    assert row["user_key"] in r3.text
