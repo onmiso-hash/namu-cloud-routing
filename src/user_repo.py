@@ -361,6 +361,71 @@ _COMMIT_AUTHOR_NAME = "namu-cloud-routing"
 _COMMIT_AUTHOR_EMAIL = "namu-cloud-routing@users.noreply.github.com"
 
 
+# ---------------------------------------------------------------------------
+# 로컬 전용 캐시 파일 — 사용자 GitHub 저장소로 올라가면 안 되는 파일 (namu-58
+# 4차 배선, 사용자 결정 4).
+# ---------------------------------------------------------------------------
+# db/namu.db는 memory/learnings.yaml·memory/profile.yaml에서 언제든 재생성 가능한
+# 순수 검색 속도용 캐시다(routing_server._ensure_fresh가 stale이면 db.rebuild_from_yaml로
+# 자동 재생성한다) — 원본이 아니므로 사용자 저장소에 실릴 이유가 없다. 이 모듈
+# 상단 §3 주석의 실측(약 1.8MB)대로, 기존 `push()`가 그대로 `git add -A`만 했다면
+# namu_record를 부를 때마다 1.8MB 이진 파일이 사용자 저장소 히스토리에 매번 새
+# 커밋으로 쌓인다.
+_LOCAL_ONLY_CACHE_RELATIVE_PATHS = ("db/namu.db",)
+
+
+def _exclude_local_only_cache_paths(target: Path) -> None:
+    """`_LOCAL_ONLY_CACHE_RELATIVE_PATHS`를 이 사본(로컬)의 `.git/info/exclude`에
+    등록하고, **이미 추적(tracked) 중이라면** git 인덱스에서 빼낸다(작업 트리의
+    실제 파일은 남긴다 — 로컬 검색 캐시로 계속 쓰이므로 지우면 안 된다).
+
+    ## 왜 `.gitignore` 커밋이 아니라 `.git/info/exclude`인가
+
+    `.gitignore`를 이 모듈이 사용자 저장소 안에 커밋해 넣으면, 우리가 임의로
+    "사용자 저장소의 파일 목록"을 바꾸는 셈이 된다(§ 이 배선 작업의 원칙 —
+    사용자 저장소를 우리 마음대로 오염시키지 않는다). `.git/info/exclude`는
+    이 서버가 들고 있는 **로컬 사본 하나에만** 있는 git 설정 파일이라 원격
+    저장소 내용에는 전혀 반영되지 않는다 — 커밋도 push도 되지 않는다(worktree가
+    아니라 `.git/` 안이라는 점은 이 모듈의 다른 곳(예: `ensure_ready`가 clone
+    직후 origin remote를 지우는 이유)과 같은 성격의 "로컬 전용 상태" 취급이다).
+
+    ## 왜 "이미 추적 중인 경우"까지 다루는가
+
+    `.git/info/exclude`(또는 `.gitignore`)는 git이 **아직 추적하지 않는** 파일
+    에만 효과가 있다 — 이미 커밋된 파일은 제외 목록에 있어도 계속 추적된다.
+    제외 목록만 믿고 "이제 빠지겠지"라고 가정하면, 과거에(예: 이 배선이 들어오기
+    전 실수로, 혹은 사용자가 직접) 한 번이라도 커밋된 적 있는 db/namu.db는 이후
+    영원히 계속 추적·커밋되는 결함이 남는다. `git rm --cached`로 인덱스에서만
+    빼면(워킹트리 파일은 그대로 둔다 — `--cached` 없이 `git rm`을 쓰면 디스크
+    파일까지 지워져 로컬 검색 캐시가 사라진다) 다음 커밋이 "그 파일을 저장소에서
+    제거"하는 diff를 자연히 포함하게 되고, 이후로는 위 exclude 등록이 계속
+    추적을 막아 준다.
+    """
+    exclude_path = target / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = (
+        exclude_path.read_text(encoding="utf-8").splitlines()
+        if exclude_path.exists()
+        else []
+    )
+    missing = [p for p in _LOCAL_ONLY_CACHE_RELATIVE_PATHS if p not in existing_lines]
+    if missing:
+        with exclude_path.open("a", encoding="utf-8") as fh:
+            for rel in missing:
+                fh.write(rel + "\n")
+
+    # git ls-files는 인자로 준 경로 중 "지금 인덱스에 실제로 있는" 것만 돌려준다
+    # (아직 한 번도 커밋된 적 없으면 빈 문자열) — 그래서 매 push마다 불러도
+    # 대부분의 호출에서는 아무 일도 하지 않는 값싼 확인이다.
+    tracked = _run_git(
+        ["ls-files", "--", *_LOCAL_ONLY_CACHE_RELATIVE_PATHS], cwd=target
+    )
+    for rel in tracked.splitlines():
+        rel = rel.strip()
+        if rel:
+            _run_git(["rm", "--cached", "-q", "--", rel], cwd=target)
+
+
 def push(conn, user_key: str, message: str = DEFAULT_COMMIT_MESSAGE) -> bool:
     """로컬 변경을 사용자 저장소로 되돌려 보낸다. 변경이 없으면 아무것도 하지
     않고 False.
@@ -368,6 +433,11 @@ def push(conn, user_key: str, message: str = DEFAULT_COMMIT_MESSAGE) -> bool:
     강제 push는 절대 하지 않는다 — non-fast-forward로 거부되면 `PushRejected`를
     던진다(§4 요구사항: 조용한 데이터 손실 금지). 실제 병합 정책은 이 작업
     범위 밖(후속 task)이다.
+
+    `git add -A`를 하기 전에 반드시 `_exclude_local_only_cache_paths`를 먼저
+    불러 db/namu.db(순수 캐시, §4 요구사항)가 이번 커밋에 실리지 않게 한다 —
+    순서가 반대(add -A 먼저)면 이미 스테이징된 뒤에 제외 설정을 걸어봐야
+    소용없다.
     """
     record = _require_connected(conn, user_key)
     target = user_dir(user_key)
@@ -376,6 +446,8 @@ def push(conn, user_key: str, message: str = DEFAULT_COMMIT_MESSAGE) -> bool:
             f"사용자({user_key})의 로컬 사본이 없습니다 — ensure_ready()를 먼저 "
             "호출하세요. Local copy is missing: call ensure_ready() first."
         )
+
+    _exclude_local_only_cache_paths(target)
 
     status = _run_git(["status", "--porcelain"], cwd=target)
     if not status.strip():

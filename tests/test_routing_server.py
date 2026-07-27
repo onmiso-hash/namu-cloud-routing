@@ -6,13 +6,22 @@ config/db/profile 자체가 import 시 side-effect 없음 — mcp_server.py의
 `_ensure_db()` 같은 부팅 로직은 미러링하지 않았다), in-process import로 충분하다.
 매 테스트는 `NAMU_STORE_ROOT`를 tmp_path 하위로 monkeypatch해 STORE_ROOT를 격리한다.
 """
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
+import identity
 import routing_server as rs
+import user_repo as ur
+
+# 오토유즈 스텁(_identity_and_repo_sync_stub)이 ur.ensure_ready/ur.push를 대역으로
+# 바꾸기 전에 실제 함수를 붙잡아 둔다 — "미연결 사용자 거부"처럼 user_repo의
+# 진짜 동작(RepoNotConnected 판정)을 겨냥하는 테스트가 이 참조로 되돌릴 수 있다.
+_REAL_ENSURE_READY = ur.ensure_ready
+_REAL_PUSH = ur.push
 
 
 class _FakeRequest:
@@ -45,6 +54,39 @@ def _ctx(user: str | None = None, client: str | None = "claude") -> _FakeCtx:
 def _store_root(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _identity_and_repo_sync_stub(monkeypatch, tmp_path):
+    """namu-58 4차 배선 이후 3도구는 모두 `identity.connect()` +
+    `user_repo.ensure_ready`/`push`를 거친다 — 이 파일의 절대다수 테스트는
+    저장소 동기화 자체가 관심사가 아니라(격리·키 검증·kind 라우팅 등 순수
+    라우팅 로직 검증) "이미 로그인하고 저장소를 연결한 사용자"처럼 동작하게
+    만드는 무해한 대역이 필요하다.
+
+    - `NAMU_IDENTITY_DB_PATH`: identity.connect()가 요구하는 필수 환경변수.
+      파일 기반으로 둬야 한 테스트 안의 여러 tool 호출(예: record 후 recall)이
+      같은 장부를 공유한다(`:memory:`는 호출마다 새 커넥션이라 공유가 안 된다).
+    - `user_repo.ensure_ready`: 진짜로 실행하면 GitHub 네트워크(github_app 토큰
+      발급, git clone)가 필요하므로, 그 대신 "이미 clone된 사본이 있다"만
+      흉내낸다(`.git` 폴더만 만든다) — `RepoNotConnected` 같은 진짜 연결 관문은
+      전혀 검사하지 않는다.
+    - `user_repo.push`: 대부분의 테스트가 push 성패에 관심이 없으므로 아무 일도
+      하지 않고 "변경 없음"(False)을 돌려준다.
+
+    이 스텁 자체(TTL 판정·미연결 거부·push 호출·push 실패 시 경고)를 검증하는
+    아래 전용 테스트들은 각자 필요한 부분만 다시 monkeypatch해 실제 동작이나
+    별도의 스파이(spy)로 되돌린다.
+    """
+    monkeypatch.setenv("NAMU_IDENTITY_DB_PATH", str(tmp_path / "identity.db"))
+
+    def _stub_ensure_ready(conn, key):
+        (ur.user_dir(key) / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(ur, "ensure_ready", _stub_ensure_ready)
+    monkeypatch.setattr(
+        ur, "push", lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,3 +503,191 @@ def test_build_app_lifespan_starts_and_stops_mcp_session_manager(monkeypatch, tm
         assert r.status_code != 500
     # `with` 블록을 정상적으로 빠져나왔다는 것 자체가 shutdown도 예외 없이
     # 끝났다는 증거다.
+
+
+# ---------------------------------------------------------------------------
+# 저장소 동기화 배선(namu-58 4차) — TTL 판정 순수 함수
+# ---------------------------------------------------------------------------
+def test_needs_sync_true_when_no_local_copy():
+    # user_repo.user_dir("nobody")가 가리키는 폴더 자체가 아직 없다 —
+    # 사용자 결정 1의 "단, 사본이 아직 없으면 TTL과 무관하게" 조항.
+    assert rs._needs_sync("nobody", ttl_sec=99999) is True
+
+
+def test_needs_sync_false_within_ttl_after_mark_synced():
+    key = "alice"
+    (ur.user_dir(key) / ".git").mkdir(parents=True)
+    rs._mark_synced(key)
+    assert rs._needs_sync(key, ttl_sec=60) is False
+
+
+def test_needs_sync_true_after_ttl_elapses():
+    key = "alice"
+    (ur.user_dir(key) / ".git").mkdir(parents=True)
+    rs._mark_synced(key)
+    marker = rs._sync_marker_path(key)
+    # 마커 시각을 TTL보다 더 과거로 돌려 "시간이 지났다"를 흉내낸다.
+    old = marker.stat().st_mtime - 120
+    os.utime(marker, (old, old))
+    assert rs._needs_sync(key, ttl_sec=60) is True
+
+
+def test_needs_sync_true_when_local_copy_exists_but_never_marked():
+    # 사본(.git)은 있지만 마커 파일이 없는 상태 — 과거(이 배선이 없던 시절)에
+    # 만들어진 사본, 혹은 마커 기록 자체가 실패했던 경우를 흉내낸다. "모르면
+    # 넘어가기"가 아니라 "모르면 최신화"가 안전한 기본값이어야 한다.
+    key = "alice"
+    (ur.user_dir(key) / ".git").mkdir(parents=True)
+    assert rs._needs_sync(key, ttl_sec=99999) is True
+
+
+def test_repo_sync_ttl_sec_default_is_60(monkeypatch):
+    monkeypatch.delenv("NAMU_REPO_SYNC_TTL_SEC", raising=False)
+    assert rs._repo_sync_ttl_sec() == 60.0
+
+
+def test_repo_sync_ttl_sec_reads_env_override(monkeypatch):
+    monkeypatch.setenv("NAMU_REPO_SYNC_TTL_SEC", "5")
+    assert rs._repo_sync_ttl_sec() == 5.0
+
+
+def test_repo_sync_ttl_sec_rejects_non_numeric(monkeypatch):
+    monkeypatch.setenv("NAMU_REPO_SYNC_TTL_SEC", "not-a-number")
+    with pytest.raises(ValueError):
+        rs._repo_sync_ttl_sec()
+
+
+# ---------------------------------------------------------------------------
+# 저장소 동기화 배선 — `_ensure_repo_synced` 오케스트레이션(요구사항 ⓐⓑ)
+# ---------------------------------------------------------------------------
+def test_ensure_repo_synced_skips_second_call_within_ttl(monkeypatch):
+    """ⓐ TTL 안에서는 다시 fetch(ensure_ready)하지 않는다."""
+    calls: list[str] = []
+
+    def _spy(conn, key):
+        calls.append(key)
+        (ur.user_dir(key) / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(ur, "ensure_ready", _spy)
+    rs._ensure_repo_synced(None, "alice")
+    rs._ensure_repo_synced(None, "alice")  # 기본 TTL(60초) 이내 — 다시 부르면 안 된다
+    assert calls == ["alice"], "TTL 안에서 ensure_ready가 다시 호출됐다"
+
+
+def test_ensure_repo_synced_calls_again_after_ttl_elapses(monkeypatch):
+    """ⓐ TTL이 지나면 다시 fetch(ensure_ready)한다."""
+    calls: list[str] = []
+
+    def _spy(conn, key):
+        calls.append(key)
+        (ur.user_dir(key) / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(ur, "ensure_ready", _spy)
+    monkeypatch.setenv("NAMU_REPO_SYNC_TTL_SEC", "0")  # TTL 0 — 항상 만료된 것으로 취급
+    rs._ensure_repo_synced(None, "alice")
+    rs._ensure_repo_synced(None, "alice")
+    assert calls == ["alice", "alice"], "TTL이 지났는데도 ensure_ready가 다시 호출되지 않았다"
+
+
+def test_ensure_repo_synced_always_calls_when_no_local_copy(monkeypatch):
+    """ⓑ 사본이 없으면 TTL과 무관하게 매번 ensure_ready를 부른다."""
+    calls: list[str] = []
+
+    def _spy_without_creating_git(conn, key):
+        # 일부러 .git을 만들지 않는다 — "사본이 여전히 없다" 상태를 매번 재현한다
+        # (예: clone이 반복 실패하는 상황을 흉내).
+        calls.append(key)
+
+    monkeypatch.setattr(ur, "ensure_ready", _spy_without_creating_git)
+    rs._ensure_repo_synced(None, "bob")
+    rs._ensure_repo_synced(None, "bob")
+    assert calls == ["bob", "bob"], "사본이 없는데도 두 번째 호출에서 ensure_ready를 건너뛰었다"
+
+
+# ---------------------------------------------------------------------------
+# 저장소 동기화 배선 — ⓒ 미연결 사용자는 3도구 모두 거절
+# ---------------------------------------------------------------------------
+def test_all_three_tools_reject_unconnected_user(monkeypatch):
+    """오토유즈 스텁을 되돌려 진짜 `user_repo.ensure_ready`(RepoNotConnected 판정
+    포함)가 실행되게 한다 — 이 신원 장부에는 이 user_key를 등록한 적이 없으므로
+    (`identity.upsert_user`를 부른 적이 없다) 세 도구 모두 거절해야 한다."""
+    monkeypatch.setattr(ur, "ensure_ready", _REAL_ENSURE_READY)
+
+    with pytest.raises(ValueError) as exc_recall:
+        rs.namu_recall(ctx=_ctx("neveronboarded"))
+    with pytest.raises(ValueError) as exc_search:
+        rs.namu_search("q", ctx=_ctx("neveronboarded"))
+    with pytest.raises(ValueError) as exc_record:
+        rs.namu_record(
+            task="t", outcome="success", reason="r", ctx=_ctx("neveronboarded")
+        )
+
+    # 세 예외 모두 user_repo.RepoNotConnected의 온보딩 안내 원문(한국어+영어)을
+    # 그대로 담고 있어야 한다(사용자 결정 2 — 재사용).
+    for exc in (exc_recall, exc_search, exc_record):
+        message = str(exc.value)
+        assert "저장소를 연결" in message
+        assert "GitHub App" in message
+
+
+# ---------------------------------------------------------------------------
+# 저장소 동기화 배선 — ⓓⓔ record 후 push 호출, push 실패해도 기록은 성공
+# ---------------------------------------------------------------------------
+def test_namu_record_calls_push_after_local_write(monkeypatch):
+    """ⓓ 로컬 기록이 끝난 뒤 반드시 push가 호출된다."""
+    calls: list[str] = []
+
+    def _spy_push(conn, key, message=ur.DEFAULT_COMMIT_MESSAGE):
+        calls.append(key)
+        return True
+
+    monkeypatch.setattr(ur, "push", _spy_push)
+    entry_id = rs.namu_record(
+        task="t", outcome="success", reason="r", ctx=_ctx("pusher")
+    )
+    assert isinstance(entry_id, str) and entry_id
+    assert calls == ["pusher"], "namu_record가 로컬 기록 후 push를 부르지 않았다"
+
+
+def test_namu_record_push_failure_still_succeeds_with_warning(monkeypatch, caplog):
+    """ⓔ push가 실패해도 도구 호출 자체는 실패시키지 않는다 — 기록은 로컬에
+    안전히 남고, 반환값에 경고가 실리며, 실패는 logger로도 남는다(사용자 결정 3)."""
+
+    def _boom(conn, key, message=ur.DEFAULT_COMMIT_MESSAGE):
+        raise ur.PushRejected("dummy push rejected for test")
+
+    monkeypatch.setattr(ur, "push", _boom)
+
+    with caplog.at_level("WARNING", logger="namu.routing_server"):
+        result = rs.namu_record(
+            task="t", outcome="success", reason="r", ctx=_ctx("pushfail")
+        )
+
+    # 반환 모양(결정 3): 성공 경로의 기존 계약(ULID 문자열)을 깨지 않기 위해,
+    # push가 실패했을 때만 {"id": ..., "warning": ...} 딕셔너리로 바뀐다.
+    assert isinstance(result, dict), "push 실패 시 반환값이 dict로 바뀌지 않았다"
+    assert isinstance(result.get("id"), str) and result["id"]
+    assert "dummy push rejected for test" in result.get("warning", "")
+
+    # 조용히 삼키지 않는다 — 운영자가 추적할 수 있도록 logger.warning으로도 남는다.
+    assert any(
+        "push 실패" in rec.message for rec in caplog.records
+    ), "push 실패가 logger로 전혀 남지 않았다"
+
+    # 기록 자체는 로컬에 안전하게 남아 있어야 한다(push 경고와 무관하게).
+    recall_result = rs.namu_recall(ctx=_ctx("pushfail"))
+    ids = [d["id"] for d in recall_result["learnings"]]
+    assert result["id"] in ids, "push가 실패했다고 로컬 기록 자체가 사라지면 안 된다"
+
+
+def test_namu_record_no_warning_on_success_keeps_plain_string_return(monkeypatch):
+    """push가 성공(또는 변경 없음)하면 반환값은 여전히 순수 ULID 문자열이어야
+    한다 — supersedes= 등에 반환값을 그대로 넘겨 쓰는 기존 호출자와의 호환성이
+    이 배선의 최우선 기준이었다."""
+    monkeypatch.setattr(
+        ur, "push", lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: True
+    )
+    result = rs.namu_record(
+        task="t", outcome="success", reason="r", ctx=_ctx("pushok")
+    )
+    assert isinstance(result, str) and result

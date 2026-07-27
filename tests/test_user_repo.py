@@ -247,6 +247,117 @@ def test_push_bootstraps_first_commit_from_empty_repo(
 
 
 # ---------------------------------------------------------------------------
+# push — db/namu.db(순수 검색 캐시)는 사용자 저장소로 절대 올라가지 않는다
+# (namu-58 4차 배선, 사용자 결정 4). 진짜 git으로 실제 add/commit/push 결과를
+# 확인한다(이 파일 전체 관례와 동일 — git 자체를 mock하지 않는다).
+# ---------------------------------------------------------------------------
+def test_exclude_local_only_cache_paths_is_idempotent(tmp_path):
+    """순수 단위 테스트 — 실제 clone 없이 임시 저장소 하나에 두 번 불러도
+    `.git/info/exclude`에 줄이 중복되지 않는지 확인한다."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+
+    ur._exclude_local_only_cache_paths(target)
+    ur._exclude_local_only_cache_paths(target)
+
+    lines = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+    assert lines.count("db/namu.db") == 1, "exclude 등록이 중복됐다"
+
+
+def test_push_writes_db_namu_db_into_git_info_exclude(conn, fake_token, local_remote):
+    key = _connect_user(conn, 60, "excludecheck")
+    target = ur.ensure_ready(conn, key)
+    ur.push(conn, key)  # 변경이 없어도(False 반환) exclude 등록 자체는 이뤄져야 한다
+
+    exclude_path = target / ".git" / "info" / "exclude"
+    assert exclude_path.exists()
+    assert "db/namu.db" in exclude_path.read_text(encoding="utf-8").splitlines()
+
+
+def test_push_never_commits_db_namu_db_even_when_it_is_the_only_change(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """db/namu.db만 새로 생겼을 때 — exclude가 status 단계부터 이 파일을 가려야
+    하므로 push는 "변경 없음"(False)으로 끝나야 한다. 파일 자체(로컬 검색
+    캐시)는 디스크에 그대로 남아야 하고, 원격에는 전혀 실리지 않아야 한다."""
+    key = _connect_user(conn, 61, "cacheonly")
+    target = ur.ensure_ready(conn, key)
+    (target / "db").mkdir(parents=True, exist_ok=True)
+    (target / "db" / "namu.db").write_bytes(b"FAKE-SQLITE-CACHE")
+
+    assert ur.push(conn, key) is False
+
+    assert (target / "db" / "namu.db").exists(), "로컬 캐시 파일 자체가 지워지면 안 된다"
+    check = tmp_path / "_check_cache_only"
+    _git(["clone", "-q", f"file://{bare_repo}", str(check)], cwd=tmp_path)
+    assert not (check / "db").exists(), "캐시뿐인데도 원격에 db/ 폴더가 실렸다"
+
+
+def test_push_excludes_db_namu_db_while_pushing_other_real_changes(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """진짜 기억 파일 변경과 db/namu.db가 동시에 있을 때 — 진짜 변경만 커밋·push
+    되고 캐시는 로컬에만 남아야 한다."""
+    key = _connect_user(conn, 62, "cachewithreal")
+    target = ur.ensure_ready(conn, key)
+    (target / "db").mkdir(parents=True, exist_ok=True)
+    (target / "db" / "namu.db").write_bytes(b"FAKE-SQLITE-CACHE")
+    (target / "real.txt").write_text("real memory content\n")
+
+    assert ur.push(conn, key, message="add real.txt") is True
+
+    check = tmp_path / "_check_cache_with_real"
+    _git(["clone", "-q", f"file://{bare_repo}", str(check)], cwd=tmp_path)
+    assert (check / "real.txt").read_text() == "real memory content\n"
+    assert not (check / "db").exists(), "캐시 파일이 진짜 변경과 함께 원격에 실렸다"
+    assert (target / "db" / "namu.db").exists(), "로컬 캐시 파일이 사라졌다"
+
+
+def test_push_untracks_previously_committed_db_namu_db(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """이미 추적(tracked) 중인 경우 대응 — exclude 등록만으로는 이미 커밋된
+    파일에 아무 효과가 없다(제외 목록은 "아직 추적하지 않는" 파일에만 통한다)는
+    것이 이 테스트의 핵심 전제다. 과거(이 배선이 없던 시절)에 db/namu.db가
+    실수로 커밋된 저장소를 흉내내고, 다음 push에서 실제로 인덱스에서 빠지는지
+    (그러나 로컬 디스크 파일 자체는 남는지) 확인한다."""
+    # "과거에 실수로 커밋된 db/namu.db"를 이 배선과 무관한 별도 clone으로 흉내낸다
+    # (ur.push()를 거치지 않고 순수 git으로 직접 커밋 — 실제로 일어났을 법한
+    # 과거 상태를 그대로 재현하기 위해서다).
+    seed = tmp_path / "_seed_legacy"
+    _git(["clone", "-q", f"file://{bare_repo}", str(seed)], cwd=tmp_path)
+    _git(["config", "user.email", "legacy@example.com"], cwd=seed)
+    _git(["config", "user.name", "Legacy"], cwd=seed)
+    (seed / "db").mkdir()
+    (seed / "db" / "namu.db").write_bytes(b"legacy cache blob")
+    _git(["add", "-A"], cwd=seed)
+    _git(["commit", "-q", "-m", "legacy: accidentally committed db cache"], cwd=seed)
+    _git(["push", "-q", "origin", "main"], cwd=seed)
+
+    key = _connect_user(conn, 63, "legacyuser")
+    target = ur.ensure_ready(conn, key)
+    assert (target / "db" / "namu.db").read_bytes() == b"legacy cache blob"
+    # clone 직후에는(우리 exclude 로직이 push() 시점에만 돌므로) 아직 추적 중이다.
+    assert _git(["ls-files", "--", "db/namu.db"], cwd=target).strip() == "db/namu.db"
+
+    (target / "real.txt").write_text("real change after legacy commit\n")
+    assert ur.push(conn, key, message="untrack legacy cache") is True
+
+    assert not _git(["ls-files", "--", "db/namu.db"], cwd=target).strip(), (
+        "이미 추적 중이던 db/namu.db가 push 이후에도 여전히 추적되고 있다"
+    )
+    assert (target / "db" / "namu.db").exists(), (
+        "인덱스에서만 빼야 하는데(--cached) 로컬 파일 자체가 지워졌다"
+    )
+
+    check = tmp_path / "_check_legacy"
+    _git(["clone", "-q", f"file://{bare_repo}", str(check)], cwd=tmp_path)
+    assert not (check / "db").exists(), "이미 추적 중이던 캐시 파일이 원격에서 빠지지 않았다"
+    assert (check / "real.txt").read_text() == "real change after legacy commit\n"
+
+
+# ---------------------------------------------------------------------------
 # push — non-fast-forward 거부, 강제 push 절대 금지 (뮤테이션 타깃 2: --force로 교체)
 # ---------------------------------------------------------------------------
 def test_push_rejects_non_fast_forward_without_overwriting_other_pc(

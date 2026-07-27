@@ -15,6 +15,16 @@
 `_paths_for_user` 세 함수에 있다 — 키가 없거나 안전하지 않으면(경로 이탈 문자
 포함) 저장/조회를 거부하고, resolve() 후 STORE_ROOT/users 밖으로 벗어나지
 않는지 이중으로 재확인한다.
+
+`STORE_ROOT/users/<키>/` 폴더 자체는 `user_repo.py`(사용자 신원 계층 3차)가
+관리하는 **사용자 GitHub 저장소의 캐시(사본)**다(user_dir()가 이 파일의
+_paths_for_user()와 같은 폴더를 가리킨다 — 계약은 tests/test_user_repo.py로
+고정됨). namu-58 4차 배선까지는 이 파일이 user_repo를 한 번도 부르지 않아
+(grep 실측 0건) 그 사실이 무의미했다 — 3도구가 항상 이 폴더를 직접 읽고 쓰되,
+그 폴더를 "지금 쓸 수 있는 최신 상태"로 만들거나(`ensure_ready`) 변경을
+사용자 저장소로 되돌려 보내는(`push`) 일은 전혀 일어나지 않았다. 이 배선
+(`_sync_or_reject`/`_push_and_collect_warning`, TTL 관련 함수들) 이후에는
+읽기 전에 TTL 기반으로 최신화하고, 쓰기 후에 항상 push를 시도한다.
 """
 import hmac
 import json
@@ -23,6 +33,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -36,7 +47,9 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
 
 import config as cfg  # noqa: E402
 import db  # noqa: E402
+import identity  # noqa: E402
 import profile  # noqa: E402
+import user_repo  # noqa: E402
 import web_auth  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
@@ -177,6 +190,198 @@ def _normalize_tags(tags: "list[str] | str | None") -> "list[str] | None":
 
 
 # ---------------------------------------------------------------------------
+# 저장소 동기화 배선(namu-58 4차) — user_repo.ensure_ready/push를 실제로 부른다.
+#
+# 이 절 전체의 존재 이유: 이 파일이 지금까지 user_repo를 한 번도 호출하지
+# 않았다(grep 실측 0건) — 사용자가 GitHub 로그인·저장소 연결을 마쳐도 그
+# 저장소가 실제 기억 읽기·쓰기에 전혀 쓰이지 않았다.
+#
+# ## TTL(사용자 결정 1)
+#
+# 매 조회(namu_recall/namu_search)마다 fetch하면 조회 하나에도 항상 GitHub
+# 왕복이 걸려 지연이 커지고, 여러 사용자가 동시에 조회하면 GitHub API
+# 레이트리밋에도 쉽게 부딪힌다. 그래서 "마지막으로 최신화한 지 TTL(기본 60초,
+# `NAMU_REPO_SYNC_TTL_SEC`로 조절)이 지났을 때만" `ensure_ready`를 부른다 —
+# 단, 사본이 아직 없으면(`.git` 없음, 첫 접속) TTL과 무관하게 반드시 부른다
+# (clone 자체가 필요하므로 건너뛸 방법이 없다).
+#
+# ## "마지막 최신화 시각"을 어디에 두는가
+#
+# `user_repo.user_dir(key)/.git/` 밑의 파일 하나(`_sync_marker_path`)에 mtime을
+# 실어 기록한다. 이 자리를 고른 근거 둘(작업 지시 제약 ⓐⓑ):
+#   ⓐ 사용자 GitHub 저장소로 커밋되지 않아야 한다 — `.git/` 디렉터리 자체는
+#      git이 스스로 쓰는 저장소 메타데이터 영역이라 `git add -A`가 애초에
+#      손을 대지 않는다(실측: `.git/` 밑에 임의 파일을 만들어도
+#      `git status --porcelain`에 전혀 나타나지 않는다 — user_repo.py의
+#      `ensure_ready`가 clone 직후 곧바로 origin remote를 지우는 것과 같은
+#      "로컬 전용 상태" 취급이다). 그래서 `.gitignore`/`.git/info/exclude`
+#      등록조차 필요 없이 "커밋되지 않는다"가 구조적으로 보장된다.
+#   ⓑ 프로세스 재시작을 넘겨 살아남아야 한다 — 이 서버는 stateless HTTP이고
+#      워커가 여럿일 수 있으므로 파이썬 전역 dict(프로세스 하나에 갇힘)는
+#      부적합하다. 파일은 디스크에 남아 재시작·다른 워커에서도 같은 값을
+#      본다. 동시성 정합성을 엄격히 보장하지는 않는다(두 워커가 거의 동시에
+#      mtime을 읽고 쓰면 레이스가 날 수 있다) — 하지만 이 값은 "정확한 락"이
+#      아니라 "너무 자주 GitHub에 왕복하지 않기 위한 느슨한 힌트"이므로, 레이스의
+#      최악의 결과는 fetch가 의도보다 한 번 더 일어나는 것뿐이고 사본 손상이나
+#      데이터 유실로는 이어지지 않는다.
+# ---------------------------------------------------------------------------
+_REPO_SYNC_TTL_ENV = "NAMU_REPO_SYNC_TTL_SEC"
+_DEFAULT_REPO_SYNC_TTL_SEC = 60.0
+_SYNC_MARKER_FILENAME = "namu-cloud-last-sync"
+
+
+def _repo_sync_ttl_sec() -> float:
+    """TTL(초)을 환경변수에서 매 호출 시 읽는다(store_root()와 동일한 지연
+    평가 원칙 — 테스트가 monkeypatch.setenv로 격리할 수 있어야 한다). 미설정
+    시 기본 60초."""
+    raw = os.environ.get(_REPO_SYNC_TTL_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_REPO_SYNC_TTL_SEC
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{_REPO_SYNC_TTL_ENV} 값이 숫자가 아닙니다: {raw!r}. "
+            f"{_REPO_SYNC_TTL_ENV} must be a number (seconds)."
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            f"{_REPO_SYNC_TTL_ENV}는 0 이상이어야 합니다. "
+            f"{_REPO_SYNC_TTL_ENV} must be >= 0."
+        )
+    return value
+
+
+def _sync_marker_path(user_key: str) -> Path:
+    """`user_key`의 마지막 `ensure_ready` 성공 시각을 적어 둘 파일 경로.
+
+    `user_repo.user_dir(key)/.git/` 밑에 두는 이유는 위 절 docstring 참고.
+    `.git`가 아직 없는(사본 자체가 없는) 사용자에게는 이 경로가 존재할 수
+    없다는 점이 `_needs_sync`가 "사본 없음"을 판별하는 근거이기도 하다.
+    """
+    return user_repo.user_dir(user_key) / ".git" / _SYNC_MARKER_FILENAME
+
+
+def _needs_sync(user_key: str, ttl_sec: float) -> bool:
+    """지금 `user_repo.ensure_ready`를 불러야 하는지 판정하는 순수 판정 함수.
+
+    ① 사본 자체가 없으면(`.git` 없음) TTL과 무관하게 항상 True(사용자 결정 1의
+    "단, ~" 조항) — clone이 필요한 상황을 TTL로 건너뛸 방법이 없다.
+    ② 사본은 있지만 마커 파일이 없으면(과거 이 배선이 없던 시절에 만들어진
+    사본이거나, 마커 기록 자체가 실패했던 경우) "한 번도 최신화 기록을 남기지
+    않은 상태"로 보고 True — "모르면 넘어가기"가 아니라 "모르면 최신화"가 이
+    서버의 안전한 기본값이다(낡은 캐시를 계속 믿는 쪽보다 한 번 더 fetch하는
+    쪽의 비용이 훨씬 싸다).
+    ③ 그 외에는 마지막 최신화로부터 지난 시간이 TTL 이상인지로 판정한다.
+    """
+    target = user_repo.user_dir(user_key)
+    if not (target / ".git").is_dir():
+        return True
+    marker = _sync_marker_path(user_key)
+    try:
+        age = time.time() - marker.stat().st_mtime
+    except OSError:
+        return True
+    return age >= ttl_sec
+
+
+def _mark_synced(user_key: str) -> None:
+    """방금 `ensure_ready`가 성공했다는 사실을 마커 파일에 남긴다.
+
+    `ensure_ready`가 예외를 던진 호출 경로에서는 이 함수를 부르지 않는다(호출부
+    `_ensure_repo_synced` 참고) — 실패한 시도를 "최신화 성공"으로 기록하면 다음
+    조회가 낡은 사본을 TTL이 지나도록 그대로 믿게 된다.
+
+    `.git` 폴더를 이 함수가 대신 만들어주지 않는다(의도적) — 실제
+    `user_repo.ensure_ready`는 성공적으로 반환할 때 항상 `.git`을 이미 만들어
+    둔 상태다. 만약 `.git`이 없는데도 이 함수가 불렸다면(정상 경로에서는 나올
+    수 없는 모순 상태, 혹은 결함 있는 대역) `mkdir(parents=True)`로 `.git`을
+    조용히 만들어버리면 `_needs_sync`가 "사본이 이미 있다"고 오판하게 되고,
+    그러면 실제로는 사본이 없는데도 다음 TTL 동안 재시도(clone)를 건너뛰는
+    쪽으로 안전성이 거꾸로 뒤집힌다 — 그래서 이 경우엔 그냥 마커 기록을
+    건너뛴다(다음 호출이 다시 `_needs_sync`에서 True를 받아 재시도하는 것이
+    "마커를 못 써서 한 번 더 부르는" 쪽이 훨씬 안전하다).
+    """
+    marker = _sync_marker_path(user_key)
+    if not marker.parent.is_dir():
+        logger.warning(
+            "사용자(%s) 최신화 마커를 쓸 폴더(.git)가 없습니다 — ensure_ready가 "
+            "성공했다고 보고했는데 사본 폴더가 실제로는 없는 모순 상태입니다. "
+            "마커 기록을 건너뜁니다(다음 호출이 다시 최신화를 시도합니다).",
+            user_key,
+        )
+        return
+    marker.write_text(str(time.time()), encoding="utf-8")
+
+
+def _ensure_repo_synced(conn: sqlite3.Connection, user_key: str) -> None:
+    """TTL 판정 결과에 따라 필요할 때만 `user_repo.ensure_ready`를 부른다.
+
+    `user_repo.RepoNotConnected`/`QuotaExceeded`/`GitCommandFailed`/
+    `SizeCheckFailed`는 그대로(변환하지 않고) 밖으로 내보낸다 — 그중
+    `RepoNotConnected`만 호출부(`_sync_or_reject`)가 사용자 안내 메시지
+    (`ValueError`)로 바꿔치기한다. 나머지(용량 초과·git 실패·크기 조회 실패)는
+    "사용자 입력이 틀렸다"가 아니라 "운영 중 실패"이므로 user_repo가 이미
+    구성한(토큰 마스킹을 거친) 메시지를 그대로 내보내는 편이 맞다.
+    """
+    if not _needs_sync(user_key, _repo_sync_ttl_sec()):
+        return
+    user_repo.ensure_ready(conn, user_key)
+    _mark_synced(user_key)
+
+
+def _sync_or_reject(conn: sqlite3.Connection, user_key: str) -> None:
+    """3도구(namu_recall/namu_search/namu_record) 공용 진입점(사용자 결정 2).
+
+    저장소를 연결하지 않은 사용자는 `user_repo.RepoNotConnected`를 그대로
+    내보내지 않고 `ValueError`로 감싼다 — 이 서버의 기존 사용자 입력 거부
+    관례(`_validate_user_key`/`_resolve_via`)가 전부 ValueError이므로 타입을
+    맞춘다. 메시지 내용 자체는 새로 짓지 않고 `RepoNotConnected`의 원문을
+    그대로 재사용한다 — 그 메시지가 이미 "로그인하고 저장소를 연결하라"는
+    온보딩 안내를 한국어+영어로 담고 있다(`user_repo._require_connected` 참고,
+    사용자 결정 2가 명시적으로 재사용을 권한 지점이다).
+    """
+    try:
+        _ensure_repo_synced(conn, user_key)
+    except user_repo.RepoNotConnected as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _push_and_collect_warning(conn: sqlite3.Connection, user_key: str) -> "str | None":
+    """namu_record 전용 — 로컬 기록이 끝난 뒤 push하되, 실패해도 기록 자체는
+    성공으로 둔다(사용자 결정 3).
+
+    왜 실패를 예외로 올리지 않는가: 이 함수가 불릴 때는 이미 `db.record`/
+    `profile.record_fact`가 끝나 기억이 로컬 사본에 안전히 남아 있다. 그 뒤
+    push가 `PushRejected`/`QuotaExceeded`/`GitCommandFailed` 등으로 실패해도
+    다음 record 때 그 변경까지 함께 push된다(`user_repo.push`는 `git add -A`라
+    이전에 못 올린 변경이 자동으로 함께 실린다). 반대로 여기서 예외를 던져
+    도구 호출 자체를 실패시키면, 호출한 AI가 "저장 실패"로 판단해 같은 내용을
+    중복 기록할 위험이 생긴다 — 로컬에는 이미 있는데 또 쓰는 셈이다.
+
+    조용히 삼키지는 않는다 — `logger.warning`으로 반드시 남기고(운영자가 push
+    실패 누적을 추적할 수 있어야 한다), 호출자에게도 알려야 하므로(사용자 결정
+    3) 경고 문자열을 반환한다. None이면 push가 필요 없었거나(변경 없음)
+    성공했다는 뜻이다.
+    """
+    try:
+        user_repo.push(conn, user_key)
+    except user_repo.UserRepoError as exc:
+        logger.warning(
+            "사용자(%s) 기록 이후 GitHub push 실패 — 기억은 로컬에 안전히 남아 "
+            "있고 다음 기록 때 함께 재시도됩니다: %s",
+            user_key, exc,
+        )
+        return (
+            "기억은 저장했지만 방금 GitHub 저장소로 올리지 못했습니다(다음 기록 "
+            f"때 함께 재시도됩니다): {exc} | Saved locally, but the sync to your "
+            "GitHub repo failed just now (will retry automatically on the next "
+            "record call)."
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 3도구 — 이름·파라미터는 개인용 mcp_server.py와 동일(claude.ai 커넥터 호환).
 # ---------------------------------------------------------------------------
 @mcp.tool()
@@ -199,9 +404,14 @@ def namu_recall(
       task_type: filter by code/doc/analysis/other (optional; learnings only)
       limit: max learnings entries (default 5)
     Returns: {"profile": [...], "learnings": [...]}
+    Raises: ValueError if this user has not logged in and connected a GitHub
+      repository yet (onboarding incomplete) — the message explains where to
+      go, in Korean and English.
     """
     key = _resolve_user(ctx)
     _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
@@ -227,9 +437,14 @@ def namu_search(
       outcome_filter: 'success'/'failure'/'partial' to narrow returned rows (optional)
       limit: max returned rows (default 10)
     Returns: {"results": [...dicts...], "summary": {"success": N, "failure": M, "partial": K}}
+    Raises: ValueError if this user has not logged in and connected a GitHub
+      repository yet (onboarding incomplete) — the message explains where to
+      go, in Korean and English.
     """
     key = _resolve_user(ctx)
     _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
@@ -274,25 +489,52 @@ def namu_record(
       statement: the fact/preference itself (fact only)
       source: WHY/how you know this is true (fact only, required, non-empty)
       supersedes: id of the prior fact entry this one corrects (fact only, optional)
-    Returns: the new entry's ULID (str)
+    Returns: normally the new entry's ULID (str), unchanged from before this
+      tool started syncing to GitHub — this keeps existing callers (e.g. ones
+      that pass the returned id straight into a later `supersedes=`) working
+      without any change on the common path. The entry is always written to
+      the local copy first; after that a push to the user's GitHub repo is
+      attempted. If — and only if — that push fails (e.g. a transient network
+      error, or another device pushed first and this write must wait for the
+      next sync), the local write is still kept as a success (it is never
+      lost, and will be included automatically in the next successful push),
+      but the return value becomes {"id": <ulid str>, "warning": <str>}
+      instead of the plain string in that case — check `isinstance(result, dict)`
+      (or `"warning" in result`) to tell the two shapes apart. See namu-58
+      4차 decision 3 (module docstring) for why the return shape only changes
+      on this rare failure path instead of always becoming a dict.
+    Raises: ValueError if this user has not logged in and connected a GitHub
+      repository yet (onboarding incomplete) — the message explains where to
+      go, in Korean and English. (A failed push after a successful local
+      write does NOT raise — see the warning field above.)
     """
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)  # ?client= 출처 태그 (개인용 미러 — 기록에 함께 저장)
-    paths = _paths_for_user(key)
-    _ensure_fresh(paths)
-    if kind in ("lesson", "note"):
-        return db.record(
-            task, outcome, reason, task_type, verified_by,
-            _normalize_tags(tags), kind=kind, via=via, paths=paths,
-        )
-    elif kind == "fact":
-        vb = verified_by if verified_by in ("human", "ai", "unverified") else "human"
-        return profile.record_fact(
-            subject, statement, source, supersedes=supersedes,
-            verified_by=vb, tags=_normalize_tags(tags), via=via, paths=paths,
-        )
-    else:
-        raise ValueError("kind는 'lesson'/'note'/'fact' 중 하나여야 합니다")
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
+        paths = _paths_for_user(key)
+        _ensure_fresh(paths)
+        if kind in ("lesson", "note"):
+            entry_id = db.record(
+                task, outcome, reason, task_type, verified_by,
+                _normalize_tags(tags), kind=kind, via=via, paths=paths,
+            )
+        elif kind == "fact":
+            vb = verified_by if verified_by in ("human", "ai", "unverified") else "human"
+            entry_id = profile.record_fact(
+                subject, statement, source, supersedes=supersedes,
+                verified_by=vb, tags=_normalize_tags(tags), via=via, paths=paths,
+            )
+        else:
+            raise ValueError("kind는 'lesson'/'note'/'fact' 중 하나여야 합니다")
+
+        # 로컬 기록이 끝난 뒤에만 push를 시도한다(사용자 결정 3) — 위에서 raise된
+        # 경로(kind 오류/필수값 누락 등)는 여기 도달하지 않으므로 push 자체가
+        # 시도되지 않는다.
+        warning = _push_and_collect_warning(conn, key)
+    if warning:
+        return {"id": entry_id, "warning": warning}
+    return entry_id
 
 
 # ---------------------------------------------------------------------------
