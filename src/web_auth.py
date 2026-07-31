@@ -40,7 +40,9 @@ Claude Code·agy 사용자는 이 주소를 붙이는 것이 아니라 나무를
 import hashlib
 import hmac
 import html
+import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -50,7 +52,13 @@ from urllib.parse import urlencode
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 
 import github_app as ga
@@ -395,6 +403,12 @@ _BASE_CSS = (
     "textarea,button,input,pre{max-width:100%;box-sizing:border-box;}"
     "pre{overflow-x:auto;background:#f0f0f0;padding:8px;border-radius:4px;}"
     "details{margin:12px 0;} summary{cursor:pointer;font-weight:bold;}"
+    # 그 자리에서 바뀐 결과가 "방금 나타났다"는 것을 몸으로 알리는 짧은 등장 효과
+    # (namu-69). 움직임을 줄여 달라고 설정한 사용자에게는 켜지 않는다.
+    "@keyframes namu-pop{from{opacity:0;transform:translateY(-4px);}"
+    "to{opacity:1;transform:none;}}"
+    ".namu-pop{animation:namu-pop .25s ease-out;}"
+    "@media (prefers-reduced-motion:reduce){.namu-pop{animation:none;}}"
     "@media (prefers-color-scheme:dark){"
     "body{background:#15171a;color:#e6e6e6;}"
     "a{color:#7fb3ff;}"
@@ -707,22 +721,100 @@ def _html_me_not_connected(user_key: str, notice_html: str = "") -> str:
 # 채팅에 붙여넣은 미리보기 크롤러가 클릭 없이 열쇠를 갈아버릴 수 있다.
 # CSRF는 세션 쿠키의 SameSite=Lax가 막는다(다른 사이트에서 보낸 POST에는 이
 # 쿠키가 실리지 않아 세션 없음으로 거절된다 — `_session_user_key` 참고).
-_MCP_ACTIONS_HTML = (
-    "<h2>주소 관리</h2>"
-    '<form method="post" action="/auth/mcp/test" style="display:inline;">'
-    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-    "연결 시험</button></form> "
-    '<form method="post" action="/auth/mcp/rotate" style="display:inline;">'
-    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-    "주소 재발급</button></form> "
-    '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
-    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-    "주소 폐기</button></form>"
-    "<p><small><b>연결 시험</b>은 지금 이 주소가 실제로 응답하는지 확인합니다. "
-    "<b>재발급</b>은 새 주소를 만들고 옛 주소를 즉시 막습니다(AI에 등록해 둔 "
-    "커넥터 주소도 새로 바꿔 주셔야 합니다). <b>폐기</b>는 주소를 아예 없앱니다 "
-    "— 누르면 한 번 더 확인합니다.</small></p>"
+# 연결 시험만 화면을 새로 띄우지 않고 그 자리에서 처리한다(namu-69).
+#
+# 왜 이 버튼만 다른가: 재발급·폐기는 화면 내용 자체가 바뀌므로(새 주소가 나오거나
+# 주소가 사라진다) 페이지가 다시 그려지는 것이 곧 결과다. 반면 연결 시험은 아무것도
+# 바꾸지 않아서, 다시 그려도 화면이 전과 똑같아 보인다 — 실측에서 사용자가 "새로고침만
+# 된 것 같고 응답이 온 건지 알 수 없었다"고 보고한 지점이 정확히 여기다. 게다가 프로브는
+# 최대 십여 초가 걸려 그동안 화면이 비어 있다.
+#
+# 그래서 ①누른 즉시 "확인하는 중"을 그 자리에 띄우고 ②결과를 같은 자리에서 알림
+# 상자로 바꿔 넣는다. 화면 전환이 없으니 **달라진 것은 그 상자 하나뿐**이라 눈에 띈다.
+#
+# 자바스크립트가 없거나 실패해도 폼은 그대로 남아 있어 종전처럼 전체 페이지가 다시
+# 그려지며 같은 결과가 나온다(기능이 사라지지 않는다).
+_MCP_TEST_PROGRESS_HTML = (
+    '<p id="mcp-test-progress" style="display:none;margin:16px 0;padding:12px 14px;'
+    'border-left:5px solid #6b7280;background:rgba(107,114,128,0.12);'
+    'border-radius:0 6px 6px 0;">'
+    '<span aria-hidden="true">⏳</span> <b>확인하는 중입니다.</b> '
+    "최대 {wait}초쯤 걸릴 수 있습니다 — 이 화면을 그대로 두고 잠시만 기다려 주세요."
+    "</p>"
 )
+
+_MCP_TEST_FAILED_HTML = (
+    "<b>확인 요청을 보내지 못했습니다.</b> 인터넷 연결이 끊겼거나 로그인이 만료됐을 "
+    "수 있습니다 — 화면을 새로고침한 뒤 다시 눌러 보세요."
+)
+
+def _html_mcp_test_script() -> str:
+    """연결 시험 버튼을 그 자리에서 처리하는 스크립트(외부 스크립트 없음).
+
+    함수인 이유: 실패 안내 문구를 `_html_notice`로 만들어 심는데, 그 함수가 이
+    파일 뒤쪽에 정의돼 있어 모듈 상수로 두면 로드 시점에 아직 없다. 화면 조각을
+    만드는 다른 함수들과 같은 원칙(그릴 때 만든다)이기도 하다.
+    """
+    failed = json.dumps(_html_notice(_MCP_TEST_FAILED_HTML, tone="warn"))
+    return (
+        "<script>"
+        "(function(){"
+        "var f=document.getElementById('mcp-test-form');"
+        # 옛 브라우저(fetch 없음)는 손대지 않는다 — 폼 제출로 종전처럼 동작한다.
+        "if(!f||!window.fetch)return;"
+        "var b=document.getElementById('mcp-test-btn');"
+        "var p=document.getElementById('mcp-test-progress');"
+        "var o=document.getElementById('mcp-test-result');"
+        "var label=b.textContent;"
+        "var show=function(html){o.innerHTML=html;"
+        "var box=o.firstElementChild;"
+        "if(box){box.className='namu-pop';"
+        "if(box.scrollIntoView){box.scrollIntoView({block:'nearest'});}}};"
+        "f.addEventListener('submit',function(e){"
+        "e.preventDefault();"
+        "b.disabled=true;b.textContent='확인 중…';"
+        "o.innerHTML='';p.style.display='block';"
+        "fetch(f.action,{method:'POST',credentials:'same-origin',"
+        "headers:{'Accept':'application/json'}})"
+        ".then(function(r){return r.json();})"
+        ".then(function(d){show(d.notice_html||'');})"
+        f".catch(function(){{show({failed});}})"
+        ".then(function(){p.style.display='none';b.disabled=false;"
+        "b.textContent=label;});"
+        "});"
+        "})();"
+        "</script>"
+    )
+
+
+def _html_mcp_actions() -> str:
+    """주소 관리 3버튼 + 연결 시험의 진행/결과 자리.
+
+    대기 시간 안내는 프로브 상수에서 계산한다 — 손으로 적은 숫자는 타임아웃을 조정한
+    순간 조용히 거짓말이 된다(그 문구를 믿고 기다리는 사람에게는 그게 곧 고장이다).
+    """
+    wait = math.ceil(_MCP_PROBE_TIMEOUT_SEC * 2 + _MCP_PROBE_RETRY_DELAY_SEC)
+    return (
+        "<h2>주소 관리</h2>"
+        '<form method="post" action="/auth/mcp/test" id="mcp-test-form" '
+        'style="display:inline;">'
+        '<button type="submit" id="mcp-test-btn" '
+        'style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+        "연결 시험</button></form> "
+        '<form method="post" action="/auth/mcp/rotate" style="display:inline;">'
+        '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+        "주소 재발급</button></form> "
+        '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
+        '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+        "주소 폐기</button></form>"
+        + _MCP_TEST_PROGRESS_HTML.format(wait=wait)
+        + '<div id="mcp-test-result"></div>'
+        + "<p><small><b>연결 시험</b>은 지금 이 주소가 실제로 응답하는지 확인합니다. "
+        "<b>재발급</b>은 새 주소를 만들고 옛 주소를 즉시 막습니다(AI에 등록해 둔 "
+        "커넥터 주소도 새로 바꿔 주셔야 합니다). <b>폐기</b>는 주소를 아예 없앱니다 "
+        "— 누르면 한 번 더 확인합니다.</small></p>"
+        + _html_mcp_test_script()
+    )
 
 
 def _html_me_connected(
@@ -740,7 +832,7 @@ def _html_me_connected(
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
-        body.append(_MCP_ACTIONS_HTML)
+        body.append(_html_mcp_actions())
     elif revoked:
         # 사용자가 스스로 없앤 상태 — "만들지 못했습니다"(장애)와 절대 같은
         # 문구를 쓰면 안 된다. 되돌리는 방법(재발급)을 그 자리에 둔다.
@@ -914,14 +1006,31 @@ def probe_mcp_connection(mcp_secret: str) -> str:
     return _PROBE_UNKNOWN
 
 
+# 알림 상자의 색·아이콘. 색만으로는 구분되지 않는다 — 실측(namu-69)에서 사용자가
+# "페이지가 새로고침된 것처럼만 보이고 뭐가 달라졌는지 눈에 안 띈다"고 보고했다.
+# 그래서 ①맨 앞에 뜻이 바로 읽히는 아이콘을 두고 ②옅은 배경색을 깔아 상자 자체가
+# 본문과 분리돼 보이게 한다. 배경은 반투명(rgba)이라 라이트·다크 어느 쪽에서도
+# 글자 대비를 해치지 않는다(색상값을 테마별로 두 벌 관리하지 않아도 된다).
+_NOTICE_TONES = {
+    "info": ("#2a6fdb", "rgba(42,111,219,0.10)", "ℹ️"),
+    "good": ("#1a7f37", "rgba(26,127,55,0.12)", "✅"),
+    "warn": ("#b06000", "rgba(176,96,0,0.12)", "⚠️"),
+    "bad": ("#b00020", "rgba(176,0,32,0.12)", "⛔"),
+}
+
+
 def _html_notice(text_html: str, *, tone: str = "info") -> str:
-    """화면 맨 위에 한 줄 붙는 알림 상자. 색은 라이트/다크 양쪽에서 읽히도록
-    배경 대신 왼쪽 굵은 선으로만 구분한다."""
-    colors = {"info": "#2a6fdb", "good": "#1a7f37", "warn": "#b06000", "bad": "#b00020"}
-    color = colors.get(tone, colors["info"])
+    """결과 알림 상자. 아이콘 + 왼쪽 굵은 선 + 옅은 배경으로 본문과 확실히 구분한다.
+
+    `role="status"`를 붙이는 이유: 이 상자는 사용자가 버튼을 누른 결과가 화면에
+    나타나는 자리다. 화면을 보지 않는 사용자(스크린리더)에게도 그 등장이 읽혀야
+    "눌렸는지 모르겠다"가 생기지 않는다.
+    """
+    color, tint, icon = _NOTICE_TONES.get(tone, _NOTICE_TONES["info"])
     return (
-        f'<p style="border-left:4px solid {color};padding:8px 12px;margin:16px 0;">'
-        f"{text_html}</p>"
+        f'<p role="status" style="border-left:5px solid {color};background:{tint};'
+        'padding:12px 14px;margin:16px 0;border-radius:0 6px 6px 0;">'
+        f'<span aria-hidden="true">{icon}</span> {text_html}</p>'
     )
 
 
@@ -953,6 +1062,15 @@ _NOTICE_ROTATED = _html_notice(
 
 _NOTICE_REVOKED = _html_notice(
     "<b>주소를 폐기했습니다.</b> 옛 주소로는 더 이상 접속할 수 없습니다.",
+    tone="warn",
+)
+
+# 화면 안에서 결과만 받아 가는 요청이 세션 만료로 거절될 때 쓰는 알림(namu-69).
+# 전체 페이지를 다시 그리는 경로는 종전대로 로그인 안내 화면으로 보낸다 — 그쪽은
+# 화면 전체가 바뀌므로 안내가 묻히지 않지만, 그 자리에 심는 요청은 이 한 줄이
+# 없으면 아무 일도 일어나지 않은 것처럼 보인다.
+_NOTICE_LOGIN_EXPIRED = _html_notice(
+    "<b>로그인이 만료됐습니다.</b> 화면을 새로고침해 다시 로그인한 뒤 눌러 주세요.",
     tone="warn",
 )
 
@@ -1284,16 +1402,43 @@ def _me_page_response(
 # 그대로 쓴다. 다른 사이트에서 보낸 POST(CSRF)는 세션 쿠키가 SameSite=Lax라
 # 애초에 쿠키가 실리지 않아 여기서 401로 끊긴다.
 # ---------------------------------------------------------------------------
+def _wants_json(request: Request) -> bool:
+    """화면 안에서 그 자리에 결과만 받아 가려는 요청인가(namu-69).
+
+    별도 경로(`/auth/mcp/test.json` 등)를 새로 만들지 않는 이유: 경로가 늘면
+    세션 검증·CSRF 성질(POST 전용, SameSite=Lax)을 두 곳에서 지켜야 하고, 한쪽만
+    고치는 사고가 이 프로젝트에서 반복됐다. 같은 경로가 **같은 판정**을 하고
+    포장지만 바꾼다.
+    """
+    return "application/json" in (request.headers.get("accept") or "").lower()
+
+
+def _test_result_response(request: Request, notice_html: str, status_code: int = 200):
+    """연결 시험의 결과 포장지 — 화면 안 요청이면 알림 상자만, 아니면 종전대로
+    내 페이지 전체를 다시 그린다(자바스크립트 없이도 기능이 살아 있어야 한다).
+
+    돌려주는 HTML은 전부 이 파일이 만든 **고정 문구**다(사용자 입력이 섞이지
+    않는다) — 화면에서 그대로 심어도 안전한 이유가 여기에 있다.
+    """
+    if _wants_json(request):
+        return JSONResponse({"notice_html": notice_html}, status_code=status_code)
+    return None
+
+
 async def mcp_test(request: Request) -> Response:
     """지금 이 주소가 실제로 응답하는지 서버가 대신 두드려 본다."""
     user_key = _session_user_key(request)
     if not user_key:
-        return HTMLResponse(_html_me_login_required(), status_code=401)
+        return _test_result_response(request, _NOTICE_LOGIN_EXPIRED, 401) or HTMLResponse(
+            _html_me_login_required(), status_code=401
+        )
 
     with closing(identity.connect()) as conn:
         row = identity.get_by_user_key(conn, user_key)
         if row is None:
-            return HTMLResponse(_html_me_login_required(), status_code=401)
+            return _test_result_response(
+                request, _NOTICE_LOGIN_EXPIRED, 401
+            ) or HTMLResponse(_html_me_login_required(), status_code=401)
         mcp_secret = (row or {}).get("mcp_secret")
 
     if not mcp_secret:
@@ -1307,6 +1452,10 @@ async def mcp_test(request: Request) -> Response:
         # 영원히 처리되지 않아 반드시 타임아웃한다(= 멀쩡한 주소가 늘 "확인 불가").
         verdict = await run_in_threadpool(probe_mcp_connection, mcp_secret)
         notice = _PROBE_NOTICES[verdict]
+
+    json_response = _test_result_response(request, notice)
+    if json_response is not None:
+        return json_response
 
     with closing(identity.connect()) as conn:
         return _me_page_response(request, conn, user_key, notice)

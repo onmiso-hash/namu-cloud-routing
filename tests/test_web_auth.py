@@ -1503,6 +1503,133 @@ def test_connection_test_with_forged_session_rejected(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 눌렀는지 알 수 있는가(namu-69) — 이 절이 지키는 것은 판정이 아니라 **전달**이다.
+#
+# 실측 보고: 사용자가 [연결 시험]을 누른 뒤 "아무 문구도 안 나온다"고 했고, 잠시
+# 뒤 결과는 정상이었다. 이어서 "페이지가 새로고침되는 것처럼만 보이고 달라진 게
+# 눈에 안 띈다"고 했다. 즉 기능은 내내 통과했는데 ①기다리는 동안 화면이 비어 있고
+# ②결과가 나와도 화면 전체가 다시 그려져 무엇이 바뀌었는지 알 수 없었다. 이
+# 버튼은 "지금 살아있는가"를 확인하려고 누르는 것이라, 무반응은 곧 "서버가 죽었나"로
+# 읽힌다 — 기능의 목적과 정반대 인상을 준다.
+# ---------------------------------------------------------------------------
+def test_my_page_has_progress_and_result_slots_for_the_test_button(client, monkeypatch):
+    """누르는 순간 채워질 '진행' 자리와 결과가 들어올 자리가 화면에 미리 있어야
+    한다 — 그 자리가 없으면 결과는 갈 곳이 없어 페이지 전체 새로고침으로 돌아간다."""
+    _connect_via_login(client, monkeypatch, github_id=31020, repo="wen/memories")
+
+    body = client.get("/auth/me").text
+
+    assert 'id="mcp-test-form"' in body
+    assert 'id="mcp-test-btn"' in body
+    assert 'id="mcp-test-progress"' in body
+    assert 'id="mcp-test-result"' in body
+    assert "확인하는 중입니다" in body
+
+
+def test_test_button_is_locked_while_the_check_runs(client, monkeypatch):
+    """응답을 기다리는 동안 버튼을 잠근다 — 십여 초짜리 확인이라 연타가 쉽고,
+    겹친 요청은 서버가 자기 자신을 여러 번 두드리게 만든다. 끝나면 원래 이름표로
+    되돌린다(잠긴 채로 남으면 두 번째 확인을 못 한다)."""
+    _connect_via_login(client, monkeypatch, github_id=31025, repo="cho/memories")
+
+    body = client.get("/auth/me").text
+
+    assert "b.disabled=true" in body
+    assert "b.disabled=false" in body
+    assert "b.textContent=label" in body
+
+
+def test_announced_wait_covers_the_real_worst_case(client, monkeypatch):
+    """안내에 적힌 대기 시간은 실제 최악(프로브 2회 + 재시도 대기) 이상이어야
+    한다. 손으로 적은 숫자는 타임아웃을 조정한 순간 조용히 거짓말이 되고, 그
+    문구를 믿고 기다리는 사람에게는 그것이 곧 고장이다."""
+    _connect_via_login(client, monkeypatch, github_id=31021, repo="xu/memories")
+
+    body = client.get("/auth/me").text
+
+    worst = wa._MCP_PROBE_TIMEOUT_SEC * 2 + wa._MCP_PROBE_RETRY_DELAY_SEC
+    announced = int(re.search(r"최대 (\d+)초쯤", body).group(1))
+    assert announced >= worst
+
+
+def test_result_notice_is_visually_unmistakable(client, monkeypatch):
+    """결과 상자는 색만으로 구분하지 않는다 — 아이콘과 배경으로 본문과 갈라지고,
+    화면을 보지 않는 사용자에게도 등장이 읽혀야 한다(role=status)."""
+    _connect_via_login(client, monkeypatch, github_id=31022, repo="yuna/memories")
+    probe, _urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test", headers={"Accept": "application/json"})
+
+    notice = r.json()["notice_html"]
+    assert _ALIVE_MARK in notice
+    assert "✅" in notice
+    assert 'role="status"' in notice
+    assert "background:" in notice
+
+
+def test_in_place_request_returns_only_the_notice(client, monkeypatch):
+    """화면 안에서 그 자리에 심으려는 요청에는 알림 상자만 돌려준다 — 페이지를
+    통째로 돌려주면 그 안의 접속 주소·사용자 키까지 매번 함께 실려 나간다."""
+    row = _connect_via_login(client, monkeypatch, github_id=31023, repo="zoe/memories")
+    probe, _urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test", headers={"Accept": "application/json"})
+
+    assert r.status_code == 200
+    body = r.json()["notice_html"]
+    assert "<html" not in body.lower()
+    assert row["mcp_secret"] not in body
+
+
+@pytest.mark.parametrize(
+    "status,mark",
+    [(200, _ALIVE_MARK), (404, _INVALID_MARK), (None, _UNKNOWN_MARK)],
+)
+def test_in_place_path_gives_the_same_three_verdicts(client, monkeypatch, status, mark):
+    """포장지만 다를 뿐 판정은 같아야 한다 — 두 경로가 갈라지면 한쪽만 고치는
+    사고가 난다(이 파일이 반복해서 지켜온 규약)."""
+    _connect_via_login(
+        client, monkeypatch, github_id=31024 + (status or 0), repo="amy/memories"
+    )
+    probe, _urls = _fake_probe(status)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test", headers={"Accept": "application/json"})
+
+    assert mark in r.json()["notice_html"]
+
+
+def test_in_place_request_without_session_still_says_something(monkeypatch):
+    """세션이 끊긴 채 눌렀을 때 조용히 아무 일도 안 일어나면 사용자는 서버가
+    죽었다고 읽는다 — 거절도 화면에 뜨는 한 줄로 돌려준다."""
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = fresh_client.post("/auth/mcp/test", headers={"Accept": "application/json"})
+
+    assert r.status_code == 401
+    assert "로그인" in r.json()["notice_html"]
+    assert urls == [], "세션도 없는데 서버가 자기 자신을 두드렸다"
+
+
+def test_test_button_still_works_without_javascript(client, monkeypatch):
+    """자바스크립트가 없거나 실패하면 폼이 그대로 제출돼 종전처럼 페이지 전체가
+    다시 그려지고 같은 결과가 나와야 한다 — 기능이 사라지면 안 된다."""
+    _connect_via_login(client, monkeypatch, github_id=31030, repo="ben/memories")
+    probe, _urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")  # Accept 헤더 없음 = 평범한 폼 제출
+
+    assert r.status_code == 200
+    assert "<html" in r.text.lower()
+    assert _ALIVE_MARK in r.text
+
+
+# ---------------------------------------------------------------------------
 # 재발급 / 폐기(namu-60)
 #
 # "옛 주소가 즉시 막힌다"는 단언은 장부만 보지 않고 **실제 앱에 요청을 넣어**
