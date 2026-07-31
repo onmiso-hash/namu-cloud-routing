@@ -96,7 +96,8 @@ def _identity_and_repo_sync_stub(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 def test_record_then_recall_round_trip(tmp_path):
     entry_id = rs.namu_record(
-        task="구현 작업", outcome="success", reason="테스트라 성공",
+        bowl="learnings", topic="구현 작업", summary="구현을 마쳤다",
+        reason="테스트라 성공", body="경위 전문", status="success",
         ctx=_ctx("alice"),
     )
     assert isinstance(entry_id, str) and entry_id
@@ -120,7 +121,8 @@ def test_record_then_recall_round_trip(tmp_path):
 
 def test_search_finds_recorded_entry():
     rs.namu_record(
-        task="검색용 작업", outcome="success", reason="search로 찾을 이유",
+        bowl="learnings", topic="검색용 작업", summary="검색으로 찾을 항목",
+        reason="search로 찾을 이유", body="생략", status="success",
         ctx=_ctx("alice"),
     )
     result = rs.namu_search("검색용", ctx=_ctx("alice"))
@@ -133,11 +135,13 @@ def test_search_finds_recorded_entry():
 # ---------------------------------------------------------------------------
 def test_two_users_fully_isolated(tmp_path):
     id_alice = rs.namu_record(
-        task="alice 작업", outcome="success", reason="alice 이유",
+        bowl="learnings", topic="alice 작업", summary="alice 요약",
+        reason="alice 이유", body="생략", status="success",
         ctx=_ctx("alice"),
     )
     id_bob = rs.namu_record(
-        task="bob 작업", outcome="failure", reason="bob 이유",
+        bowl="learnings", topic="bob 작업", summary="bob 요약",
+        reason="bob 이유", body="생략", status="failure",
         ctx=_ctx("bob"),
     )
 
@@ -212,7 +216,8 @@ def test_via_stored_on_record(tmp_path):
     # ?client=gemini 로 기록하면 그 항목의 via 컬럼에 'gemini'가 저장돼야 한다.
     # 이 검증이 없으면 공용 서버가 AI 출처를 흘리는 회귀(개인용 미러 누락)가 재발한다.
     entry_id = rs.namu_record(
-        task="출처 저장 작업", outcome="success", reason="via 저장 확인",
+        bowl="learnings", topic="출처 저장 작업", summary="출처 저장 확인",
+        reason="via 저장 확인", body="생략", status="success",
         ctx=_ctx("alice", client="gemini"),
     )
     db_path = tmp_path / "users" / "alice" / "db" / "namu.db"
@@ -261,14 +266,15 @@ def test_unsafe_user_key_recall_also_rejected():
 
 
 # ---------------------------------------------------------------------------
-# kind=fact → profile.yaml 라우팅, namu_recall 두 그릇 반환
+# bowl='profile' → profile.yaml 라우팅, namu_recall 그릇별 반환
 # ---------------------------------------------------------------------------
-def test_fact_kind_routes_to_profile_yaml(tmp_path):
+def test_profile_bowl_routes_to_profile_yaml(tmp_path):
     fact_id = rs.namu_record(
-        kind="fact",
-        subject="alice",
-        statement="한국어 선호",
-        source="본인 발화",
+        bowl="profile",
+        topic="alice",
+        summary="한국어 선호",
+        reason="본인 발화",
+        body="생략",
         ctx=_ctx("alice"),
     )
     assert isinstance(fact_id, str) and fact_id
@@ -288,12 +294,171 @@ def test_fact_kind_routes_to_profile_yaml(tmp_path):
     assert fact_id in profile_ids
 
 
-def test_fact_kind_missing_source_rejected():
+def test_profile_bowl_missing_reason_rejected():
     with pytest.raises(ValueError):
         rs.namu_record(
-            kind="fact", subject="alice", statement="stmt", source="",
+            bowl="profile", topic="alice", summary="stmt", reason="", body="b",
             ctx=_ctx("alice"),
         )
+
+
+# ---------------------------------------------------------------------------
+# 3층 저장(namu-68) — 클라우드가 개인용과 같은 형태로 남기는가.
+#
+# 이 절이 지키는 것: 2026-07-31 실측에서 클라우드로 남긴 기억에 summary와 body가
+# 아예 없었다. 겉(라우팅 서버)만 최신이고 속(vendor 코어)이 07-18자에 멈춰 있었기
+# 때문인데, 그 상태에서도 기존 테스트는 전부 통과했다 — 옛 코어에는 3층이라는
+# 개념 자체가 없어 아무도 그 부재를 묻지 않았기 때문이다. 아래 테스트들이 그
+# 침묵을 깬다: **파일에 실제로 무엇이 적혔는지**를 본다.
+# ---------------------------------------------------------------------------
+def _yaml_text(tmp_path, user: str, name: str) -> str:
+    return (tmp_path / "users" / user / "memory" / name).read_text(encoding="utf-8")
+
+
+def test_learnings_record_stores_all_three_layers(tmp_path):
+    rs.namu_record(
+        bowl="learnings", topic="3층 확인", summary="요약 한 줄",
+        reason="왜 그런가", body="그때 무슨 일이 있었나 — 원문 전문",
+        status="success", ctx=_ctx("alice"),
+    )
+    text = _yaml_text(tmp_path, "alice", "learnings.yaml")
+    assert "요약 한 줄" in text
+    assert "왜 그런가" in text
+    assert "그때 무슨 일이 있었나 — 원문 전문" in text
+
+
+def test_profile_record_stores_all_three_layers(tmp_path):
+    rs.namu_record(
+        bowl="profile", topic="alice", summary="한국어를 쓴다",
+        reason="본인이 그렇게 말했다", body="대화 원문 전문",
+        ctx=_ctx("alice"),
+    )
+    text = _yaml_text(tmp_path, "alice", "profile.yaml")
+    assert "한국어를 쓴다" in text
+    assert "본인이 그렇게 말했다" in text
+    assert "대화 원문 전문" in text
+
+
+def test_memo_bowl_is_stored_and_comes_back_in_recall(tmp_path):
+    """쪽지는 07-28에 조사 원문을 통째로 잃은 그릇이다 — 원문(body)이 파일에
+    남고, 웹에는 세션 훅이 없으므로 recall 반환으로 다시 떠야 한다."""
+    memo_id = rs.namu_record(
+        bowl="memo", summary="이커머스 조사 자료", reason="나중에 쓰려고",
+        body="조사 자료 원문 전문", ctx=_ctx("alice"),
+    )
+    text = _yaml_text(tmp_path, "alice", "memo.yaml")
+    assert "조사 자료 원문 전문" in text
+
+    result = rs.namu_recall(ctx=_ctx("alice"))
+    assert [m["id"] for m in result["memo"]] == [memo_id]
+    # 다른 그릇에 섞이지 않는다.
+    assert not result["learnings"]
+
+
+def test_bowl_is_mandatory(tmp_path):
+    """그릇을 안 적으면 거절한다 — 옛 코어는 조용히 교훈으로 보냈고, 잘못 담겨도
+    아무도 모르는 그 경로가 이번에 없애려는 결함이다."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            summary="s", reason="r", body="b", topic="t", ctx=_ctx("alice"),
+        )
+    assert "bowl" in str(exc.value)
+    assert not (tmp_path / "users" / "alice" / "memory").exists()
+
+
+def test_tasks_bowl_rejected_on_cloud(tmp_path, monkeypatch):
+    """작업일지는 코어가 사용자별로 갈라지지 않는 위치(홈/.namu/tasks)에 쓰므로
+    클라우드에서 허용하면 모든 사용자의 기록이 한 폴더에 섞인다 — 명시 거절."""
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            bowl="tasks", topic="namu-68", summary="한 줄", reason="생략",
+            body="생략", ctx=_ctx("alice"),
+        )
+    assert "작업일지" in str(exc.value)
+    # 서버 공용 폴더에 아무것도 만들지 않았어야 한다.
+    assert not (fake_home / ".namu").exists()
+
+
+def test_old_field_names_still_work_and_say_where_they_went(tmp_path):
+    """옛 이름(kind/subject/statement/source)으로 부르는 호출자가 이미 돌고 있다 —
+    거절하지 않고 새 칸으로 옮겨 저장하되, 어디로 옮겼는지 반드시 알린다(옮겨놓고
+    알리지 않으면 그것도 조용한 유실이다).
+
+    3층이 다 필요하다는 규칙 자체는 옛 이름으로 불러도 그대로 적용된다(원문 칸이
+    비면 '생략' 한 단어를 넣어야 한다) — 개인용 서버와 같은 판정이다."""
+    result = rs.namu_record(
+        kind="fact", subject="alice", statement="한국어 선호", source="본인 발화",
+        body="생략", ctx=_ctx("alice"),
+    )
+    assert isinstance(result, dict), "옛 이름 호출에는 옮긴 내역이 함께 와야 한다"
+    assert isinstance(result["id"], str) and result["id"]
+    assert result["notices"], "어디로 옮겼는지 알리지 않았다"
+
+    text = _yaml_text(tmp_path, "alice", "profile.yaml")
+    assert "한국어 선호" in text  # statement → summary
+    assert "본인 발화" in text     # source → reason
+
+
+def test_stale_cache_from_old_core_is_rebuilt_not_crashed(tmp_path):
+    """옛 코어(v0.1.29)가 만들어 둔 캐시에는 summary/body 컬럼이 없다. 새 코어가
+    그 파일을 그대로 쓰면 `no such column`으로 깨지므로, 스키마가 낡으면 yaml에서
+    자동 재생성돼야 한다 — 이미 저장돼 있던 옛 항목도 그대로 살아 있어야 한다."""
+    user_dir = tmp_path / "users" / "alice"
+    (user_dir / "memory").mkdir(parents=True)
+    (user_dir / "db").mkdir(parents=True)
+    (user_dir / "memory" / "learnings.yaml").write_text(
+        "id: OLDENTRY0000000000000000\n"
+        "timestamp: '2026-07-18T00:00:00+00:00'\n"
+        "task: 옛 코어가 남긴 항목\n"
+        "task_type: other\n"
+        "outcome: success\n"
+        "reason: 옛 이유\n"
+        "machine: hp\n"
+        "verified_by: ai\n"
+        "tags: []\n"
+        "kind: lesson\n"
+        "via: claude\n",
+        encoding="utf-8",
+    )
+    old_db = user_dir / "db" / "namu.db"
+    with closing(sqlite3.connect(old_db)) as conn:
+        with conn:
+            conn.execute(
+                "CREATE TABLE learnings (id TEXT PRIMARY KEY, timestamp TEXT, "
+                "task TEXT, task_type TEXT, outcome TEXT, reason TEXT, "
+                "machine TEXT, verified_by TEXT, tags TEXT, kind TEXT, via TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO learnings VALUES "
+                "('OLDENTRY0000000000000000','2026-07-18T00:00:00+00:00',"
+                "'옛 코어가 남긴 항목','other','success','옛 이유','hp','ai','[]',"
+                "'lesson','claude')"
+            )
+
+    result = rs.namu_recall(ctx=_ctx("alice"))
+
+    tasks = [d["task"] for d in result["learnings"]]
+    assert "옛 코어가 남긴 항목" in tasks, "옛 항목이 재생성 과정에서 사라졌다"
+    with closing(sqlite3.connect(old_db)) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(learnings)")}
+    assert {"summary", "body"} <= cols, "낡은 스키마가 그대로 남았다"
+
+
+def test_vendored_core_supports_three_layer_storage():
+    """코어 핀이 3층 이전(v0.1.41 미만)으로 되돌아가면 여기서 잡는다.
+
+    이 가드가 필요한 이유: 겉 버전만 올리고 코어 핀을 확인하지 않아 2주 지난
+    코어가 배포됐고, 그 사실을 사용자가 실제로 기억을 저장해 본 뒤에야 알았다.
+    """
+    import db as core_db
+    import record_input as core_record_input
+
+    assert {"summary", "body"} <= set(core_db._COLS)
+    assert hasattr(core_record_input, "normalize")
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +779,8 @@ def test_all_three_tools_reject_unconnected_user(monkeypatch):
         rs.namu_search("q", ctx=_ctx("neveronboarded"))
     with pytest.raises(ValueError) as exc_record:
         rs.namu_record(
-            task="t", outcome="success", reason="r", ctx=_ctx("neveronboarded")
+            bowl="learnings", topic="t", summary="s", reason="r", body="생략",
+            status="success", ctx=_ctx("neveronboarded"),
         )
 
     # 세 예외 모두 user_repo.RepoNotConnected의 온보딩 안내 원문(한국어+영어)을
@@ -638,7 +804,8 @@ def test_namu_record_calls_push_after_local_write(monkeypatch):
 
     monkeypatch.setattr(ur, "push", _spy_push)
     entry_id = rs.namu_record(
-        task="t", outcome="success", reason="r", ctx=_ctx("pusher")
+        bowl="learnings", topic="t", summary="s", reason="r", body="생략",
+        status="success", ctx=_ctx("pusher"),
     )
     assert isinstance(entry_id, str) and entry_id
     assert calls == ["pusher"], "namu_record가 로컬 기록 후 push를 부르지 않았다"
@@ -655,7 +822,8 @@ def test_namu_record_push_failure_still_succeeds_with_warning(monkeypatch, caplo
 
     with caplog.at_level("WARNING", logger="namu.routing_server"):
         result = rs.namu_record(
-            task="t", outcome="success", reason="r", ctx=_ctx("pushfail")
+            bowl="learnings", topic="t", summary="s", reason="r", body="생략",
+            status="success", ctx=_ctx("pushfail"),
         )
 
     # 반환 모양(결정 3): 성공 경로의 기존 계약(ULID 문자열)을 깨지 않기 위해,
@@ -683,7 +851,8 @@ def test_namu_record_no_warning_on_success_keeps_plain_string_return(monkeypatch
         ur, "push", lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: True
     )
     result = rs.namu_record(
-        task="t", outcome="success", reason="r", ctx=_ctx("pushok")
+        bowl="learnings", topic="t", summary="s", reason="r", body="생략",
+        status="success", ctx=_ctx("pushok"),
     )
     assert isinstance(result, str) and result
 

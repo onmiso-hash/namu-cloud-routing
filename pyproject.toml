@@ -16,6 +16,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyjwt[crypto]>=2.8",
     "httpx>=0.27",
+    # 코어(config.now)가 기준 시간대(NAMU_TZ, 기본 Asia/Seoul)로 시각을 적는다.
+    # slim 컨테이너에는 OS tz 데이터베이스가 없어 zoneinfo가 실패하고, 그러면 코어가
+    # 조용히 컨테이너 현지시각(UTC)으로 폴백해 기록 시각이 9시간 어긋난다.
+    "tzdata>=2024.1",
 ]
 
 [dependency-groups]

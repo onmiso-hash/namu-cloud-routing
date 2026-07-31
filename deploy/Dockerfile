@@ -41,7 +41,8 @@ RUN sed -i 's/\r$//' /app/deploy/entrypoint.sh && chmod +x /app/deploy/entrypoin
 # 복사한다(수정 금지 대상이므로 원본 그대로).
 COPY vendor/namu-agent/namu-plugin/ ./vendor/namu-agent/namu-plugin/
 
-# 런타임 의존성 6개만 system python에 설치한다(pyproject.toml에 [build-system]이 없어
+# 런타임 의존성만 system python에 설치한다(pyproject.toml의 dependencies와 같은 집합 —
+# 한쪽만 고치면 개발 환경은 통과하고 배포만 조용히 깨진다). pyproject.toml에 [build-system]이 없어
 # `uv pip install .`는 실패할 수 있으므로 프로젝트 패키지 자체는 설치하지 않는다).
 # pyjwt[crypto]/httpx는 신원 계층(github_app.py/web_auth.py)이 직접 쓴다 — 지금은
 # mcp[cli]의 전이 의존으로 우연히 들어와 있지만, 그 패키지가 의존을 바꾸면 배포
@@ -52,7 +53,8 @@ RUN uv pip install --system \
     "PyYAML>=6.0" \
     "python-dotenv>=1.0.0" \
     "pyjwt[crypto]>=2.8" \
-    "httpx>=0.27"
+    "httpx>=0.27" \
+    "tzdata>=2024.1"
 
 # 컨테이너는 0.0.0.0으로 바인드해야 리버스 프록시가 도달할 수 있다
 # (127.0.0.1 바인드는 컨테이너 내부 루프백만 수신 — 외부에서 절대 도달 불가).

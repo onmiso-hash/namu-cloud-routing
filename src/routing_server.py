@@ -11,6 +11,12 @@
 그대로 미러링하되, 전역 경로(cfg.NAMU_DB_PATH 등) 하드코딩 대신 매 호출마다
 `paths=cfg.data_paths_for(user_root)`를 코어에 넘긴다.
 
+그릇(bowl)은 네 개 중 셋만 받는다 — 교훈(learnings)·개인 사실(profile)·쪽지
+(memo)는 전부 DataPaths로 사용자별로 갈리지만, 작업일지(tasks)는 코어가
+`Path.home()/".namu"/tasks`에 쓰므로 요청별로 갈아끼울 자리가 없다. 그래서
+tasks는 명시적으로 거절한다(`_TASKS_BOWL_ERROR`) — 허용하면 모든 사용자의 작업
+기록이 서버 공용 폴더 한 곳에 섞인다(namu-68).
+
 보안 경계(멀티테넌트 격리의 핵심)는 `_resolve_user`/`_validate_user_key`/
 `_paths_for_user` 세 함수에 있다 — 키가 없거나 안전하지 않으면(경로 이탈 문자
 포함) 저장/조회를 거부하고, resolve() 후 STORE_ROOT/users 밖으로 벗어나지
@@ -48,7 +54,9 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
 import config as cfg  # noqa: E402
 import db  # noqa: E402
 import identity  # noqa: E402
+import memo  # noqa: E402
 import profile  # noqa: E402
+import record_input  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
@@ -394,16 +402,18 @@ def namu_recall(
     """Load relevant past memory for the requesting user (multi-tenant routing).
 
     Routes to the caller's own data directory via the `user` URL query param
-    (append `?user=<your-key>` to the MCP URL). Returns the same two-bowl
-    shape as the personal NAMU server: {"profile": [...active facts...],
-    "learnings": [...lesson/note dicts...]}, but scoped strictly to this
-    user's own memory (STORE_ROOT/users/<key>/).
+    (append `?user=<your-key>` to the MCP URL), scoped strictly to this user's
+    own memory (STORE_ROOT/users/<key>/).
 
     Args:
       query: topic keywords (optional; omit to get the most recent learnings)
       task_type: filter by code/doc/analysis/other (optional; learnings only)
       limit: max learnings entries (default 5)
-    Returns: {"profile": [...], "learnings": [...]}
+    Returns: {"memo": [...every sticky note currently up, oldest first...],
+      "profile": [...active facts...], "learnings": [...lesson/note dicts...]}.
+      The personal NAMU server also returns a "tasks" bowl (open task
+      briefing); this cloud address does not — task logs live per-machine on
+      the user's own computer, never on the server (see `_TASKS_BOWL_ERROR`).
     Raises: ValueError if this user has not logged in and connected a GitHub
       repository yet (onboarding incomplete) — the message explains where to
       go, in Korean and English.
@@ -416,6 +426,9 @@ def namu_recall(
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
         return {
+            # memo가 맨 앞이다 — 웹에는 세션 훅이 없어 이 반환이 붙여둔 쪽지가
+            # 다시 눈에 띌 유일한 경로다(개인용 mcp_server.namu_recall과 동일).
+            "memo": memo.load_all(paths),
             "profile": profile.active(paths=paths),
             "learnings": db.recall(conn, query, task_type, limit),
         }
@@ -451,89 +464,156 @@ def namu_search(
         return db.search(conn, query, outcome_filter, limit)
 
 
-@mcp.tool()
+# 클라우드가 받지 않는 그릇 — 작업일지(tasks)뿐이다(namu-68).
+#
+# 이유는 "아직 안 만들었다"가 아니라 **격리 위반**이다: 코어의 tasks 저장 위치는
+# `task_resolve.tasks_root_for()` = `Path.home()/".namu"/tasks/<프로젝트>`로, 데이터
+# 루트(DataPaths)와 무관하게 정해진다. 즉 요청별로 갈아끼울 수 있는 자리가 아니라
+# 컨테이너 홈 한 곳이며, 여기서 허용하면 **모든 사용자의 작업 기록이 서버 공용
+# 폴더 한 곳에 섞인다.** 그래서 조용히 다른 그릇으로 보내지도, 조용히 버리지도
+# 않고 명시적으로 거절한다(record_input의 설계 원칙 4와 같은 태도).
+_CLOUD_UNSUPPORTED_BOWLS = ("tasks",)
+
+_TASKS_BOWL_ERROR = (
+    "작업일지(tasks) 그릇은 이 클라우드 주소로는 쓸 수 없습니다 — 작업 기록은 "
+    "회원님 PC의 나무(플러그인)에서만 남길 수 있습니다. 여기서는 교훈(learnings)·"
+    "개인 사실(profile)·쪽지(memo) 세 그릇을 쓰세요.  |  The 'tasks' bowl is not "
+    "available over the cloud MCP address (task logs are per-machine and stay on "
+    "your own computer). Use 'learnings', 'profile' or 'memo' here."
+)
+
+# 도구 설명문은 손으로 쓰지 않고 코어의 표(config.FIELDS)에서 만든 것을 그대로
+# 붙인다(namu-65의 규칙 — 설명문을 두 곳에 적으면 갈라지고, 갈라진 설명을 읽은 AI가
+# 잘못된 그릇에 담는 것이 그 작업의 발단이었다). 클라우드에만 해당하는 사실(라우팅
+# 키·못 쓰는 그릇·반환 모양)만 앞뒤에 덧붙인다.
+_RECORD_TOOL_DESCRIPTION = (
+    record_input.tool_description()
+    + "\n\n"
+    "── 이 클라우드 주소에서만 다른 점 ──\n"
+    "- 기록은 요청 URL의 `?user=<키>`가 가리키는 **회원님 전용 저장소**에 남는다.\n"
+    "- 작업일지(tasks) 그릇은 쓸 수 없다(그 기록은 PC별로 남는 것이라 클라우드에 "
+    "두지 않는다). 교훈·개인 사실·쪽지 세 그릇만 쓴다.\n"
+    "- 반환은 보통 새 기록의 id(문자열) 하나다. 알릴 것이 있을 때만 "
+    "{\"id\": …, \"notices\": [...], \"warning\": …} 형태의 dict가 되므로, "
+    "`isinstance(result, dict)`로 두 모양을 가른다."
+)
+
+
+@mcp.tool(description=_RECORD_TOOL_DESCRIPTION)
 def namu_record(
+    # ── 새 이름 (namu-65 3층 스키마) — 개인용 mcp_server.namu_record와 같은 순서
+    bowl: str | None = None,
+    summary: str | None = None,
+    reason: str | None = None,
+    body: str | None = None,
+    topic: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    tags: "list[str] | None" = None,
+    confidence: str | None = None,
+    supersedes: str | None = None,
+    # ── 옛 이름 (그대로 불러도 새 칸으로 옮겨 저장하고 어디로 옮겼는지 알린다)
     task: str | None = None,
     outcome: str | None = None,
-    reason: str | None = None,
-    task_type: str = "other",
-    verified_by: str = "ai",
-    tags: "list[str] | None" = None,
-    kind: str = "lesson",
+    task_type: str | None = None,
+    verified_by: str | None = None,
+    kind: str | None = None,
     subject: str | None = None,
     statement: str | None = None,
     source: str | None = None,
-    supersedes: str | None = None,
+    text: str | None = None,
+    tag: str | None = None,
     ctx: Context | None = None,
 ):
-    """Record memory into this user's own bowl (append-only), routed via the
-    `user` URL query param. Which bowl depends on `kind`, mirroring the
-    personal NAMU server:
-      - kind='lesson' (default): task outcome + reasoning, into this user's
-        learnings.yaml. 'reason' and 'outcome' are mandatory.
-      - kind='note': a conversation snippet, also into learnings.yaml (no
-        outcome required). 'reason' still mandatory.
-      - kind='fact': a fact/preference, into this user's separate
-        profile.yaml bowl. Use subject/statement/source/supersedes instead
-        of task/outcome/reason. 'source' is mandatory.
+    """Record one memory into this user's own bowl (append-only), routed via
+    the `user` URL query param. Field-by-field docs live in the tool
+    description, which is generated from the core's field table
+    (`record_input.tool_description()`) — do not restate them here (namu-65:
+    two hand-written copies drift, and a drifted description is what made an
+    AI put memories into the wrong bowl in the first place).
 
-    Args:
-      task: what was done (lesson/note only)
-      outcome: 'success' | 'failure' | 'partial' (lesson: required; note: optional)
-      reason: WHY (lesson/note, required, non-empty)
-      task_type: code/doc/analysis/other (default 'other'; lesson/note only)
-      verified_by: 'human'/'ai'/'unverified' (default 'ai')
-      tags: list of string tags (optional)
-      kind: 'lesson' (default) | 'note' | 'fact'
-      subject: what/who this fact is about (fact only)
-      statement: the fact/preference itself (fact only)
-      source: WHY/how you know this is true (fact only, required, non-empty)
-      supersedes: id of the prior fact entry this one corrects (fact only, optional)
-    Returns: normally the new entry's ULID (str), unchanged from before this
-      tool started syncing to GitHub — this keeps existing callers (e.g. ones
-      that pass the returned id straight into a later `supersedes=`) working
-      without any change on the common path. The entry is always written to
-      the local copy first; after that a push to the user's GitHub repo is
-      attempted. If — and only if — that push fails (e.g. a transient network
-      error, or another device pushed first and this write must wait for the
-      next sync), the local write is still kept as a success (it is never
-      lost, and will be included automatically in the next successful push),
-      but the return value becomes {"id": <ulid str>, "warning": <str>}
-      instead of the plain string in that case — check `isinstance(result, dict)`
-      (or `"warning" in result`) to tell the two shapes apart. See namu-58
-      4차 decision 3 (module docstring) for why the return shape only changes
-      on this rare failure path instead of always becoming a dict.
-    Raises: ValueError if this user has not logged in and connected a GitHub
-      repository yet (onboarding incomplete) — the message explains where to
-      go, in Korean and English. (A failed push after a successful local
-      write does NOT raise — see the warning field above.)
+    이 함수 주석에는 **동작 순서와 클라우드 고유 규칙**만 적는다:
+
+    (1) `record_input.normalize`가 그릇을 확정하고, 옛 이름을 새 이름으로 옮기고,
+        그 그릇이 받지 않는 칸/빈 필수 칸/정해진 값 밖의 값을 거절한다. 저장소
+        동기화(clone/pull)보다 **먼저** 부른다 — 어차피 거절될 호출 때문에 사용자
+        저장소를 내려받는 것은 낭비이고, 입력 검증은 부작용이 없다.
+    (2) 작업일지(tasks) 그릇은 여기서 명시적으로 거절한다(`_TASKS_BOWL_ERROR`).
+    (3) 그릇별 저장 계층으로 넘기되, 전역 경로 대신 **그 사용자 전용 paths**를
+        넘긴다(교훈=db.record, 개인 사실=profile.record_fact, 쪽지=memo.add).
+    (4) 로컬 기록이 끝난 뒤에만 push를 시도한다(namu-58 4차 결정 3).
+
+    Returns: 평소에는 새 기록의 id(str) — 이 흔한 경로의 모양은 종전 그대로다
+      (반환값을 그대로 다음 호출의 `supersedes=`에 넣는 호출자가 계속 동작한다).
+      알릴 것이 생겼을 때만 dict가 된다:
+        - `notices`: 옛 이름을 새 칸으로 옮겼다는 등의 안내(옮겨놓고 알리지 않으면
+          그것도 조용한 유실이다). 개인용 서버는 이 안내를 id 문자열 뒤에 이어
+          붙이지만, 여기서는 id를 오염시키지 않으려고 별도 칸으로 돌려준다.
+        - `warning`: 로컬 기록은 성공했지만 GitHub push가 실패했을 때(다음 기록 때
+          함께 재시도되므로 기억이 유실되지는 않는다).
+      두 모양은 `isinstance(result, dict)`로 가른다.
+    Raises: ValueError — 입력이 규칙에 어긋날 때(그릇 미지정 등), 작업일지 그릇을
+      요청했을 때, 또는 아직 로그인·저장소 연결을 마치지 않은 사용자일 때(안내
+      메시지가 한국어+영어로 어디로 가야 하는지 알려준다). push 실패는 raise하지
+      않는다 — 위 `warning` 참고.
     """
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)  # ?client= 출처 태그 (개인용 미러 — 기록에 함께 저장)
+
+    parsed = record_input.normalize({
+        "bowl": bowl, "summary": summary, "reason": reason, "body": body,
+        "topic": topic, "status": status, "category": category, "tags": tags,
+        "confidence": confidence, "supersedes": supersedes,
+        "task": task, "outcome": outcome, "task_type": task_type,
+        "verified_by": verified_by, "kind": kind, "subject": subject,
+        "statement": statement, "source": source, "text": text, "tag": tag,
+    })
+    if parsed.bowl in _CLOUD_UNSUPPORTED_BOWLS:
+        raise ValueError(_TASKS_BOWL_ERROR)
+
+    v = parsed.values
+    v_summary = v.get("summary")
+    v_reason = v.get("reason")
+    v_body = v.get("body")
+    v_topic = v.get("topic")
+    v_tags = _normalize_tags(v.get("tags"))
+
     with closing(identity.connect()) as conn:
         _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
         paths = _paths_for_user(key)
         _ensure_fresh(paths)
-        if kind in ("lesson", "note"):
+        if parsed.bowl == "learnings":
+            # kind는 없앤 칸이다 — status(성패)가 있으면 교훈, 없으면 단순 기록으로
+            # 본다(개인용 mcp_server와 같은 판정).
             entry_id = db.record(
-                task, outcome, reason, task_type, verified_by,
-                _normalize_tags(tags), kind=kind, via=via, paths=paths,
+                v_topic, v.get("status"), v_reason,
+                v.get("category") or "other", v.get("confidence") or "ai", v_tags,
+                kind="lesson" if v.get("status") else "note",
+                via=via, paths=paths, summary=v_summary, body=v_body,
             )
-        elif kind == "fact":
-            vb = verified_by if verified_by in ("human", "ai", "unverified") else "human"
+        elif parsed.bowl == "profile":
             entry_id = profile.record_fact(
-                subject, statement, source, supersedes=supersedes,
-                verified_by=vb, tags=_normalize_tags(tags), via=via, paths=paths,
+                v_topic, supersedes=v.get("supersedes"),
+                verified_by=v.get("confidence") or "human", tags=v_tags, via=via,
+                paths=paths, summary=v_summary, reason=v_reason, body=v_body,
             )
-        else:
-            raise ValueError("kind는 'lesson'/'note'/'fact' 중 하나여야 합니다")
+        else:  # memo
+            entry_id = memo.add(
+                tags=v_tags, via=via, paths=paths,
+                summary=v_summary, reason=v_reason, body=v_body,
+            )
 
         # 로컬 기록이 끝난 뒤에만 push를 시도한다(사용자 결정 3) — 위에서 raise된
-        # 경로(kind 오류/필수값 누락 등)는 여기 도달하지 않으므로 push 자체가
-        # 시도되지 않는다.
+        # 경로(입력 거절 등)는 여기 도달하지 않으므로 push 자체가 시도되지 않는다.
         warning = _push_and_collect_warning(conn, key)
-    if warning:
-        return {"id": entry_id, "warning": warning}
+
+    if warning or parsed.notices:
+        result: dict = {"id": entry_id}
+        if parsed.notices:
+            result["notices"] = parsed.notices
+        if warning:
+            result["warning"] = warning
+        return result
     return entry_id
 
 

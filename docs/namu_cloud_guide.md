@@ -14,7 +14,7 @@
 | 사용자 수 | 단일 사용자(자기 것 하나) | 멀티유저(주소에 실린 **개인 열쇠**로 사용자별 서랍 라우팅) |
 | 기억의 원본은 어디에 | 자기 PC의 `~/.namu` | **사용자 본인의 GitHub 저장소**(연결 시 직접 고른다). 서버가 갖는 것은 그 저장소의 사본뿐이다 |
 
-노출 도구는 개인용(경로 B)과 동일한 3종 `namu_recall`/`namu_record`/`namu_search`다 — `namu_sync_setup`과 tasks는 노출되지 않는다(경로 B와 같은 이유, [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고).
+노출 도구는 개인용(경로 B)과 동일한 3종 `namu_recall`/`namu_record`/`namu_search`이고, 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68). 담을 수 있는 그릇은 교훈(learnings)·개인 사실(profile)·쪽지(memo) 셋이며 — `namu_sync_setup`과 tasks는 노출되지 않는다(경로 B와 같은 이유, [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고).
 
 포트·이미지 태그·Cloudflare ingress 같은 인프라 세부는 onnamu-project/specs 관할이라 이 문서에서는 다루지 않는다(중복 관리 금지).
 
@@ -85,7 +85,8 @@ https://namu-cloud.onnamu.kr/mcp/<내-개인-열쇠>?client=<AI-이름>
 ## 6. 지금 안 되는 것 / 나중 계획
 
 - 접속 주소는 사람이 브라우저로 받아 손으로 붙이는 방식이다. OAuth로 AI 클라이언트가 직접 인증을 받는 형태(동적 클라이언트 등록)는 아직 아니다 — 상세는 [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md) §11 참고.
-- tasks(작업 기록)·`namu_sync_setup`은 이 경로에 노출되지 않는다.
+- tasks(작업 기록)·`namu_sync_setup`은 이 경로에 노출되지 않는다. `namu_record`에 `bowl='tasks'`로 부르면 조용히 다른 그릇에 담지 않고 거절한다 — 작업 기록은 코어가 PC별 위치(홈 폴더)에 쓰는 데이터라 사용자별로 갈라지지 않기 때문이다(namu-68).
+- `namu_search`는 아직 교훈(learnings) 그릇만 찾는다. 개인용 서버의 `bowl=` 축(개인 사실·쪽지 검색)은 이 경로에 아직 없다 — 저장·조회는 되므로(`namu_recall`이 세 그릇을 다 돌려준다) 기록이 유실되지는 않는다.
 
 ## 관련 문서
 
