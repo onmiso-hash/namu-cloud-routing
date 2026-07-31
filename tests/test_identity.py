@@ -360,3 +360,167 @@ def test_backfill_is_idempotent_and_preserves_existing(conn):
     secret = identity.get_by_user_key(conn, key)["mcp_secret"]
     assert identity.backfill_mcp_secrets(conn) == 0  # 채울 것이 없다
     assert identity.get_by_user_key(conn, key)["mcp_secret"] == secret
+
+
+# ---------------------------------------------------------------------------
+# 재발급/폐기 (namu-60)
+#
+# 이 절의 핵심 단언은 "옛 열쇠가 **장부 조회에서** 더 이상 잡히지 않는다"이다 —
+# 라우팅 서버가 요청마다 get_by_mcp_secret으로 판정하므로, 그것이 곧 "옛 주소가
+# 막혔다"와 같은 말이다(실제 앱 왕복으로 한 번 더 못 박는 테스트는
+# tests/test_web_auth.py에 있다).
+# ---------------------------------------------------------------------------
+def test_rotate_issues_new_secret_and_kills_the_old_one(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    old = identity.get_by_user_key(conn, key)["mcp_secret"]
+
+    new = identity.rotate_mcp_secret(conn, key)
+
+    assert new != old
+    assert identity.get_by_user_key(conn, key)["mcp_secret"] == new
+    # 옛 열쇠로는 아무도 찾을 수 없다 = 옛 주소는 404가 된다.
+    assert identity.get_by_mcp_secret(conn, old) is None
+    assert identity.get_by_mcp_secret(conn, new)["user_key"] == key
+
+
+def test_rotate_result_is_a_valid_secret_format(conn):
+    """재발급 열쇠도 신규 발급과 같은 형식이어야 한다 — 형식이 어긋나면
+    get_by_mcp_secret이 DB를 두드리기도 전에 None으로 떨궈 본인도 못 쓴다."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    new = identity.rotate_mcp_secret(conn, key)
+    assert 32 <= len(new) <= 128
+    assert set(new) <= set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+
+
+def test_rotate_unknown_user_rejected(conn):
+    with pytest.raises(ValueError):
+        identity.rotate_mcp_secret(conn, "gh-404404")
+
+
+def test_revoke_removes_the_secret_entirely(conn):
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    old = identity.get_by_user_key(conn, key)["mcp_secret"]
+
+    identity.revoke_mcp_secret(conn, key)
+
+    row = identity.get_by_user_key(conn, key)
+    assert row["mcp_secret"] is None
+    assert row["mcp_revoked_at"]  # 폐기 시각이 찍혔다
+    assert identity.get_by_mcp_secret(conn, old) is None
+
+
+def test_revoke_unknown_user_rejected(conn):
+    with pytest.raises(ValueError):
+        identity.revoke_mcp_secret(conn, "gh-404404")
+
+
+def test_revoke_twice_does_not_collide_on_unique_index(conn):
+    """두 사용자를 연달아 폐기해도 UNIQUE 색인에 걸리면 안 된다 — 빈 문자열로
+    비웠다면 두 번째 폐기가 UNIQUE 충돌로 터진다(NULL로 비우는 이유)."""
+    a = identity.upsert_user(conn, 111, "alice")
+    b = identity.upsert_user(conn, 222, "bob")
+    identity.revoke_mcp_secret(conn, a)
+    identity.revoke_mcp_secret(conn, b)
+    assert identity.get_by_user_key(conn, a)["mcp_secret"] is None
+    assert identity.get_by_user_key(conn, b)["mcp_secret"] is None
+
+
+def test_revoked_secret_is_not_resurrected_by_backfill(conn):
+    """폐기의 존재 이유를 지키는 테스트.
+
+    backfill_mcp_secrets는 `connect()`마다(init_db 경유) 돌기 때문에, "비어
+    있으면 채운다"만 있고 폐기 표시가 없으면 폐기한 열쇠가 **다음 요청 한
+    번에** 되살아난다. mcp_revoked_at 조건을 지우면 이 테스트가 실패한다.
+    """
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    identity.revoke_mcp_secret(conn, key)
+
+    assert identity.backfill_mcp_secrets(conn) == 0
+    assert identity.get_by_user_key(conn, key)["mcp_secret"] is None
+
+
+def test_revoked_secret_survives_reconnect(tmp_path):
+    """위 테스트를 실제 파일 장부 + 재접속으로 한 번 더 — 운영에서 폐기가
+    무효화되는 경로는 "다음 요청이 connect()를 다시 부른다"이므로, 그 경로를
+    그대로 재현한다."""
+    target = tmp_path / "identity.db"
+    c = identity.connect(target)
+    try:
+        key = identity.upsert_user(c, 261774889, "onmiso")
+        identity.revoke_mcp_secret(c, key)
+    finally:
+        c.close()
+
+    c2 = identity.connect(target)  # init_db → backfill_mcp_secrets가 다시 돈다
+    try:
+        assert identity.get_by_user_key(c2, key)["mcp_secret"] is None
+    finally:
+        c2.close()
+
+
+def test_relogin_does_not_resurrect_a_revoked_secret(conn):
+    """폐기한 사용자가 다시 로그인해도 열쇠가 저절로 돌아오면 안 된다 —
+    upsert_user의 "비어 있으면 채운다" 경로가 폐기를 취소해 버리는 사고."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    identity.revoke_mcp_secret(conn, key)
+
+    identity.upsert_user(conn, 261774889, "onmiso")  # 재로그인
+
+    assert identity.get_by_user_key(conn, key)["mcp_secret"] is None
+
+
+def test_rotate_after_revoke_reissues_and_clears_the_revoked_mark(conn):
+    """폐기했다가 마음이 바뀌면 재발급 하나로 다시 쓸 수 있어야 한다(폐기가
+    영구 사망이면 사용자는 계정을 새로 만드는 수밖에 없다)."""
+    key = identity.upsert_user(conn, 261774889, "onmiso")
+    identity.revoke_mcp_secret(conn, key)
+
+    new = identity.rotate_mcp_secret(conn, key)
+
+    row = identity.get_by_user_key(conn, key)
+    assert row["mcp_secret"] == new
+    assert row["mcp_revoked_at"] is None
+    assert identity.get_by_mcp_secret(conn, new)["user_key"] == key
+    # 폐기 표시가 지워졌으니 backfill도 더는 이 사용자를 건드릴 이유가 없다.
+    assert identity.backfill_mcp_secrets(conn) == 0
+
+
+def test_legacy_ledger_without_revoked_column_is_migrated(tmp_path):
+    """mcp_secret은 있지만 mcp_revoked_at 칸이 없는 장부(namu-59 시절 운영
+    장부)를 그대로 열어도 깨지지 않고 폐기 기능이 동작해야 한다."""
+    import sqlite3
+
+    target = tmp_path / "v59.db"
+    old = sqlite3.connect(str(target))
+    old.executescript(
+        """
+        CREATE TABLE users (
+            user_key        TEXT PRIMARY KEY,
+            github_id       INTEGER NOT NULL UNIQUE,
+            login           TEXT NOT NULL,
+            installation_id INTEGER,
+            repo_full_name  TEXT,
+            created_at      TEXT NOT NULL,
+            last_seen_at    TEXT NOT NULL,
+            mcp_secret      TEXT
+        );
+        INSERT INTO users VALUES
+            ('gh-261774889', 261774889, 'onmiso', 1, 'onmiso/mem',
+             '2026-01-01', '2026-01-01', 'kept-secret-value-that-is-long-enough-here');
+        """
+    )
+    old.commit()
+    old.close()
+
+    c = identity.connect(target)
+    try:
+        # 이관해도 기존 열쇠는 절대 갈아치우지 않는다.
+        row = identity.get_by_user_key(c, "gh-261774889")
+        assert row["mcp_secret"] == "kept-secret-value-that-is-long-enough-here"
+        assert row["mcp_revoked_at"] is None
+        identity.revoke_mcp_secret(c, "gh-261774889")
+        assert identity.get_by_user_key(c, "gh-261774889")["mcp_secret"] is None
+    finally:
+        c.close()

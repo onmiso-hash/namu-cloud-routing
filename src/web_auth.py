@@ -2,11 +2,19 @@
 
 1차(github_app.py/identity.py)가 "나무 서버가 그 앱임을 증명하는" 서버 대 서버
 인증을 끝냈다면, 이 모듈은 "이 브라우저를 쥔 사람이 누구인지"를 알아내는
-사용자 대 서버 인증(OAuth)이다. 라우트 6개(`/auth/github/login` →
+사용자 대 서버 인증(OAuth)이다. 라우트 9개(`/auth/github/login` →
 `/auth/github/callback` → 앱 설치가 필요하면 `/auth/github/install`을 거쳐
 다시 `/auth/github/callback` → 저장소가 여럿이면 `/auth/github/select-repo`)로
 로그인·연결이 끝나고, 그 뒤로 언제든 `/auth/me`(내 페이지)로 접속 주소를 다시
-볼 수 있다. `/auth/logout`은 세션 쿠키를 지운다.
+볼 수 있다. 내 페이지에서는 주소를 시험(`/auth/mcp/test`)·재발급
+(`/auth/mcp/rotate`)·폐기(`/auth/mcp/revoke`)할 수 있다 — 이 셋은 POST 전용이다
+(파괴적 동작이라 링크 클릭·프리페치로 실행되면 안 된다). `/auth/logout`은 세션
+쿠키를 지운다.
+
+이 서비스가 발급하는 MCP 접속 주소는 **웹 AI(claude.ai 등) 전용**이다 —
+Claude Code·agy 사용자는 이 주소를 붙이는 것이 아니라 나무를 플러그인으로
+설치한다(주소로는 기억 도구 3개만 넘어가고 세션 브리핑·작업 절차·마무리 훅이
+따라오지 않는다). 그 구분을 화면에서 알리는 곳이 `_html_onboarding_section`이다.
 
 설계 전제(핵심 — routing_server.py/github_app.py 모듈 docstring과 동일한 원칙):
   - 사용자 access token은 **저장하지 않는다**. 콜백 요청 처리 중 지역 변수로만
@@ -40,6 +48,7 @@ from contextlib import closing
 from urllib.parse import urlencode
 
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
@@ -48,6 +57,12 @@ import github_app as ga
 import identity
 
 logger = logging.getLogger("namu.web_auth")
+
+# httpx는 매 요청의 URL을 INFO로 찍는다("HTTP Request: POST http://... 200 OK").
+# 연결 시험(`_http_probe`)은 URL 경로에 사용자 접속 열쇠를 실어 보내므로, 그대로
+# 두면 우리 로그가 곧 열쇠 유출 경로가 된다(실측 확인 — routing_server가 열쇠를
+# 로그에 남기지 않는 것과 같은 원칙). 한 단계 올려 그 줄만 끈다.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -362,12 +377,40 @@ def _fetch_installation_repos(user_token: str, installation_id: int) -> "tuple[l
 # 값이 그 사람 전용이므로 본인 화면에 띄워도 안전하다(예전 공용 열쇠였다면
 # 로그인한 사람 전원에게 남의 서랍 여는 열쇠를 나눠주는 셈이라 불가능했다).
 # ---------------------------------------------------------------------------
+# 모든 화면의 공통 껍데기 스타일. 외부 CSS/웹폰트/CDN 없이 인라인 <style> 하나다.
+#
+#  - viewport: 없으면 모바일 브라우저가 데스크톱 폭(980px)을 가정하고 축소해서
+#    그린다 — 글씨가 깨알같이 작아지고 가로 스크롤이 생긴다.
+#  - color-scheme: light dark: 브라우저가 폼 컨트롤(textarea/button)의 기본
+#    배색을 다크에 맞춰 준다. 이게 없으면 다크 모드에서 흰 입력칸만 남는다.
+#  - overflow-wrap/word-break: 접속 주소는 공백 없는 100자짜리 한 덩어리라
+#    줄바꿈 지점이 없다 — 그대로 두면 좁은 화면을 옆으로 밀어낸다.
+_BASE_CSS = (
+    ":root{color-scheme:light dark;}"
+    "body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;"
+    "line-height:1.6;background:#ffffff;color:#111111;}"
+    "h1{font-size:1.5rem;} h2{font-size:1.2rem;margin-top:1.8em;}"
+    "p,li{overflow-wrap:break-word;word-break:break-word;}"
+    "code{overflow-wrap:anywhere;background:#f0f0f0;padding:1px 4px;border-radius:3px;}"
+    "textarea,button,input,pre{max-width:100%;box-sizing:border-box;}"
+    "pre{overflow-x:auto;background:#f0f0f0;padding:8px;border-radius:4px;}"
+    "details{margin:12px 0;} summary{cursor:pointer;font-weight:bold;}"
+    "@media (prefers-color-scheme:dark){"
+    "body{background:#15171a;color:#e6e6e6;}"
+    "a{color:#7fb3ff;}"
+    "code,pre{background:#23272c;}"
+    "textarea{background:#23272c;color:#e6e6e6;border:1px solid #4a4f55;}"
+    "}"
+)
+
+
 def _html_page(title: str, body_html: str) -> str:
     return (
         "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\">"
-        f"<title>{html.escape(title)}</title></head>"
-        "<body style=\"font-family: sans-serif; max-width: 640px; margin: 40px auto; "
-        f"line-height: 1.6;\">{body_html}</body></html>"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html.escape(title)}</title>"
+        f"<style>{_BASE_CSS}</style></head>"
+        f"<body>{body_html}</body></html>"
     )
 
 
@@ -442,6 +485,61 @@ def _html_mcp_url_section(mcp_url: str) -> str:
     )
 
 
+# 다른 길 안내 문서(경로 B 셀프호스팅 / 플러그인 설치). 저장소 밖 문서라
+# 상수로 모아 둔다 — 두 화면에서 같은 링크를 쓴다.
+_REMOTE_MCP_GUIDE_URL = (
+    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md"
+)
+_INSTALL_GUIDE_URL = (
+    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md"
+)
+
+
+def _html_onboarding_section(mcp_url: str) -> str:
+    """접속 주소 + "이걸로 뭘 하면 되는지" 안내 한 덩어리.
+
+    연결 완료 화면(`_html_connected`)과 내 페이지(`_html_me_connected`)가
+    **같은 내용을 보여야** 한다 — 완료 화면에서만 설명하면 창을 닫은 사람은
+    다시 볼 방법이 없고, 두 곳에 따로 적으면 한쪽만 고쳐지는 사고가 난다
+    (`_html_mcp_url_section`을 공통으로 뽑은 것과 같은 이유).
+
+    3·4번(셀프호스팅 / Claude Code·agy)은 대부분의 사용자에게 해당되지 않아
+    본문을 길게 만들면 정작 읽어야 할 2번을 밀어낸다 — `<details>`로 접어 둔다.
+    2번은 접지 않는다(이 화면에 온 사람이 지금 당장 해야 할 일이다).
+    """
+    return (
+        _html_mcp_url_section(mcp_url)
+        + "<h2>웹 AI에 붙이는 법 (클로드 기준)</h2>"
+        "<ol>"
+        "<li>claude.ai에 로그인한 뒤 <b>설정(Settings)</b>을 엽니다.</li>"
+        "<li><b>커넥터(Connectors)</b> 항목으로 들어갑니다.</li>"
+        "<li><b>사용자 정의 커넥터 추가(Add custom connector)</b>를 누릅니다.</li>"
+        "<li>위에서 복사한 주소를 그대로 붙여 넣고 저장합니다. 이름은 아무거나 "
+        "(예: 나무) 적으셔도 됩니다.</li>"
+        "</ol>"
+        "<p>붙이고 나면 대화 중에 <code>namu_recall</code>(기억 꺼내기)·"
+        "<code>namu_record</code>(기억 남기기)·<code>namu_search</code>"
+        "(기억 찾기) 세 가지를 쓸 수 있습니다.</p>"
+        "<details>"
+        "<summary>직접 서버를 띄우고 싶다면</summary>"
+        "<p>나무는 회원님이 <b>직접 서버를 올려 쓰는 길</b>도 있습니다. 차이는 "
+        "하나입니다 — 서버를 회원님이 직접 올리고 관리하느냐(직접 운영), 나무가 "
+        "대신 맡느냐(지금 이 화면).</p>"
+        f'<p><a href="{_REMOTE_MCP_GUIDE_URL}" target="_blank" rel="noopener">'
+        "직접 서버 띄우기 안내서 열기</a></p>"
+        "</details>"
+        "<details>"
+        "<summary>Claude Code·agy를 쓰신다면</summary>"
+        "<p>그 경우에는 <b>이 주소를 붙이는 것이 아니라 나무를 플러그인으로 "
+        "설치</b>하셔야 합니다. 이 주소로는 기억 도구 세 가지만 넘어가고, 세션 "
+        "브리핑·작업 절차(<code>/namu-task</code>)·마무리 점검처럼 나무의 나머지 "
+        "절반이 따라오지 않기 때문입니다.</p>"
+        f'<p><a href="{_INSTALL_GUIDE_URL}" target="_blank" rel="noopener">'
+        "플러그인 설치 안내서 열기</a></p>"
+        "</details>"
+    )
+
+
 def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = None) -> str:
     body = [
         "<h1>연결 완료 (Connected)</h1>",
@@ -449,7 +547,7 @@ def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = 
         "<p>이제부터 이 저장소가 회원님 기억의 원본입니다.</p>",
     ]
     if mcp_url:
-        body.append(_html_mcp_url_section(mcp_url))
+        body.append(_html_onboarding_section(mcp_url))
     else:
         # 접속 열쇠가 없는 상태(이관 실패 등). 조용히 빈 화면을 내지 않는다.
         body.append(
@@ -590,10 +688,11 @@ def _html_me_login_required() -> str:
     return _html_page("NAMU 로그인 필요", body)
 
 
-def _html_me_not_connected(user_key: str) -> str:
+def _html_me_not_connected(user_key: str, notice_html: str = "") -> str:
     install_url = "/auth/github/install"
     body = (
         "<h1>내 페이지 (My page)</h1>"
+        f"{notice_html}"
         f"<p>사용자 키: <code>{html.escape(user_key)}</code></p>"
         "<p><b>아직 연결된 저장소가 없습니다.</b> 앱을 설치하고 기억을 저장할 "
         "저장소를 하나 골라야 접속 주소가 만들어집니다.</p>"
@@ -604,13 +703,57 @@ def _html_me_not_connected(user_key: str) -> str:
     return _html_page("NAMU 내 페이지", body)
 
 
-def _html_me_connected(user_key: str, repo_full_name: str, mcp_url: "str | None") -> str:
+# 주소 관리 버튼들. 전부 **POST 폼**이다 — 링크(GET)로 두면 브라우저 프리페치나
+# 채팅에 붙여넣은 미리보기 크롤러가 클릭 없이 열쇠를 갈아버릴 수 있다.
+# CSRF는 세션 쿠키의 SameSite=Lax가 막는다(다른 사이트에서 보낸 POST에는 이
+# 쿠키가 실리지 않아 세션 없음으로 거절된다 — `_session_user_key` 참고).
+_MCP_ACTIONS_HTML = (
+    "<h2>주소 관리</h2>"
+    '<form method="post" action="/auth/mcp/test" style="display:inline;">'
+    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+    "연결 시험</button></form> "
+    '<form method="post" action="/auth/mcp/rotate" style="display:inline;">'
+    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+    "주소 재발급</button></form> "
+    '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
+    '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
+    "주소 폐기</button></form>"
+    "<p><small><b>연결 시험</b>은 지금 이 주소가 실제로 응답하는지 확인합니다. "
+    "<b>재발급</b>은 새 주소를 만들고 옛 주소를 즉시 막습니다(AI에 등록해 둔 "
+    "커넥터 주소도 새로 바꿔 주셔야 합니다). <b>폐기</b>는 주소를 아예 없앱니다 "
+    "— 누르면 한 번 더 확인합니다.</small></p>"
+)
+
+
+def _html_me_connected(
+    user_key: str,
+    repo_full_name: str,
+    mcp_url: "str | None",
+    *,
+    notice_html: str = "",
+    revoked: bool = False,
+) -> str:
     body = [
         "<h1>내 페이지 (My page)</h1>",
+        notice_html,
         f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
     ]
     if mcp_url:
-        body.append(_html_mcp_url_section(mcp_url))
+        body.append(_html_onboarding_section(mcp_url))
+        body.append(_MCP_ACTIONS_HTML)
+    elif revoked:
+        # 사용자가 스스로 없앤 상태 — "만들지 못했습니다"(장애)와 절대 같은
+        # 문구를 쓰면 안 된다. 되돌리는 방법(재발급)을 그 자리에 둔다.
+        body.append(
+            "<h2>접속 주소</h2>"
+            "<p><b>접속 주소를 폐기하셨습니다.</b> 지금은 어떤 AI도 회원님 기억에 "
+            "접속할 수 없습니다. 다시 쓰시려면 아래에서 새 주소를 발급받으세요 "
+            "— 저장소 연결은 그대로 남아 있으니 처음부터 다시 하실 필요는 "
+            "없습니다.</p>"
+            '<form method="post" action="/auth/mcp/rotate">'
+            '<button type="submit" style="padding:8px 16px;font-size:15px;'
+            'cursor:pointer;">새 주소 발급</button></form>'
+        )
     else:
         # 여기 도달하면 호출부가 열쇠 발급을 이미 시도했어야 정상이다 — 그래도
         # 실패했다면(예: 장부 쓰기 실패) 빈 화면 대신 이유를 알린다.
@@ -623,12 +766,201 @@ def _html_me_connected(user_key: str, repo_full_name: str, mcp_url: "str | None"
     return _html_page("NAMU 내 페이지", "".join(body))
 
 
+def _html_revoke_confirm() -> str:
+    """폐기 확인 화면 — 실수로 한 번 누른 것만으로는 주소가 사라지지 않게 하는
+    단계. 이 화면 자체는 아무것도 바꾸지 않는다(확인 폼을 다시 POST해야 실행)."""
+    body = (
+        "<h1>정말 주소를 폐기할까요? (Revoke the address?)</h1>"
+        "<p>폐기하면 지금 쓰고 있는 접속 주소가 <b>즉시 막힙니다.</b> AI에 등록해 "
+        "둔 커넥터도 그 순간부터 회원님 기억에 닿지 못합니다.</p>"
+        "<p>기억 자체는 회원님 GitHub 저장소에 그대로 남습니다 — 나중에 새 주소를 "
+        "발급받으면 다시 이어서 쓰실 수 있습니다.</p>"
+        '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
+        '<input type="hidden" name="confirm" value="yes">'
+        '<button type="submit" style="padding:8px 16px;font-size:15px;cursor:pointer;">'
+        "네, 폐기합니다</button></form> "
+        '<p><a href="/auth/me">아니요, 돌아가기 (Cancel)</a></p>'
+    )
+    return _html_page("NAMU 주소 폐기 확인", body)
+
+
 def _html_logged_out() -> str:
     body = (
         "<h1>로그아웃했습니다 (Logged out)</h1>"
         '<p><a href="/auth/github/login">다시 로그인 (Log in again)</a></p>'
     )
     return _html_page("NAMU 로그아웃", body)
+
+
+# ---------------------------------------------------------------------------
+# 연결 시험(namu-60) — "지금 이 주소가 실제로 동작하는가"를 서버가 대신 확인해
+# 준다.
+#
+# ## 왜 자기 자신을 127.0.0.1로 부르는가
+#
+# 바깥 도메인(namu-cloud.onnamu.kr)으로 부르면 요청이 Cloudflare 터널을 한
+# 바퀴 돌아 다시 들어와야 하고, 컨테이너 안에서는 그 이름이 아예 풀리지 않을
+# 수 있다(내부 DNS에 없다) — 주소는 멀쩡한데 "확인 불가"만 나오는 시험이 된다.
+# 우리가 확인하려는 것은 "이 열쇠가 우리 서버에서 유효한가"이지 "터널이
+# 살아있는가"가 아니므로, 이 프로세스가 바인드한 포트로 직접 두드린다.
+#
+# ## 판정은 반드시 세 갈래다
+#
+#   살아있음 / 주소가 잘못됨 / **지금은 확인 불가**
+#
+# 세 번째가 이 기능의 핵심이다. 배포 직후 컨테이너가 아직 안 떠서 나는 연결
+# 거부, 재시작 중의 일시 502, 느린 응답을 "죽었다"로 단정하면, 멀쩡한 주소를
+# 쥔 사용자가 재발급 버튼을 눌러 스스로 커넥터를 깨뜨린다. 그래서 404(장부에
+# 없는 열쇠 = 문지기가 명시적으로 거절한 경우)만 "잘못됨"이고, 5xx·타임아웃·
+# 연결 실패는 1초 뒤 한 번 더 두드려 보고 그래도 같으면 "확인 불가"다.
+# ---------------------------------------------------------------------------
+# 프로브 자체는 짧게 끊는다 — 이 시간 동안 사용자는 버튼을 누른 채 기다린다.
+_MCP_PROBE_TIMEOUT_SEC = 5.0
+_MCP_PROBE_RETRY_DELAY_SEC = 1.0
+
+_PROBE_ALIVE = "alive"
+_PROBE_INVALID = "invalid"
+_PROBE_UNKNOWN = "unknown"
+
+# 이 서버가 바인드하는 포트. 새 환경변수를 만들지 않고 routing_server.main()이
+# 읽는 것과 **같은** 변수를 읽는다(배포는 Dockerfile의 ENV NAMU_HTTP_PORT=8770로
+# 항상 채워져 있다). 미설정 시 기본값도 routing_server.main()과 같아야 하며,
+# 어긋나면 tests/test_web_auth.py의 드리프트 테스트가 실패한다.
+_DEFAULT_SELF_PORT = 8770
+
+
+def _self_http_port() -> int:
+    raw = os.environ.get("NAMU_HTTP_PORT", "").strip()
+    if not raw:
+        return _DEFAULT_SELF_PORT
+    try:
+        return int(raw)
+    except ValueError:
+        # 기동 자체가 이 값으로 이뤄지므로 여기까지 왔다면 실사용에서는 나올 수
+        # 없는 값이다 — 시험 하나 때문에 화면을 500으로 터뜨리지 않고 기본값으로
+        # 물러난다(판정은 어차피 "확인 불가"로 안전하게 끝난다).
+        logger.warning("NAMU_HTTP_PORT 값이 정수가 아닙니다 — 연결 시험은 기본 포트로 시도합니다")
+        return _DEFAULT_SELF_PORT
+
+
+def _self_mcp_probe_url(mcp_secret: str) -> str:
+    return f"http://127.0.0.1:{_self_http_port()}/mcp/{mcp_secret}"
+
+
+def _http_probe(url: str) -> "int | None":
+    """자기 자신에게 MCP `initialize`를 한 번 보내고 상태코드만 돌려준다.
+
+    `initialize`를 고른 이유: MCP 규약상 세션을 여는 첫 인사이고 **부작용이
+    없다** — 도구를 부르지 않으므로 사용자 저장소를 건드리지 않는다(이 서버는
+    stateless HTTP라 세션이 남지도 않는다).
+
+    응답 자체를 못 받으면(연결 거부·타임아웃) None. 예외를 밖으로 내보내지
+    않는 이유는 호출부가 "확인 불가"로 처리해야 하기 때문이다.
+
+    테스트가 걷어낼 유일한 네트워크 접점이다(`_http_json`과 같은 원칙).
+    """
+    import httpx
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "namu-cloud-self-check", "version": "1"},
+        },
+    }
+    try:
+        resp = httpx.post(
+            url,
+            json=body,
+            headers={
+                # streamable HTTP는 두 형식을 모두 받을 수 있다고 알려야 한다 —
+                # 하나만 적으면 서버가 406으로 거절한다.
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            },
+            timeout=_MCP_PROBE_TIMEOUT_SEC,
+        )
+    except Exception as exc:  # noqa: BLE001 — 네트워크 계열 전부를 "확인 불가"로 모은다
+        logger.info("연결 시험: 응답을 받지 못했습니다 (%s)", type(exc).__name__)
+        return None
+    return resp.status_code
+
+
+def probe_mcp_connection(mcp_secret: str) -> str:
+    """`_PROBE_ALIVE` / `_PROBE_INVALID` / `_PROBE_UNKNOWN` 중 하나.
+
+    **블로킹 함수다** — 반드시 스레드풀에서 부를 것(호출부 `mcp_test` 참고).
+    이벤트 루프 위에서 그대로 부르면 서버가 자기 자신에게 보낸 요청을 처리할
+    수 없어 타임아웃까지 굳는다(자기 호출 특유의 교착).
+    """
+    url = _self_mcp_probe_url(mcp_secret)
+    status = _http_probe(url)
+    if status is None or status >= 500:
+        # 일시적 실패일 수 있다 — 짧게 한 번만 다시 본다. 여기서 여러 번
+        # 재시도하면 사용자가 빈 화면을 오래 보게 된다.
+        time.sleep(_MCP_PROBE_RETRY_DELAY_SEC)
+        status = _http_probe(url)
+
+    if status == 404:
+        # 문지기(_PerUserSecretDispatcher)가 장부에서 열쇠를 못 찾았다는 뜻 —
+        # 폐기됐거나 이미 재발급돼 죽은 주소다. 이것만이 "잘못됨" 판정이다.
+        return _PROBE_INVALID
+    if status is not None and 200 <= status < 300:
+        return _PROBE_ALIVE
+    logger.info("연결 시험: 판정 보류 (status=%s)", status)
+    return _PROBE_UNKNOWN
+
+
+def _html_notice(text_html: str, *, tone: str = "info") -> str:
+    """화면 맨 위에 한 줄 붙는 알림 상자. 색은 라이트/다크 양쪽에서 읽히도록
+    배경 대신 왼쪽 굵은 선으로만 구분한다."""
+    colors = {"info": "#2a6fdb", "good": "#1a7f37", "warn": "#b06000", "bad": "#b00020"}
+    color = colors.get(tone, colors["info"])
+    return (
+        f'<p style="border-left:4px solid {color};padding:8px 12px;margin:16px 0;">'
+        f"{text_html}</p>"
+    )
+
+
+_PROBE_NOTICES = {
+    _PROBE_ALIVE: _html_notice(
+        "<b>살아있습니다.</b> 지금 이 주소는 정상적으로 응답합니다 — 그대로 쓰시면 "
+        "됩니다.",
+        tone="good",
+    ),
+    _PROBE_INVALID: _html_notice(
+        "<b>주소가 잘못됐습니다.</b> 이 주소는 폐기됐거나 더 이상 유효하지 "
+        "않습니다. 아래에서 주소를 재발급받고, AI에 등록해 둔 커넥터 주소도 새 "
+        "것으로 바꿔 주세요.",
+        tone="bad",
+    ),
+    _PROBE_UNKNOWN: _html_notice(
+        "<b>지금은 확인할 수 없습니다.</b> 서버가 응답하지 않거나 일시적인 오류가 "
+        "났습니다 — <b>주소가 잘못됐다는 뜻은 아닙니다.</b> 방금 서버를 새로 "
+        "올린 직후라면 잠깐 그럴 수 있으니, 1~2분 뒤에 다시 눌러 보세요.",
+        tone="warn",
+    ),
+}
+
+_NOTICE_ROTATED = _html_notice(
+    "<b>새 주소를 발급했습니다.</b> 옛 주소는 지금 이 순간부터 막혔습니다 — AI에 "
+    "등록해 둔 커넥터 주소를 아래 새 주소로 바꿔 주세요.",
+    tone="good",
+)
+
+_NOTICE_REVOKED = _html_notice(
+    "<b>주소를 폐기했습니다.</b> 옛 주소로는 더 이상 접속할 수 없습니다.",
+    tone="warn",
+)
+
+_NOTICE_NO_SECRET_TO_TEST = _html_notice(
+    "<b>시험할 주소가 없습니다.</b> 접속 주소를 폐기하신 상태입니다 — 새 주소를 "
+    "발급받은 뒤 다시 시험해 주세요.",
+    tone="warn",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -829,8 +1161,17 @@ async def callback(request: Request) -> Response:
     return resp
 
 
+def _session_user_key(request: Request) -> "str | None":
+    """세션 쿠키에서 검증된 user_key를 꺼낸다. 없거나 위조·만료면 None.
+
+    로그인 이후의 모든 화면·동작(`select_repo`/`me`/주소 관리 POST 3종)이
+    **이 함수 하나**를 통과한다 — 신뢰 경로를 새로 만들지 않기 위한 단일 지점이다.
+    """
+    return _unsign_with_expiry(request.cookies.get(_SESSION_COOKIE_NAME))
+
+
 async def select_repo(request: Request) -> Response:
-    user_key = _unsign_with_expiry(request.cookies.get(_SESSION_COOKIE_NAME))
+    user_key = _session_user_key(request)
     if not user_key:
         return PlainTextResponse(
             "로그인이 필요합니다 — 세션이 없거나 만료됐습니다. "
@@ -881,34 +1222,135 @@ async def me(request: Request) -> Response:
     알려주면 공격자에게 열거 단서를 준다(select_repo의 서명 실패 처리와 같은
     원칙).
     """
-    user_key = _unsign_with_expiry(request.cookies.get(_SESSION_COOKIE_NAME))
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+    with closing(identity.connect()) as conn:
+        return _me_page_response(request, conn, user_key)
+
+
+def _me_page_response(
+    request: Request, conn, user_key: str, notice_html: str = ""
+) -> Response:
+    """내 페이지 본문을 만들어 응답으로 돌려준다.
+
+    GET `/auth/me`와 주소 관리 POST 3종이 **같은 렌더링 경로**를 쓴다 — 동작을
+    끝낸 뒤 사용자가 보게 되는 화면이 평소 내 페이지와 다르면(예: 재발급 후
+    별도 화면) 새 주소를 그 자리에서 확인할 수 없거나 두 화면이 따로 놀게 된다.
+    바뀌는 것은 맨 위에 붙는 알림 한 줄(notice_html)뿐이다.
+    """
+    row = identity.get_by_user_key(conn, user_key)
+    if row is None:
+        # 서명은 유효했지만(즉 우리가 발급한 세션) 장부에 없다 — 500으로
+        # 터뜨리지 않고 로그인 안내와 동일하게 처리한다.
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    if not row.get("installation_id") or not row.get("repo_full_name"):
+        return HTMLResponse(_html_me_not_connected(user_key, notice_html))
+
+    revoked = bool(row.get("mcp_revoked_at"))
+    mcp_url = _mcp_url_for(request, conn, user_key)
+    if not mcp_url and not revoked:
+        # 저장소는 연결됐는데 mcp_secret이 없는 옛 계정 — 화면을 여는
+        # 시점에 발급해 저장한다. identity.backfill_mcp_secrets는 이미
+        # 값이 있는 사용자는 절대 건드리지 않고(WHERE mcp_secret IS NULL
+        # OR ''), UNIQUE 색인이 있는 컬럼에 새로 굴린 무작위값만 채우므로
+        # 동시 요청이 겹쳐도(SQLite가 쓰기를 직렬화) 예외로 깨지지 않는다
+        # — 새 발급/백필 함수를 새로 만들지 않고 기존 것을 그대로 재사용.
+        # 스스로 폐기한 사용자(revoked)는 여기 들어오면 안 된다 — 폐기가 곧바로
+        # 취소되기 때문이다(backfill 쪽에도 같은 조건이 걸려 있다, 이중 방어).
+        identity.backfill_mcp_secrets(conn)
+        mcp_url = _mcp_url_for(request, conn, user_key)
+
+    return HTMLResponse(
+        _html_me_connected(
+            user_key,
+            row["repo_full_name"],
+            mcp_url,
+            notice_html=notice_html,
+            revoked=revoked,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# 주소 관리(namu-60) — 연결 시험 / 재발급 / 폐기. 셋 다 **POST 전용**이다.
+#
+# GET으로 두면 링크 프리페치나 채팅 미리보기 크롤러가 눌러 버릴 수 있고,
+# 재발급·폐기는 그 순간 사용자의 커넥터가 끊기는 파괴적 동작이다.
+# build_auth_app의 methods=["POST"]가 이 규약을 강제한다(GET이면 405).
+#
+# 세션 검증은 새 경로를 만들지 않고 `_session_user_key`(내 페이지와 동일)를
+# 그대로 쓴다. 다른 사이트에서 보낸 POST(CSRF)는 세션 쿠키가 SameSite=Lax라
+# 애초에 쿠키가 실리지 않아 여기서 401로 끊긴다.
+# ---------------------------------------------------------------------------
+async def mcp_test(request: Request) -> Response:
+    """지금 이 주소가 실제로 응답하는지 서버가 대신 두드려 본다."""
+    user_key = _session_user_key(request)
     if not user_key:
         return HTMLResponse(_html_me_login_required(), status_code=401)
 
     with closing(identity.connect()) as conn:
         row = identity.get_by_user_key(conn, user_key)
         if row is None:
-            # 서명은 유효했지만(즉 우리가 발급한 세션) 장부에 없다 — 500으로
-            # 터뜨리지 않고 로그인 안내와 동일하게 처리한다.
             return HTMLResponse(_html_me_login_required(), status_code=401)
+        mcp_secret = (row or {}).get("mcp_secret")
 
-        if not row.get("installation_id") or not row.get("repo_full_name"):
-            return HTMLResponse(_html_me_not_connected(user_key))
+    if not mcp_secret:
+        notice = _NOTICE_NO_SECRET_TO_TEST
+    else:
+        # 장부 커넥션을 닫아 두고 두드린다 — 프로브는 최대 (5초 + 1초 + 5초)까지
+        # 걸릴 수 있어, 그동안 SQLite 커넥션을 붙들고 있을 이유가 없다.
+        #
+        # run_in_threadpool이 필수다: 이 서버가 자기 자신에게 보내는 요청은 같은
+        # 이벤트 루프가 받아 처리해야 하는데, 여기서 루프를 막아 버리면 그 요청이
+        # 영원히 처리되지 않아 반드시 타임아웃한다(= 멀쩡한 주소가 늘 "확인 불가").
+        verdict = await run_in_threadpool(probe_mcp_connection, mcp_secret)
+        notice = _PROBE_NOTICES[verdict]
 
-        mcp_url = _mcp_url_for(request, conn, user_key)
-        if not mcp_url:
-            # 저장소는 연결됐는데 mcp_secret이 없는 옛 계정 — 화면을 여는
-            # 시점에 발급해 저장한다. identity.backfill_mcp_secrets는 이미
-            # 값이 있는 사용자는 절대 건드리지 않고(WHERE mcp_secret IS NULL
-            # OR ''), UNIQUE 색인이 있는 컬럼에 새로 굴린 무작위값만 채우므로
-            # 동시 요청이 겹쳐도(SQLite가 쓰기를 직렬화) 예외로 깨지지 않는다
-            # — 새 발급/백필 함수를 새로 만들지 않고 기존 것을 그대로 재사용.
-            identity.backfill_mcp_secrets(conn)
-            mcp_url = _mcp_url_for(request, conn, user_key)
+    with closing(identity.connect()) as conn:
+        return _me_page_response(request, conn, user_key, notice)
 
-        body_html = _html_me_connected(user_key, row["repo_full_name"], mcp_url)
 
-    return HTMLResponse(body_html)
+async def mcp_rotate(request: Request) -> Response:
+    """새 열쇠를 발급하고 새 주소를 그 자리에서 보여준다.
+
+    옛 주소를 따로 막는 코드가 없는 것이 정상이다 — 라우팅 서버가 요청마다
+    `identity.get_by_mcp_secret`으로 장부를 조회하므로, 장부 행이 바뀌는 순간
+    옛 열쇠는 조회에 잡히지 않아 404가 된다(tests/test_web_auth.py가 이
+    성질을 실제 앱으로 못 박는다).
+    """
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    with closing(identity.connect()) as conn:
+        if identity.get_by_user_key(conn, user_key) is None:
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+        identity.rotate_mcp_secret(conn, user_key)
+        logger.info("MCP 접속 열쇠 재발급 (user_key=%s)", user_key)  # 값 자체는 남기지 않는다
+        return _me_page_response(request, conn, user_key, _NOTICE_ROTATED)
+
+
+async def mcp_revoke(request: Request) -> Response:
+    """열쇠를 없앤다. 실수로 한 번 누른 것만으로는 실행되지 않는다 — 확인
+    화면을 한 번 거치고, 그 화면의 폼이 `confirm=yes`를 실어 다시 POST해야
+    비로소 폐기한다."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    form = await request.form()
+    if (form.get("confirm") or "") != "yes":
+        # 아직 아무것도 바꾸지 않았다 — 확인 화면만 보여준다.
+        return HTMLResponse(_html_revoke_confirm())
+
+    with closing(identity.connect()) as conn:
+        if identity.get_by_user_key(conn, user_key) is None:
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+        identity.revoke_mcp_secret(conn, user_key)
+        logger.info("MCP 접속 열쇠 폐기 (user_key=%s)", user_key)
+        return _me_page_response(request, conn, user_key, _NOTICE_REVOKED)
 
 
 async def logout(request: Request) -> Response:
@@ -920,7 +1362,7 @@ async def logout(request: Request) -> Response:
 
 
 def build_auth_app() -> Starlette:
-    """web_auth 라우트 6개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
+    """web_auth 라우트 9개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
 
     lifespan 훅을 선언하지 않는다 — routing_server._AuthOrMcpDispatcher가
     lifespan scope를 이 앱으로 보내지 않는다(FastMCP 세션 매니저를 기동하는
@@ -933,6 +1375,11 @@ def build_auth_app() -> Starlette:
             Route("/auth/github/callback", callback, methods=["GET"]),
             Route("/auth/github/select-repo", select_repo, methods=["GET"]),
             Route("/auth/me", me, methods=["GET"]),
+            # 주소 관리 3종은 POST만 받는다 — GET(링크·프리페치)으로는 절대
+            # 실행되지 않아야 한다(파괴적 동작).
+            Route("/auth/mcp/test", mcp_test, methods=["POST"]),
+            Route("/auth/mcp/rotate", mcp_rotate, methods=["POST"]),
+            Route("/auth/mcp/revoke", mcp_revoke, methods=["POST"]),
             Route("/auth/logout", logout, methods=["GET"]),
         ]
     )

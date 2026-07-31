@@ -1239,3 +1239,466 @@ def test_callback_already_connected_redirects_to_me_without_reselecting_repo(cli
     assert r3.status_code == 200
     assert "gina/memories" in r3.text
     assert row["user_key"] in r3.text
+
+
+# ---------------------------------------------------------------------------
+# 온보딩 안내(namu-60) — 주소만 던져주면 초보자는 "이걸로 뭘 하라는 건지" 모른다.
+#
+# 핵심 요구: 연결 완료 화면과 내 페이지에 **같은 안내**가 나와야 한다(완료
+# 화면에서만 설명하면 창을 닫은 사람은 다시 볼 방법이 없다).
+# ---------------------------------------------------------------------------
+_CLAUDE_CONNECTOR_STEPS = ["설정", "커넥터", "사용자 정의 커넥터", "붙여"]
+_SELF_HOST_GUIDE_URL = (
+    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md"
+)
+_PLUGIN_GUIDE_URL = (
+    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md"
+)
+
+
+def _assert_onboarding_guide(body: str) -> None:
+    for step in _CLAUDE_CONNECTOR_STEPS:
+        assert step in body, f"웹 AI 연결 절차 안내에 '{step}'가 없다"
+    assert _SELF_HOST_GUIDE_URL in body, "셀프호스팅 안내서 링크가 없다"
+    assert _PLUGIN_GUIDE_URL in body, "플러그인 설치 안내서 링크가 없다"
+    assert "플러그인" in body, "Claude Code·agy는 플러그인 설치라는 안내가 없다"
+
+
+def test_connected_page_shows_onboarding_guide(client, monkeypatch):
+    state = _do_login(client)
+    fake, _ = _make_fake_http_json(github_id=30001, repos=["kate/memories"])
+    monkeypatch.setattr(wa, "_http_json", fake)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode", "installation_id": "30001"},
+    )
+    assert r.status_code == 200
+    _assert_onboarding_guide(r.text)
+
+
+def test_me_page_shows_the_same_onboarding_guide(client, monkeypatch):
+    _connect_via_login(client, monkeypatch, github_id=30002, repo="leo/memories")
+
+    r = client.get("/auth/me")
+
+    assert r.status_code == 200
+    _assert_onboarding_guide(r.text)
+
+
+def test_onboarding_guide_folds_only_the_side_paths(client, monkeypatch):
+    """웹 AI 붙이는 법(2번)은 펼쳐진 상태여야 하고, 곁가지(셀프호스팅·플러그인)만
+    접혀 있어야 한다 — 이 화면에 온 사람이 지금 해야 할 일이 2번이다."""
+    _connect_via_login(client, monkeypatch, github_id=30003, repo="mia/memories")
+    body = client.get("/auth/me").text
+
+    # 곁가지 두 링크는 <details> 안에 있다.
+    details_blocks = re.findall(r"<details>.*?</details>", body, flags=re.S)
+    assert len(details_blocks) == 2
+    folded = "".join(details_blocks)
+    assert _SELF_HOST_GUIDE_URL in folded
+    assert _PLUGIN_GUIDE_URL in folded
+    # claude.ai 절차는 그 밖(펼쳐진 본문)에 있다.
+    unfolded = re.sub(r"<details>.*?</details>", "", body, flags=re.S)
+    assert "사용자 정의 커넥터" in unfolded
+
+
+def test_onboarding_does_not_duplicate_the_client_tag_notice(client, monkeypatch):
+    """`client=claude`를 다른 AI 이름으로 바꾸라는 안내는 이미 접속 주소 블록에
+    있다 — 새 안내 블록이 같은 말을 한 번 더 하면 화면이 장황해진다."""
+    _connect_via_login(client, monkeypatch, github_id=30004, repo="nick/memories")
+    body = client.get("/auth/me").text
+    assert body.count("client=chatgpt") == 1
+
+
+def test_pages_are_mobile_and_dark_mode_ready(client, monkeypatch):
+    """모든 화면이 _html_page 하나를 쓰므로 여기 한 곳만 확인하면 된다."""
+    _connect_via_login(client, monkeypatch, github_id=30005, repo="olga/memories")
+    body = client.get("/auth/me").text
+
+    assert 'name="viewport"' in body and "width=device-width" in body
+    assert "prefers-color-scheme" in body
+    # 공백 없는 긴 주소가 좁은 화면을 옆으로 밀어내지 않도록 줄바꿈 규칙이 있어야 한다.
+    assert "word-break" in body or "overflow-wrap" in body
+
+
+def test_login_required_page_also_uses_the_shared_shell():
+    """로그인 안내처럼 세션 없는 화면도 같은 껍데기를 쓴다(한 곳만 고치면 전부
+    반영된다는 전제를 고정)."""
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    body = fresh_client.get("/auth/me").text
+    assert 'name="viewport"' in body
+    assert "prefers-color-scheme" in body
+
+
+# ---------------------------------------------------------------------------
+# 연결 시험(namu-60) — 판정은 반드시 세 갈래. "지금은 확인 불가"를 "죽었다"로
+# 단정하면, 멀쩡한 주소를 쥔 사용자가 스스로 커넥터를 깨뜨린다.
+# ---------------------------------------------------------------------------
+# 세 판정을 서로 구분하는 문구. "주소가 잘못됐다"류의 조각으로 단언하면 "확인
+# 불가" 안내문에 든 '주소가 잘못됐다는 뜻은 아닙니다'와 겹쳐 서로를 못 가른다.
+_ALIVE_MARK = "살아있습니다"
+_INVALID_MARK = "더 이상 유효하지 않습니다"
+_UNKNOWN_MARK = "지금은 확인할 수 없습니다"
+
+
+@pytest.fixture(autouse=True)
+def _no_probe_retry_sleep(monkeypatch):
+    """재시도 대기(1초)만 걷어낸다 — 재시도 자체는 그대로 일어난다(호출 횟수로
+    검증한다)."""
+    monkeypatch.setattr(wa, "_MCP_PROBE_RETRY_DELAY_SEC", 0)
+
+
+def _fake_probe(*statuses):
+    """`_http_probe` 대역. 호출된 URL을 기록하고 준 순서대로 상태코드를 돌려준다
+    (마지막 값을 계속 반복)."""
+    urls = []
+
+    def _probe(url):
+        urls.append(url)
+        idx = min(len(urls) - 1, len(statuses) - 1)
+        return statuses[idx]
+
+    return _probe, urls
+
+
+def test_connection_test_reports_alive(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=31001, repo="pat/memories")
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")
+
+    assert r.status_code == 200
+    assert _ALIVE_MARK in r.text
+    assert _INVALID_MARK not in r.text
+    assert _UNKNOWN_MARK not in r.text
+    # 자기 자신을(컨테이너 내부 주소로) 그 사용자의 진짜 열쇠로 두드렸는지.
+    assert len(urls) == 1
+    assert urls[0].startswith("http://127.0.0.1:")
+    assert urls[0].endswith(f"/mcp/{row['mcp_secret']}")
+
+
+def test_connection_test_uses_the_configured_server_port(client, monkeypatch):
+    """포트는 새 환경변수가 아니라 서버가 실제로 바인드하는 값(NAMU_HTTP_PORT)에서
+    얻는다 — 엉뚱한 포트를 두드리면 멀쩡한 주소도 늘 '확인 불가'가 된다."""
+    monkeypatch.setenv("NAMU_HTTP_PORT", "9911")
+    _connect_via_login(client, monkeypatch, github_id=31002, repo="quinn/memories")
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    client.post("/auth/mcp/test")
+
+    assert urls[0].startswith("http://127.0.0.1:9911/mcp/")
+    # 바깥 도메인으로 나가면 Cloudflare 터널을 한 바퀴 돌아야 하고 컨테이너
+    # 안에서는 이름이 안 풀린다 — 절대 쓰지 않는다.
+    assert "onnamu.kr" not in urls[0]
+    assert "testserver" not in urls[0]
+
+
+def test_self_probe_port_default_matches_the_port_the_server_binds(monkeypatch):
+    """NAMU_HTTP_PORT가 비어 있을 때의 기본값이 routing_server.main()이 실제로
+    uvicorn에 넘기는 기본값과 같아야 한다 — 한쪽만 바뀌면 연결 시험이 아무도
+    없는 포트를 두드리며 조용히 '확인 불가'만 낸다."""
+    import uvicorn
+
+    monkeypatch.delenv("NAMU_HTTP_PORT", raising=False)
+    monkeypatch.delenv("NAMU_HTTP_HOST", raising=False)
+    captured = {}
+
+    monkeypatch.setattr(rs, "build_app", lambda: object())
+    monkeypatch.setattr(
+        uvicorn, "run", lambda app, host, port: captured.update(host=host, port=port)
+    )
+
+    rs.main()
+
+    assert captured["port"] == wa._self_http_port()
+
+
+def test_connection_test_reports_invalid_address_on_404(client, monkeypatch):
+    """404는 문지기가 '장부에 없는 열쇠'라고 명시적으로 거절한 경우 — 이것만
+    '주소가 잘못됨'이다."""
+    _connect_via_login(client, monkeypatch, github_id=31003, repo="rita/memories")
+    probe, urls = _fake_probe(404)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")
+
+    assert _INVALID_MARK in r.text
+    assert _ALIVE_MARK not in r.text
+    assert _UNKNOWN_MARK not in r.text
+    assert len(urls) == 1  # 명확한 거절은 재시도하지 않는다
+
+
+@pytest.mark.parametrize("first_status", [500, 502, 503, None])
+def test_connection_test_retries_once_then_says_cannot_tell(client, monkeypatch, first_status):
+    """5xx·타임아웃(None)은 짧게 한 번 재시도하고, 그래도 같으면 '지금은 확인
+    불가'다 — **절대 죽었다고 단정하지 않는다.** 배포 직후의 일시 502를 실패로
+    단정하면 사용자가 멀쩡한 주소를 재발급해 커넥터를 스스로 깨뜨린다."""
+    _connect_via_login(client, monkeypatch, github_id=31004 + (first_status or 0), repo="sam/mem")
+    probe, urls = _fake_probe(first_status)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")
+
+    assert len(urls) == 2, "일시적 실패인데 재시도하지 않았다"
+    assert _UNKNOWN_MARK in r.text
+    assert _INVALID_MARK not in r.text, "일시적 실패를 '주소가 잘못됨'으로 단정했다"
+    assert _ALIVE_MARK not in r.text
+    assert "잠깐" in r.text or "다시" in r.text  # 다시 눌러보라는 안내
+
+
+def test_connection_test_recovers_on_retry(client, monkeypatch):
+    """첫 시도가 502였어도 재시도가 정상이면 '살아있음'이어야 한다 — 재시도가
+    판정에 실제로 반영되는지(형식만 갖춘 재시도가 아닌지) 확인한다."""
+    _connect_via_login(client, monkeypatch, github_id=31009, repo="tom/memories")
+    probe, urls = _fake_probe(502, 200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")
+
+    assert len(urls) == 2
+    assert _ALIVE_MARK in r.text
+    assert _UNKNOWN_MARK not in r.text
+
+
+def test_connection_test_requires_post(client, monkeypatch):
+    _connect_via_login(client, monkeypatch, github_id=31010, repo="uma/memories")
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.get("/auth/mcp/test")
+
+    assert r.status_code == 405
+    assert urls == []
+
+
+def test_connection_test_without_session_rejected(monkeypatch):
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = fresh_client.post("/auth/mcp/test")
+
+    assert r.status_code == 401
+    assert urls == [], "세션도 없는데 서버가 자기 자신을 두드렸다"
+
+
+def test_connection_test_with_forged_session_rejected(monkeypatch):
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=31011, repo="victim/probe-repo"
+    )
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    forged = f"{int(time.time()) + 1800}|{row['user_key']}.{'0' * 64}"
+    fresh_client.cookies.set(wa._SESSION_COOKIE_NAME, forged)
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = fresh_client.post("/auth/mcp/test")
+
+    assert r.status_code == 401
+    assert urls == []
+    assert row["mcp_secret"] not in r.text
+
+
+# ---------------------------------------------------------------------------
+# 재발급 / 폐기(namu-60)
+#
+# "옛 주소가 즉시 막힌다"는 단언은 장부만 보지 않고 **실제 앱에 요청을 넣어**
+# 확인한다 — 라우팅 서버가 장부를 조회하는 구조라는 전제 자체가 깨지면(예:
+# 어딘가에 열쇠를 캐시하기 시작하면) 장부 단언만으로는 아무것도 못 잡는다.
+# ---------------------------------------------------------------------------
+def _mcp_gate(secret: str) -> "tuple[int, dict]":
+    """실제 문지기(`rs._PerUserSecretDispatcher`)에 `/mcp/<열쇠>`를 넣고
+    `(상태코드, 통과했다면 안쪽 앱이 본 scope)`를 돌려준다.
+
+    이것이 운영에서 "주소가 살았나 죽었나"를 실제로 판정하는 코드다 — 요청마다
+    `identity.get_by_mcp_secret`으로 장부를 조회해 못 찾으면 404로 끊는다.
+
+    안쪽 MCP 앱은 통과 여부만 보면 되므로 200을 돌려주는 대역으로 바꾼다.
+    FastMCP 세션 매니저는 모듈 싱글턴이라 한 프로세스에서 lifespan을 두 번 열
+    수 없고(그 한 번은 test_routing_server.py의 lifespan 스모크가 이미 쓴다),
+    그렇다고 실제 MCP 응답 코드까지 이 테스트가 확인할 필요는 없다.
+    (실서버 왕복 확인은 별도 스모크로 수행 — 유효 열쇠 200 / 폐기·재발급 후
+    404가 실측됐다.)
+    """
+    seen: dict = {}
+
+    async def _inner(scope, receive, send):
+        seen["path"] = scope["path"]
+        seen["query"] = scope["query_string"].decode("latin-1")
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    status = asyncio.run(_raw_asgi_get(rs._PerUserSecretDispatcher(_inner), f"/mcp/{secret}"))
+    return status, seen
+
+
+def _ledger_row(user_key: str) -> dict:
+    conn = identity.connect()
+    try:
+        return identity.get_by_user_key(conn, user_key)
+    finally:
+        conn.close()
+
+
+def test_rotate_issues_new_address_and_shows_it_immediately(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32001, repo="vera/memories")
+    old_secret = row["mcp_secret"]
+
+    r = client.post("/auth/mcp/rotate")
+
+    assert r.status_code == 200
+    new_secret = _ledger_row(row["user_key"])["mcp_secret"]
+    assert new_secret != old_secret
+    # 새 주소가 그 자리에서 완성형으로 보여야 한다(다시 찾아 헤매지 않도록).
+    assert f"/mcp/{new_secret}?client=claude" in r.text
+    assert old_secret not in r.text
+    assert "새 주소를 발급했습니다" in r.text
+    # 안내도 함께 보인다(내 페이지와 같은 화면을 쓴다).
+    _assert_onboarding_guide(r.text)
+
+
+def test_rotate_blocks_the_old_address_on_the_real_gate(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32002, repo="walt/memories")
+    old_secret = row["mcp_secret"]
+    assert _mcp_gate(old_secret)[0] == 200  # 재발급 전에는 통과한다
+
+    client.post("/auth/mcp/rotate")
+    new_secret = _ledger_row(row["user_key"])["mcp_secret"]
+
+    assert _mcp_gate(old_secret)[0] == 404, "옛 주소가 여전히 통한다"
+    status, seen = _mcp_gate(new_secret)
+    assert status == 200
+    # 새 열쇠가 같은 사람으로 판정되는지까지 — 열쇠만 바뀌고 서랍은 그대로여야 한다.
+    assert f"user={row['user_key']}" in seen["query"]
+
+
+def test_rotate_requires_post(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32003, repo="xena/memories")
+
+    r = client.get("/auth/mcp/rotate")
+
+    assert r.status_code == 405
+    assert _ledger_row(row["user_key"])["mcp_secret"] == row["mcp_secret"]
+
+
+def test_rotate_without_session_rejected_and_changes_nothing(monkeypatch):
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=32004, repo="victim/rotate-repo"
+    )
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+
+    r = fresh_client.post("/auth/mcp/rotate")
+
+    assert r.status_code == 401
+    assert _ledger_row(row["user_key"])["mcp_secret"] == row["mcp_secret"]
+    assert row["mcp_secret"] not in r.text
+
+
+def test_revoke_first_press_only_asks_for_confirmation(client, monkeypatch):
+    """확인 단계가 진짜로 있는지 — 첫 POST는 장부를 한 글자도 바꾸면 안 된다."""
+    row = _connect_via_login(client, monkeypatch, github_id=32005, repo="yuri/memories")
+
+    r = client.post("/auth/mcp/revoke")
+
+    assert r.status_code == 200
+    assert "정말" in r.text  # 확인을 묻는 화면
+    assert _ledger_row(row["user_key"])["mcp_secret"] == row["mcp_secret"]
+
+
+def test_revoke_confirmed_removes_the_address(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32006, repo="zack/memories")
+    secret = row["mcp_secret"]
+    assert _mcp_gate(secret)[0] == 200  # 폐기 전에는 통과한다
+
+    r = client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+
+    assert r.status_code == 200
+    assert "폐기했습니다" in r.text
+    assert _ledger_row(row["user_key"])["mcp_secret"] is None
+    assert secret not in r.text
+    # 실제 문지기에서도 그 주소가 막혔는지.
+    assert _mcp_gate(secret)[0] == 404
+
+
+def test_revoked_address_is_not_resurrected_by_visiting_my_page(client, monkeypatch):
+    """내 페이지는 열쇠가 비어 있으면 발급해 주는 자가 치유 경로를 갖고 있다 —
+    폐기한 사용자에게 그 경로가 돌면 폐기가 새로고침 한 번에 취소된다."""
+    row = _connect_via_login(client, monkeypatch, github_id=32007, repo="amy/memories")
+    client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+
+    r = client.get("/auth/me")
+
+    assert r.status_code == 200
+    assert _ledger_row(row["user_key"])["mcp_secret"] is None
+    assert "폐기" in r.text  # 장애로 오해할 문구가 아니라 폐기 상태 안내
+    assert "만들지 못했습니다" not in r.text
+    # 없는 주소를 그럴듯하게 그리지 않는다(완성 주소도, 복사 상자도 없다).
+    assert "?client=claude" not in r.text
+    assert 'id="mcp-url"' not in r.text
+    assert row["mcp_secret"] not in r.text
+
+
+def test_revoked_user_can_get_a_new_address_by_rotating(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32008, repo="ben/memories")
+    client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+
+    r = client.post("/auth/mcp/rotate")
+
+    assert r.status_code == 200
+    new_secret = _ledger_row(row["user_key"])["mcp_secret"]
+    assert new_secret and new_secret != row["mcp_secret"]
+    assert f"/mcp/{new_secret}?client=claude" in r.text
+    assert _mcp_gate(new_secret)[0] == 200
+
+
+def test_revoke_requires_post(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=32009, repo="cara/memories")
+
+    r = client.get("/auth/mcp/revoke")
+
+    assert r.status_code == 405
+    assert _ledger_row(row["user_key"])["mcp_secret"] == row["mcp_secret"]
+
+
+def test_revoke_without_session_rejected_and_changes_nothing(monkeypatch):
+    victim_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    row = _connect_via_login(
+        victim_client, monkeypatch, github_id=32010, repo="victim/revoke-repo"
+    )
+    fresh_client = TestClient(wa.build_auth_app(), base_url="https://testserver")
+
+    r = fresh_client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+
+    assert r.status_code == 401
+    assert _ledger_row(row["user_key"])["mcp_secret"] == row["mcp_secret"]
+
+
+def test_connection_test_on_revoked_account_says_no_address_to_test(client, monkeypatch):
+    """폐기 상태에서 시험을 누르면 '주소가 잘못됨'이 아니라 '시험할 주소가
+    없음'이어야 한다 — 두드릴 대상 자체가 없으므로 자기 호출도 하지 않는다."""
+    _connect_via_login(client, monkeypatch, github_id=32011, repo="dana/memories")
+    client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+    probe, urls = _fake_probe(200)
+    monkeypatch.setattr(wa, "_http_probe", probe)
+
+    r = client.post("/auth/mcp/test")
+
+    assert r.status_code == 200
+    assert "시험할 주소가 없습니다" in r.text
+    assert urls == []
+
+
+def test_mcp_management_routes_are_registered_in_build_auth_app():
+    """'만들었다'와 '쓰인다'는 다르다 — 라우트가 실제로 앱에 붙어 있는지
+    (405가 아니라 404가 나오면 등록 자체가 빠진 것) 경로 목록으로 확인한다."""
+    paths = {
+        (route.path, tuple(sorted(route.methods - {"HEAD"})))
+        for route in wa.build_auth_app().routes
+    }
+    assert ("/auth/mcp/test", ("POST",)) in paths
+    assert ("/auth/mcp/rotate", ("POST",)) in paths
+    assert ("/auth/mcp/revoke", ("POST",)) in paths

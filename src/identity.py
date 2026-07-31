@@ -46,6 +46,13 @@ _MCP_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 # SQLite의 ALTER TABLE ADD COLUMN은 UNIQUE 컬럼 추가를 허용하지 않는다. 이미
 # 가입자가 들어 있는 운영 장부(namu_cloud_identity 볼륨)를 마이그레이션해야
 # 하므로, 신규 생성과 기존 이관이 **같은 모양**이 되도록 양쪽 다 인덱스로 건다.
+#
+# `mcp_revoked_at`(namu-60)은 "이 사용자는 접속 주소를 **스스로 폐기했다**"는
+# 표시다. 값이 비어 있는 것(NULL)만으로는 폐기를 표현할 수 없다 — 이 장부는
+# `connect()`마다 `init_db` → `backfill_mcp_secrets`를 돌려 비어 있는 열쇠를
+# 자동으로 채우므로, 폐기해서 NULL로 만든 열쇠가 바로 다음 요청에서 되살아난다
+# (실측 가능: 이 칸 없이 revoke를 구현하면 재접속 한 번에 새 열쇠가 발급된다).
+# 그래서 "비었다"와 "일부러 없앴다"를 칸 하나로 구분한다.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_key        TEXT PRIMARY KEY,
@@ -55,7 +62,8 @@ CREATE TABLE IF NOT EXISTS users (
     repo_full_name  TEXT,
     created_at      TEXT NOT NULL,
     last_seen_at    TEXT NOT NULL,
-    mcp_secret      TEXT
+    mcp_secret      TEXT,
+    mcp_revoked_at  TEXT
 );
 """
 
@@ -119,6 +127,10 @@ def init_db(conn: sqlite3.Connection) -> None:
     existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
     if "mcp_secret" not in existing_cols:
         conn.execute("ALTER TABLE users ADD COLUMN mcp_secret TEXT")
+    if "mcp_revoked_at" not in existing_cols:
+        # 폐기 표시 칸(namu-60). 기존 가입자는 전부 NULL = "폐기한 적 없음"이라
+        # 기본 동작(비어 있으면 발급)이 그대로 유지된다.
+        conn.execute("ALTER TABLE users ADD COLUMN mcp_revoked_at TEXT")
     conn.execute(_MCP_SECRET_INDEX_SQL)
     conn.commit()
     backfill_mcp_secrets(conn)
@@ -249,7 +261,9 @@ def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
     mcp_secret도 같은 원칙이다 — 신규 가입 때 한 번 발급하고, 재로그인 때는
     **절대 새로 굴리지 않는다.** 매번 갈면 사용자가 클로드에 등록해 둔 커넥터
     주소가 로그인할 때마다 죽는다(재발급이 필요하면 별도 경로로 명시적으로
-    한다). 다만 이관 등으로 비어 있으면 그때는 채운다.
+    한다 — `rotate_mcp_secret`). 다만 이관 등으로 비어 있으면 그때는 채운다.
+    단, 사용자가 스스로 폐기한 경우(`mcp_revoked_at`)는 채우지 않는다 — 로그인
+    한 번에 폐기가 취소되면 "폐기"가 아무 의미가 없다.
     """
     if not isinstance(login, str) or not login.strip():
         raise ValueError(
@@ -271,10 +285,10 @@ def upsert_user(conn: sqlite3.Connection, github_id: int, login: str) -> str:
             (login.strip(), now, github_id),
         )
         key = existing["user_key"]
-        if not existing.get("mcp_secret"):
+        if not existing.get("mcp_secret") and not existing.get("mcp_revoked_at"):
             conn.execute(
                 "UPDATE users SET mcp_secret = ? WHERE user_key = ? AND "
-                "(mcp_secret IS NULL OR mcp_secret = '')",
+                "(mcp_secret IS NULL OR mcp_secret = '') AND mcp_revoked_at IS NULL",
                 (generate_mcp_secret(), key),
             )
     conn.commit()
@@ -287,9 +301,14 @@ def backfill_mcp_secrets(conn: sqlite3.Connection) -> int:
     `init_db`가 매 접속마다 부르므로, 이 기능 이전에 가입한 사용자도 서버가
     한 번 뜨는 것만으로 열쇠를 갖게 된다. 이미 값이 있는 사람은 건드리지
     않는다 — 덮어쓰면 등록해 둔 커넥터 주소가 죽는다.
+
+    **스스로 폐기한 사용자(`mcp_revoked_at`)도 건드리지 않는다.** 이 함수는
+    `connect()`마다 불리므로, 여기서 제외하지 않으면 폐기한 열쇠가 다음 요청
+    한 번에 새 값으로 되살아난다(폐기 기능이 성립하지 않는다).
     """
     rows = conn.execute(
-        "SELECT user_key FROM users WHERE mcp_secret IS NULL OR mcp_secret = ''"
+        "SELECT user_key FROM users WHERE (mcp_secret IS NULL OR mcp_secret = '') "
+        "AND mcp_revoked_at IS NULL"
     ).fetchall()
     for row in rows:
         conn.execute(
@@ -299,6 +318,58 @@ def backfill_mcp_secrets(conn: sqlite3.Connection) -> int:
     if rows:
         conn.commit()
     return len(rows)
+
+
+def rotate_mcp_secret(conn: sqlite3.Connection, user_key: str) -> str:
+    """접속 열쇠를 새로 굴려 장부에 덮어쓰고, 새 열쇠를 돌려준다(재발급).
+
+    **옛 주소를 따로 막는 절차가 없다는 점이 이 함수의 핵심**이다. 라우팅
+    서버(`routing_server._PerUserSecretDispatcher`)는 요청마다 경로에 실린
+    열쇠를 `get_by_mcp_secret`으로 장부에서 조회하고, 못 찾으면 404로 끊는다 —
+    즉 장부 행을 갈아끼우는 순간 옛 열쇠는 조회에 잡히지 않아 자동으로
+    죽는다(별도 블랙리스트/만료 목록을 두지 않는 이유).
+
+    폐기 상태(`mcp_revoked_at`)에서 다시 부르면 폐기 표시를 지우고 새 열쇠를
+    준다 — "폐기했다가 다시 쓰고 싶다"가 재발급 버튼 하나로 풀려야 한다.
+    """
+    _validate_user_key(user_key)
+    new_secret = _validate_mcp_secret(generate_mcp_secret())
+    cur = conn.execute(
+        "UPDATE users SET mcp_secret = ?, mcp_revoked_at = NULL, last_seen_at = ? "
+        "WHERE user_key = ?",
+        (new_secret, _utc_now_iso(), user_key),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(
+            f"등록되지 않은 user_key입니다: {user_key}. Unknown user_key."
+        )
+    conn.commit()
+    return new_secret
+
+
+def revoke_mcp_secret(conn: sqlite3.Connection, user_key: str) -> None:
+    """접속 열쇠를 없앤다(폐기). 그 사용자는 어떤 주소로도 접속하지 못한다.
+
+    빈 문자열이 아니라 NULL로 비운다 — UNIQUE 부분 색인
+    (`WHERE mcp_secret IS NOT NULL`)과 `get_by_mcp_secret`의 조건이 NULL을
+    전제로 쓰였고, 빈 문자열을 여럿 넣으면 두 번째 폐기에서 UNIQUE 충돌이
+    난다.
+
+    동시에 `mcp_revoked_at`을 찍는다 — 이 표시가 없으면 `backfill_mcp_secrets`
+    (매 `connect()`마다 실행)가 빈 칸을 보고 곧바로 새 열쇠를 발급해 폐기가
+    무효가 된다.
+    """
+    _validate_user_key(user_key)
+    cur = conn.execute(
+        "UPDATE users SET mcp_secret = NULL, mcp_revoked_at = ?, last_seen_at = ? "
+        "WHERE user_key = ?",
+        (_utc_now_iso(), _utc_now_iso(), user_key),
+    )
+    if cur.rowcount == 0:
+        raise ValueError(
+            f"등록되지 않은 user_key입니다: {user_key}. Unknown user_key."
+        )
+    conn.commit()
 
 
 def set_installation(
