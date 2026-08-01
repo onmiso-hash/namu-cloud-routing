@@ -51,6 +51,7 @@ _VENDOR_PLUGIN_DIR = (
 if str(_VENDOR_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_PLUGIN_DIR))
 
+import access_log  # noqa: E402
 import config as cfg  # noqa: E402
 import db  # noqa: E402
 import identity  # noqa: E402
@@ -897,7 +898,10 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    # 접속 기록에 개인 열쇠가 평문으로 남지 않게 한다(namu-67) — 아래
+    # _PerUserSecretDispatcher가 scope를 복사해 고치는 탓에 uvicorn은 원래 경로를
+    # 보고 로그를 찍는다. 자세한 사정은 access_log 모듈 문서 참고.
+    uvicorn.run(app, host=host, port=port, log_config=access_log.build_log_config())
 
 
 if __name__ == "__main__":

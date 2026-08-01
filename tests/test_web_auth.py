@@ -1407,7 +1407,11 @@ def test_self_probe_port_default_matches_the_port_the_server_binds(monkeypatch):
 
     monkeypatch.setattr(rs, "build_app", lambda: object())
     monkeypatch.setattr(
-        uvicorn, "run", lambda app, host, port: captured.update(host=host, port=port)
+        # **kwargs — main()이 넘기는 부가 인자(namu-67의 log_config 등)가 늘어도
+        # 이 테스트의 관심사(host/port)와 무관하게 깨지지 않게 한다.
+        uvicorn,
+        "run",
+        lambda app, host, port, **kwargs: captured.update(host=host, port=port),
     )
 
     rs.main()
