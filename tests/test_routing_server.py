@@ -611,9 +611,50 @@ def test_dispatcher_routes_everything_else_to_mcp_app():
     mcp_app = _make_labelled_app("mcp")
     dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
     client = TestClient(dispatcher)
-    for path in ["/mcp", "/mcp/some-secret", "/", "/authx/notreallyauth", "/auth"]:
+    for path in ["/mcp", "/mcp/some-secret", "/authx/notreallyauth", "/auth"]:
         r = client.get(path)
         assert r.text == "mcp", f"path={path!r}가 auth_app으로 잘못 라우팅됐다"
+
+
+# ---------------------------------------------------------------------------
+# 공개 페이지(namu-70) — 홈·시작하기 등은 로그인 없이 열린다. 여는 방식이
+# 잘못되면 인증 없이 MCP에 닿는 구멍이 되므로, 여는 범위를 여기서 못박는다.
+# ---------------------------------------------------------------------------
+def test_dispatcher_opens_the_public_pages_to_the_web_app():
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app))
+
+    for path in ["/", "/start", "/memory", "/safety", "/faq"]:
+        assert client.get(path).text == "auth", f"공개 경로 {path!r}가 안 열렸다"
+
+
+def test_public_paths_are_matched_exactly_not_by_prefix():
+    """접두어로 열면 `/faq/../mcp` 같은 조작에 문이 열릴 여지가 생긴다.
+    목록에 적힌 글자 그대로가 아니면 전부 닫히는 쪽(MCP+인증)으로 가야 한다."""
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app))
+
+    for path in [
+        "/faq/mcp",
+        "/faq/../mcp",
+        "/start/mcp/secret",
+        "/memory/mcp",
+        # `//`는 여기 넣지 않는다 — 시험용 클라이언트가 그 주소를 `/`로
+        # 정규화해 버려서, 디스패처가 아니라 클라이언트를 시험하게 된다.
+        "/FAQ",
+        "/faq.",
+    ]:
+        assert client.get(path).text == "mcp", f"{path!r}가 공개로 새어 나갔다"
+
+
+def test_public_paths_and_menu_never_drift_apart():
+    """문(디스패처)과 메뉴(화면)가 같은 목록을 봐야 한다 — 두 곳에 손으로
+    적으면 메뉴에는 있는데 눌러도 404가 나는 항목이 생긴다."""
+    import ui
+
+    assert rs._PUBLIC_PATHS == frozenset(path for path, _label in ui.MENU)
 
 
 def test_dispatcher_default_is_the_authenticated_side():

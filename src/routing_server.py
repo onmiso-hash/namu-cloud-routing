@@ -58,6 +58,7 @@ import identity  # noqa: E402
 import memo  # noqa: E402
 import profile  # noqa: E402
 import record_input  # noqa: E402
+import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
@@ -831,6 +832,11 @@ class _PerUserSecretDispatcher:
         await self.app(scope, receive, send)
 
 
+# 로그인 없이 열리는 경로. 메뉴(ui.MENU)와 같은 목록이라 한쪽만 늘어날 수
+# 없다 — 메뉴에 없는 공개 경로도, 문이 안 열린 메뉴도 생기지 않는다.
+_PUBLIC_PATHS = frozenset(ui.PUBLIC_PATHS)
+
+
 class _AuthOrMcpDispatcher:
     """`/auth/`(웹 로그인) vs 그 외 전부(MCP+Auth)를 가르는 순수 ASGI 3-인자
     디스패처(AuthMiddleware와 같은 관례).
@@ -851,6 +857,12 @@ class _AuthOrMcpDispatcher:
     AuthMiddleware를 거치므로, 인증 없이 MCP에 닿을 방법이 없다(auth_app 쪽으로
     잘못 분류되는 경우도 마찬가지로 안전한 방향 — auth_app에는 애초에 MCP 라우트가
     없다).
+
+    공개 페이지(namu-70, 홈·시작하기 등)만 예외로 웹 쪽에 보낸다. **접두어가
+    아니라 정확히 일치하는 경로만** 목록으로 연다 — `startswith`로 열면
+    `/faq/../mcp` 같은 조작에 문이 열릴 여지가 생기지만, `==`로 보면 목록에 적힌
+    그 글자 그대로가 아닌 모든 요청은 종전대로 닫히는 방향(MCP+인증)으로 간다.
+    목록은 `ui.PUBLIC_PATHS` 한 곳에서 온다(메뉴와 문이 어긋나지 않게).
     """
 
     def __init__(self, auth_app, mcp_app):
@@ -859,7 +871,9 @@ class _AuthOrMcpDispatcher:
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
-        if scope["type"] == "http" and path.startswith("/auth/"):
+        if scope["type"] == "http" and (
+            path.startswith("/auth/") or path in _PUBLIC_PATHS
+        ):
             await self.auth_app(scope, receive, send)
             return
         await self.mcp_app(scope, receive, send)

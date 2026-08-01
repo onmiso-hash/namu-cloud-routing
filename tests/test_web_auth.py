@@ -1127,7 +1127,8 @@ def test_me_valid_session_but_missing_from_ledger_treated_as_login_required(monk
     r = client_a.get("/auth/me")
 
     assert r.status_code == 401
-    assert "GitHub로 로그인" in r.text
+    assert "로그인이 필요합니다" in r.text
+    assert "/auth/github/login" in r.text
     assert row["mcp_secret"] not in r.text
 
 

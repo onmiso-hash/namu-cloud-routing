@@ -64,6 +64,8 @@ from starlette.routing import Route
 
 import github_app as ga
 import identity
+import pages
+import ui
 import user_repo
 
 logger = logging.getLogger("namu.web_auth")
@@ -387,47 +389,22 @@ def _fetch_installation_repos(user_token: str, installation_id: int) -> "tuple[l
 # 값이 그 사람 전용이므로 본인 화면에 띄워도 안전하다(예전 공용 열쇠였다면
 # 로그인한 사람 전원에게 남의 서랍 여는 열쇠를 나눠주는 셈이라 불가능했다).
 # ---------------------------------------------------------------------------
-# 모든 화면의 공통 껍데기 스타일. 외부 CSS/웹폰트/CDN 없이 인라인 <style> 하나다.
+# 껍데기와 차림새는 전부 `ui.py`가 갖는다(namu-70). 여기에는 얇은 이름만 남긴다 —
+# 이 파일 안에서 `_html_page`를 부르는 자리가 열세 곳이라 이름을 유지하는 편이
+# 갈아끼우는 변경분을 작게 만든다.
 #
-#  - viewport: 없으면 모바일 브라우저가 데스크톱 폭(980px)을 가정하고 축소해서
-#    그린다 — 글씨가 깨알같이 작아지고 가로 스크롤이 생긴다.
-#  - color-scheme: light dark: 브라우저가 폼 컨트롤(textarea/button)의 기본
-#    배색을 다크에 맞춰 준다. 이게 없으면 다크 모드에서 흰 입력칸만 남는다.
-#  - overflow-wrap/word-break: 접속 주소는 공백 없는 100자짜리 한 덩어리라
-#    줄바꿈 지점이 없다 — 그대로 두면 좁은 화면을 옆으로 밀어낸다.
-_BASE_CSS = (
-    ":root{color-scheme:light dark;}"
-    "body{font-family:sans-serif;max-width:640px;margin:40px auto;padding:0 16px;"
-    "line-height:1.6;background:#ffffff;color:#111111;}"
-    "h1{font-size:1.5rem;} h2{font-size:1.2rem;margin-top:1.8em;}"
-    "p,li{overflow-wrap:break-word;word-break:break-word;}"
-    "code{overflow-wrap:anywhere;background:#f0f0f0;padding:1px 4px;border-radius:3px;}"
-    "textarea,button,input,pre{max-width:100%;box-sizing:border-box;}"
-    "pre{overflow-x:auto;background:#f0f0f0;padding:8px;border-radius:4px;}"
-    "details{margin:12px 0;} summary{cursor:pointer;font-weight:bold;}"
-    # 그 자리에서 바뀐 결과가 "방금 나타났다"는 것을 몸으로 알리는 짧은 등장 효과
-    # (namu-69). 움직임을 줄여 달라고 설정한 사용자에게는 켜지 않는다.
-    "@keyframes namu-pop{from{opacity:0;transform:translateY(-4px);}"
-    "to{opacity:1;transform:none;}}"
-    ".namu-pop{animation:namu-pop .25s ease-out;}"
-    "@media (prefers-reduced-motion:reduce){.namu-pop{animation:none;}}"
-    "@media (prefers-color-scheme:dark){"
-    "body{background:#15171a;color:#e6e6e6;}"
-    "a{color:#7fb3ff;}"
-    "code,pre{background:#23272c;}"
-    "textarea{background:#23272c;color:#e6e6e6;border:1px solid #4a4f55;}"
-    "}"
-)
+# 화면 조각을 만드는 함수들은 `ui.SITE_CSS`가 정의한 클래스(.btn/.card/.step)를
+# 쓴다. 인라인 style로 같은 값을 다시 적지 않는다 — 그렇게 흩어져 있던 열다섯
+# 군데가 서로 조금씩 달라져, 버튼 하나를 고치면 다른 버튼이 안 따라오는 상태였다.
+# ---------------------------------------------------------------------------
+def _html_page(title: str, body_html: str, *, cta: str = "me") -> str:
+    """로그인 뒤 화면의 껍데기.
 
-
-def _html_page(title: str, body_html: str) -> str:
-    return (
-        "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        f"<title>{html.escape(title)}</title>"
-        f"<style>{_BASE_CSS}</style></head>"
-        f"<body>{body_html}</body></html>"
-    )
+    `cta`는 메뉴 오른쪽 끝 버튼이다 — 기본값은 '내 페이지'(로그인한 사람이
+    돌아갈 곳)이고, 로그아웃·로그인 안내처럼 세션이 없는 화면만 '시작하기'로
+    바꾼다. 없는 세션으로 내 페이지에 보내면 그 자리에서 튕긴다.
+    """
+    return ui.page(title, body_html, cta=cta)
 
 
 def _public_origin(request: Request) -> str:
@@ -483,21 +460,23 @@ def _html_mcp_url_section(mcp_url: str) -> str:
     공유한다(중복 붙여넣기 대신 한 곳만 고치면 양쪽에 반영되게)."""
     safe_url = html.escape(mcp_url)
     return (
-        "<h2>접속 주소</h2>"
+        '<div class="card">'
+        "<h2 style=\"margin-top:0\">접속 주소</h2>"
         "<p>아래 주소를 복사해 사용하는 AI의 커넥터에 붙여 넣으세요.</p>"
         f'<textarea id="mcp-url" readonly rows="3" onclick="this.select()" '
-        f'style="width:100%;box-sizing:border-box;font-family:monospace;'
-        f'font-size:13px;padding:8px;">{safe_url}</textarea>'
-        '<p><button type="button" id="copy-btn" style="padding:8px 16px;'
-        'font-size:15px;cursor:pointer;">주소 복사</button> '
-        '<span id="copy-msg"></span></p>'
+        f'style="width:100%;font-family:monospace;font-size:13px;">'
+        f"{safe_url}</textarea>"
+        '<div class="btn-row">'
+        '<button type="button" id="copy-btn" class="btn btn-primary">'
+        "주소 복사</button>"
+        '<span id="copy-msg"></span></div>'
         "<p><small>이 주소가 회원님의 신분증입니다 — <b>남에게 알려주지 "
         "마세요.</b> 아는 사람은 회원님 기억을 읽고 쓸 수 있습니다.</small></p>"
-        "<p><small>클로드가 아닌 다른 AI에 붙일 때는 주소 끝의 "
-        "<code>client=claude</code>를 그 AI 이름으로 바꾸세요"
+        "<p style=\"margin-bottom:0\"><small>클로드가 아닌 다른 AI에 붙일 때는 "
+        "주소 끝의 <code>client=claude</code>를 그 AI 이름으로 바꾸세요"
         "(예: <code>client=chatgpt</code>). 나중에 '어느 AI가 남긴 기억인지' "
         "골라 찾을 때 쓰는 이름표라, 한 번 정하면 계속 같은 값을 쓰셔야 "
-        "합니다.</small></p>" + _MCP_URL_COPY_SCRIPT
+        "합니다.</small></p></div>" + _MCP_URL_COPY_SCRIPT
     )
 
 
@@ -525,7 +504,8 @@ def _html_onboarding_section(mcp_url: str) -> str:
     """
     return (
         _html_mcp_url_section(mcp_url)
-        + "<h2>웹 AI에 붙이는 법 (클로드 기준)</h2>"
+        + '<div class="card card-soft">'
+        '<h2 style="margin-top:0">웹 AI에 붙이는 법 (클로드 기준)</h2>'
         "<ol>"
         "<li>claude.ai에 로그인한 뒤 <b>설정(Settings)</b>을 엽니다.</li>"
         "<li><b>커넥터(Connectors)</b> 항목으로 들어갑니다.</li>"
@@ -533,9 +513,10 @@ def _html_onboarding_section(mcp_url: str) -> str:
         "<li>위에서 복사한 주소를 그대로 붙여 넣고 저장합니다. 이름은 아무거나 "
         "(예: 나무) 적으셔도 됩니다.</li>"
         "</ol>"
-        "<p>붙이고 나면 대화 중에 <code>namu_recall</code>(기억 꺼내기)·"
+        '<p style="margin-bottom:0">붙이고 나면 대화 중에 '
+        "<code>namu_recall</code>(기억 꺼내기)·"
         "<code>namu_record</code>(기억 남기기)·<code>namu_search</code>"
-        "(기억 찾기) 세 가지를 쓸 수 있습니다.</p>"
+        "(기억 찾기) 세 가지를 쓸 수 있습니다.</p></div>"
         "<details>"
         "<summary>직접 서버를 띄우고 싶다면</summary>"
         "<p>나무는 회원님이 <b>직접 서버를 올려 쓰는 길</b>도 있습니다. 차이는 "
@@ -558,20 +539,31 @@ def _html_onboarding_section(mcp_url: str) -> str:
 
 def _html_connected(user_key: str, repo_full_name: str, mcp_url: "str | None" = None) -> str:
     body = [
-        "<h1>연결 완료 (Connected)</h1>",
-        f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
-        "<p>이제부터 이 저장소가 회원님 기억의 원본입니다.</p>",
+        ui.stepper(4, label="연결 완료"),
+        '<span class="eyebrow">🎉 다 됐습니다</span>',
+        "<h1>기억을 담을 자리가 마련됐습니다</h1>",
+        '<p class="lead">이제부터 <code>'
+        f"{html.escape(repo_full_name)}</code> 저장소가 회원님 기억의 "
+        "원본입니다. 남은 일은 아래 주소를 AI에 한 번 붙이는 것뿐입니다.</p>",
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
     else:
         # 접속 열쇠가 없는 상태(이관 실패 등). 조용히 빈 화면을 내지 않는다.
         body.append(
-            "<p><b>접속 주소를 만들지 못했습니다.</b> 로그아웃 후 다시 로그인해 "
-            "주세요. 계속 같은 화면이 나오면 관리자에게 알려주세요.</p>"
+            _html_notice(
+                "<b>접속 주소를 만들지 못했습니다.</b> 로그아웃 후 다시 로그인해 "
+                "주세요. 계속 같은 화면이 나오면 관리자에게 알려주세요.",
+                tone="bad",
+            )
         )
+    body.append(
+        '<div class="btn-row">'
+        '<a class="btn btn-primary" href="/auth/me">내 페이지로 이동</a>'
+        '<a class="btn" href="/memory">무엇을 기억하는지 보기</a>'
+        "</div>"
+    )
     body.append(f"<p><small>사용자 키: <code>{html.escape(user_key)}</code></small></p>")
-    body.append('<p><a href="/auth/me">내 페이지로 이동 (Go to My page)</a></p>')
     return _html_page("NAMU 연결 완료", "".join(body))
 
 
@@ -590,18 +582,19 @@ def _html_select_repo(
         # 조용한 누락이 결함의 본질이었으므로, 안전 상한에 걸려 전부 못 가져온
         # 경우는 반드시 화면에서 알린다(조용히 자르는 대안으로 바꾸지 않는다).
         warning = (
-            '<p style="color:#b00020;"><strong>주의(Notice)</strong>: 저장소 목록이 너무 '
+            '<p style="color:var(--danger);"><strong>주의(Notice)</strong>: 저장소 목록이 너무 '
             "많아 전부 불러오지 못했습니다(안전 상한 도달) — 찾는 저장소가 아래 목록에 "
             "없다면 GitHub 설치 설정에서 허용 저장소 범위를 좁히거나 관리자에게 "
             "문의하세요. The repository list was truncated (safety limit reached); "
             "some repositories may be missing below.</p>"
         )
     body = (
-        "<h1>저장소 선택 (Choose a repository)</h1>"
-        f"{warning}"
-        "<p>앱을 설치하며 여러 저장소를 허용했습니다. 기억을 저장할 저장소를 하나 "
-        "고르세요.</p>"
-        f"<ul>{''.join(items)}</ul>"
+        ui.stepper(3, label="저장소 고르기")
+        + "<h1>어느 저장소에 기억을 담을까요?</h1>"
+        + warning
+        + '<p class="lead">앱을 설치하며 여러 저장소를 허용하셨습니다. '
+        "기억을 담을 저장소를 하나만 고르세요.</p>"
+        f'<div class="card"><ul class="repo-list">{"".join(items)}</ul></div>'
     )
     return _html_page("NAMU 저장소 선택", body)
 
@@ -628,17 +621,18 @@ def _html_select_repo_multi(
     warning = ""
     if truncated:
         warning = (
-            '<p style="color:#b00020;"><strong>주의(Notice)</strong>: 목록이 너무 많아 '
+            '<p style="color:var(--danger);"><strong>주의(Notice)</strong>: 목록이 너무 많아 '
             "전부 불러오지 못했습니다(안전 상한 도달) — 찾는 저장소가 아래에 없다면 "
             "GitHub 설치 설정에서 허용 범위를 좁히세요. The list was truncated "
             "(safety limit reached); some repositories may be missing below.</p>"
         )
     body = (
-        "<h1>저장소 선택 (Choose a repository)</h1>"
-        f"{warning}"
-        "<p>이미 설치된 앱에서 접근 가능한 저장소를 모두 찾았습니다. 기억을 저장할 "
-        "저장소를 하나 고르세요.</p>"
-        f"<ul>{''.join(items)}</ul>"
+        ui.stepper(3, label="저장소 고르기")
+        + "<h1>어느 저장소에 기억을 담을까요?</h1>"
+        + warning
+        + '<p class="lead">이미 설치된 앱에서 접근할 수 있는 저장소를 모두 '
+        "찾았습니다. 기억을 담을 저장소를 하나만 고르세요.</p>"
+        f'<div class="card"><ul class="repo-list">{"".join(items)}</ul></div>'
     )
     return _html_page("NAMU 저장소 선택", body)
 
@@ -646,11 +640,29 @@ def _html_select_repo_multi(
 def _html_no_repos(installation_id: int) -> str:
     settings_url = f"https://github.com/settings/installations/{installation_id}"
     body = (
-        "<h1>선택된 저장소가 없습니다 (No repository selected)</h1>"
-        "<p>앱 설치는 완료됐지만 접근을 허용한 저장소가 없습니다. GitHub 설치 설정에서 "
-        "저장소를 하나 고르거나 새로 만들어 추가하세요.</p>"
-        f'<p><a href="{html.escape(settings_url)}" target="_blank" rel="noopener">'
-        "GitHub 설치 설정 열기 (Open installation settings)</a></p>"
+        ui.stepper(3, label="저장소 고르기")
+        + "<h1>고를 저장소가 없습니다</h1>"
+        + '<p class="lead">앱 설치는 끝났지만 접근을 허용한 저장소가 '
+        "하나도 없습니다. 저장소를 만들거나, 이미 있는 저장소를 허용 목록에 "
+        "넣어 주세요.</p>"
+        + ui.steps(
+            [
+                (
+                    "저장소가 아직 없다면 만드세요",
+                    f'<p><a class="btn btn-primary" href="{pages.NEW_REPO_URL}" '
+                    'target="_blank" rel="noopener">GitHub에서 만들기 ↗</a></p>'
+                    "<p>이름(<code>namu-memory</code>)과 비공개가 미리 채워진 채로 "
+                    "열립니다 — 만들기 단추 한 번이면 됩니다.</p>",
+                ),
+                (
+                    "그 저장소를 나무에 허용하세요",
+                    f'<p><a class="btn" href="{html.escape(settings_url)}" '
+                    'target="_blank" rel="noopener">GitHub 설치 설정 열기 ↗</a></p>'
+                    "<p>허용한 뒤 이 화면으로 돌아와 새로고침하시면 목록에 "
+                    "나타납니다.</p>",
+                ),
+            ]
+        )
     )
     return _html_page("NAMU 저장소 없음", body)
 
@@ -696,25 +708,33 @@ def _html_next_steps(user_key: str) -> str:
 # ---------------------------------------------------------------------------
 def _html_me_login_required() -> str:
     body = (
-        "<h1>로그인이 필요합니다 (Login required)</h1>"
-        "<p>세션이 없거나 만료됐습니다(또는 유효하지 않습니다). 다시 로그인해 "
-        "주세요.</p>"
-        '<p><a href="/auth/github/login">GitHub로 로그인 (Log in with GitHub)</a></p>'
+        "<h1>로그인이 필요합니다</h1>"
+        '<p class="lead">로그인 상태가 없거나 시간이 지나 풀렸습니다. '
+        "다시 로그인해 주세요.</p>"
+        '<div class="btn-row">'
+        '<a class="btn btn-primary" href="/auth/github/login">GitHub으로 로그인</a>'
+        '<a class="btn" href="/">홈으로</a>'
+        "</div>"
     )
-    return _html_page("NAMU 로그인 필요", body)
+    return _html_page("NAMU 로그인 필요", body, cta="start")
 
 
 def _html_me_not_connected(user_key: str, notice_html: str = "") -> str:
     install_url = "/auth/github/install"
     body = (
-        "<h1>내 페이지 (My page)</h1>"
+        '<span class="eyebrow">내 페이지</span>'
+        "<h1>아직 연결된 저장소가 없습니다</h1>"
         f"{notice_html}"
-        f"<p>사용자 키: <code>{html.escape(user_key)}</code></p>"
-        "<p><b>아직 연결된 저장소가 없습니다.</b> 앱을 설치하고 기억을 저장할 "
-        "저장소를 하나 골라야 접속 주소가 만들어집니다.</p>"
-        f'<p><a href="{html.escape(install_url)}">NAMU 앱 설치하고 저장소 연결하기 '
-        "(Install the app)</a></p>"
-        '<p><a href="/auth/logout">로그아웃 (Log out)</a></p>'
+        '<p class="lead">기억을 담을 저장소를 하나 정해 주셔야 접속 주소가 '
+        "만들어집니다. 저장소가 없으시면 만드는 것부터 함께 안내합니다.</p>"
+        '<div class="btn-row">'
+        f'<a class="btn btn-primary" href="{html.escape(install_url)}">'
+        "저장소 연결하기</a>"
+        '<a class="btn" href="/start">먼저 절차 보기</a>'
+        "</div>"
+        "<hr>"
+        f"<p><small>사용자 키: <code>{html.escape(user_key)}</code> · "
+        '<a href="/auth/logout">로그아웃</a></small></p>'
     )
     return _html_page("NAMU 내 페이지", body)
 
@@ -736,13 +756,13 @@ def _html_me_not_connected(user_key: str, notice_html: str = "") -> str:
 #
 # 자바스크립트가 없거나 실패해도 폼은 그대로 남아 있어 종전처럼 전체 페이지가 다시
 # 그려지며 같은 결과가 나온다(기능이 사라지지 않는다).
-_MCP_TEST_PROGRESS_HTML = (
-    '<p id="mcp-test-progress" style="display:none;margin:16px 0;padding:12px 14px;'
-    'border-left:5px solid #6b7280;background:rgba(107,114,128,0.12);'
-    'border-radius:0 6px 6px 0;">'
-    '<span aria-hidden="true">⏳</span> <b>확인하는 중입니다.</b> '
-    "최대 {wait}초쯤 걸릴 수 있습니다 — 이 화면을 그대로 두고 잠시만 기다려 주세요."
-    "</p>"
+_MCP_TEST_PROGRESS_HTML = ui.notice(
+    "<b>확인하는 중입니다.</b> 최대 {wait}초쯤 걸릴 수 있습니다 — 이 화면을 "
+    "그대로 두고 잠시만 기다려 주세요.",
+    tone="wait",
+    attrs='id="mcp-test-progress"',
+    # 스크립트가 `p.style.display`로 켜고 끈다 — 그래서 감추는 일만 인라인이다.
+    style_extra="display:none;",
 )
 
 _MCP_TEST_FAILED_HTML = (
@@ -797,24 +817,24 @@ def _html_mcp_actions() -> str:
     """
     wait = math.ceil(_MCP_PROBE_TIMEOUT_SEC * 2 + _MCP_PROBE_RETRY_DELAY_SEC)
     return (
-        "<h2>주소 관리</h2>"
-        '<form method="post" action="/auth/mcp/test" id="mcp-test-form" '
-        'style="display:inline;">'
-        '<button type="submit" id="mcp-test-btn" '
-        'style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-        "연결 시험</button></form> "
-        '<form method="post" action="/auth/mcp/rotate" style="display:inline;">'
-        '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-        "주소 재발급</button></form> "
-        '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
-        '<button type="submit" style="padding:8px 14px;font-size:15px;cursor:pointer;">'
-        "주소 폐기</button></form>"
+        '<div class="card">'
+        '<h2 style="margin-top:0">주소 관리</h2>'
+        '<div class="btn-row">'
+        '<form method="post" action="/auth/mcp/test" id="mcp-test-form">'
+        '<button type="submit" id="mcp-test-btn" class="btn">'
+        "연결 시험</button></form>"
+        '<form method="post" action="/auth/mcp/rotate">'
+        '<button type="submit" class="btn">주소 재발급</button></form>'
+        '<form method="post" action="/auth/mcp/revoke">'
+        '<button type="submit" class="btn btn-danger">주소 폐기</button></form>'
+        "</div>"
         + _MCP_TEST_PROGRESS_HTML.format(wait=wait)
         + '<div id="mcp-test-result"></div>'
-        + "<p><small><b>연결 시험</b>은 지금 이 주소가 실제로 응답하는지 확인합니다. "
-        "<b>재발급</b>은 새 주소를 만들고 옛 주소를 즉시 막습니다(AI에 등록해 둔 "
-        "커넥터 주소도 새로 바꿔 주셔야 합니다). <b>폐기</b>는 주소를 아예 없앱니다 "
-        "— 누르면 한 번 더 확인합니다.</small></p>"
+        + '<p style="margin-bottom:0"><small><b>연결 시험</b>은 지금 이 주소가 '
+        "실제로 응답하는지 확인합니다. <b>재발급</b>은 새 주소를 만들고 옛 주소를 "
+        "즉시 막습니다(AI에 등록해 둔 커넥터 주소도 새로 바꿔 주셔야 합니다). "
+        "<b>폐기</b>는 주소를 아예 없앱니다 — 누르면 한 번 더 확인합니다."
+        "</small></p></div>"
         + _html_mcp_test_script()
     )
 
@@ -828,11 +848,18 @@ def _html_me_connected(
     revoked: bool = False,
 ) -> str:
     body = [
-        "<h1>내 페이지 (My page)</h1>",
+        '<span class="eyebrow">내 페이지</span>',
+        "<h1>내 기억과 접속 주소</h1>",
         notice_html,
-        f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
-        '<p><a href="/auth/memory">내 기억 보기 (기억 열람·검색)</a> · '
-        '<a href="/auth/memory?bowl=tasks">열린 작업 보기</a></p>',
+        f'<p class="lead">연결된 저장소: '
+        f"<code>{html.escape(repo_full_name)}</code></p>",
+        '<div class="card card-accent">'
+        '<h2 style="margin-top:0">내 기억</h2>'
+        "<p>AI가 무엇을 기억했는지 사람 눈으로 확인하고 찾아볼 수 있습니다.</p>"
+        '<div class="btn-row" style="margin-bottom:0">'
+        '<a class="btn btn-primary" href="/auth/memory">기억 열람·검색</a>'
+        '<a class="btn" href="/auth/memory?bowl=tasks">열린 작업 보기</a>'
+        "</div></div>",
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
@@ -841,24 +868,31 @@ def _html_me_connected(
         # 사용자가 스스로 없앤 상태 — "만들지 못했습니다"(장애)와 절대 같은
         # 문구를 쓰면 안 된다. 되돌리는 방법(재발급)을 그 자리에 둔다.
         body.append(
-            "<h2>접속 주소</h2>"
+            '<div class="card">'
+            '<h2 style="margin-top:0">접속 주소</h2>'
             "<p><b>접속 주소를 폐기하셨습니다.</b> 지금은 어떤 AI도 회원님 기억에 "
             "접속할 수 없습니다. 다시 쓰시려면 아래에서 새 주소를 발급받으세요 "
             "— 저장소 연결은 그대로 남아 있으니 처음부터 다시 하실 필요는 "
             "없습니다.</p>"
             '<form method="post" action="/auth/mcp/rotate">'
-            '<button type="submit" style="padding:8px 16px;font-size:15px;'
-            'cursor:pointer;">새 주소 발급</button></form>'
+            '<button type="submit" class="btn btn-primary">새 주소 발급</button>'
+            "</form></div>"
         )
     else:
         # 여기 도달하면 호출부가 열쇠 발급을 이미 시도했어야 정상이다 — 그래도
         # 실패했다면(예: 장부 쓰기 실패) 빈 화면 대신 이유를 알린다.
         body.append(
-            "<p><b>접속 주소를 만들지 못했습니다.</b> 잠시 후 새로고침해도 안 "
-            "되면 관리자에게 알려주세요.</p>"
+            _html_notice(
+                "<b>접속 주소를 만들지 못했습니다.</b> 잠시 후 새로고침해도 안 "
+                "되면 관리자에게 알려주세요.",
+                tone="bad",
+            )
         )
-    body.append(f"<p><small>사용자 키: <code>{html.escape(user_key)}</code></small></p>")
-    body.append('<p><a href="/auth/logout">로그아웃 (Log out)</a></p>')
+    body.append(
+        "<hr>"
+        f"<p><small>사용자 키: <code>{html.escape(user_key)}</code> · "
+        '<a href="/auth/logout">로그아웃</a></small></p>'
+    )
     return _html_page("NAMU 내 페이지", "".join(body))
 
 
@@ -866,26 +900,34 @@ def _html_revoke_confirm() -> str:
     """폐기 확인 화면 — 실수로 한 번 누른 것만으로는 주소가 사라지지 않게 하는
     단계. 이 화면 자체는 아무것도 바꾸지 않는다(확인 폼을 다시 POST해야 실행)."""
     body = (
-        "<h1>정말 주소를 폐기할까요? (Revoke the address?)</h1>"
+        "<h1>정말 주소를 폐기할까요?</h1>"
+        '<div class="card">'
         "<p>폐기하면 지금 쓰고 있는 접속 주소가 <b>즉시 막힙니다.</b> AI에 등록해 "
         "둔 커넥터도 그 순간부터 회원님 기억에 닿지 못합니다.</p>"
-        "<p>기억 자체는 회원님 GitHub 저장소에 그대로 남습니다 — 나중에 새 주소를 "
-        "발급받으면 다시 이어서 쓰실 수 있습니다.</p>"
-        '<form method="post" action="/auth/mcp/revoke" style="display:inline;">'
+        '<p style="margin-bottom:0">기억 자체는 회원님 GitHub 저장소에 그대로 '
+        "남습니다 — 나중에 새 주소를 발급받으면 다시 이어서 쓰실 수 있습니다.</p>"
+        "</div>"
+        '<div class="btn-row">'
+        '<form method="post" action="/auth/mcp/revoke">'
         '<input type="hidden" name="confirm" value="yes">'
-        '<button type="submit" style="padding:8px 16px;font-size:15px;cursor:pointer;">'
-        "네, 폐기합니다</button></form> "
-        '<p><a href="/auth/me">아니요, 돌아가기 (Cancel)</a></p>'
+        '<button type="submit" class="btn btn-danger">네, 폐기합니다</button></form>'
+        '<a class="btn" href="/auth/me">아니요, 돌아가기 (Cancel)</a>'
+        "</div>"
     )
     return _html_page("NAMU 주소 폐기 확인", body)
 
 
 def _html_logged_out() -> str:
     body = (
-        "<h1>로그아웃했습니다 (Logged out)</h1>"
-        '<p><a href="/auth/github/login">다시 로그인 (Log in again)</a></p>'
+        "<h1>로그아웃했습니다</h1>"
+        '<p class="lead">기억은 회원님 저장소에 그대로 있습니다 — 다시 '
+        "로그인하시면 이어서 쓰실 수 있습니다.</p>"
+        '<div class="btn-row">'
+        '<a class="btn btn-primary" href="/auth/github/login">다시 로그인</a>'
+        '<a class="btn" href="/">홈으로</a>'
+        "</div>"
     )
-    return _html_page("NAMU 로그아웃", body)
+    return _html_page("NAMU 로그아웃", body, cta="start")
 
 
 # ---------------------------------------------------------------------------
@@ -1015,27 +1057,14 @@ def probe_mcp_connection(mcp_secret: str) -> str:
 # 그래서 ①맨 앞에 뜻이 바로 읽히는 아이콘을 두고 ②옅은 배경색을 깔아 상자 자체가
 # 본문과 분리돼 보이게 한다. 배경은 반투명(rgba)이라 라이트·다크 어느 쪽에서도
 # 글자 대비를 해치지 않는다(색상값을 테마별로 두 벌 관리하지 않아도 된다).
-_NOTICE_TONES = {
-    "info": ("#2a6fdb", "rgba(42,111,219,0.10)", "ℹ️"),
-    "good": ("#1a7f37", "rgba(26,127,55,0.12)", "✅"),
-    "warn": ("#b06000", "rgba(176,96,0,0.12)", "⚠️"),
-    "bad": ("#b00020", "rgba(176,0,32,0.12)", "⛔"),
-}
-
-
 def _html_notice(text_html: str, *, tone: str = "info") -> str:
-    """결과 알림 상자. 아이콘 + 왼쪽 굵은 선 + 옅은 배경으로 본문과 확실히 구분한다.
+    """결과 알림 상자 — 실체는 `ui.notice`다.
 
-    `role="status"`를 붙이는 이유: 이 상자는 사용자가 버튼을 누른 결과가 화면에
-    나타나는 자리다. 화면을 보지 않는 사용자(스크린리더)에게도 그 등장이 읽혀야
-    "눌렸는지 모르겠다"가 생기지 않는다.
+    이 조각만은 클래스가 아니라 인라인 스타일을 지고 다닌다. 연결 시험(namu-69)이
+    이 조각을 **JSON으로 실어 보내** 자바스크립트가 화면에 심기 때문이다 —
+    자세한 이유는 `ui.py` 첫머리에 적어 두었다.
     """
-    color, tint, icon = _NOTICE_TONES.get(tone, _NOTICE_TONES["info"])
-    return (
-        f'<p role="status" style="border-left:5px solid {color};background:{tint};'
-        'padding:12px 14px;margin:16px 0;border-radius:0 6px 6px 0;">'
-        f'<span aria-hidden="true">{icon}</span> {text_html}</p>'
-    )
+    return ui.notice(text_html, tone=tone)
 
 
 _PROBE_NOTICES = {
@@ -1290,6 +1319,29 @@ def _session_user_key(request: Request) -> "str | None":
     **이 함수 하나**를 통과한다 — 신뢰 경로를 새로 만들지 않기 위한 단일 지점이다.
     """
     return _unsign_with_expiry(request.cookies.get(_SESSION_COOKIE_NAME))
+
+
+# ---------------------------------------------------------------------------
+# 공개 페이지(namu-70) — 로그인 없이 누구나 보는 화면. 내용은 pages.py에 있고
+# 여기서는 **세션이 있는지만 알려 준다.**
+#
+# 왜 이 앱에 얹나: 요청을 가르는 디스패처(routing_server)가 "인증 있는 쪽"을
+# 기본값으로 두기 때문에, 공개 경로는 이 웹 앱으로 명시적으로 보내는 수밖에 없다.
+# 그렇다고 pages.py가 쿠키를 읽게 하면 공개 화면이 인증 코드를 품게 되므로,
+# 판정은 여기서 하고 결과(True/False)만 넘긴다.
+#
+# 세션이 위조·만료됐어도 공개 페이지는 그냥 "로그인 안 한 사람"으로 그린다 —
+# 이 화면들은 회원 정보를 한 글자도 싣지 않으므로 거절할 이유가 없다.
+# ---------------------------------------------------------------------------
+def _public_page(path: str):
+    render = pages.PAGES[path]
+
+    async def handler(request: Request) -> Response:
+        logged_in = bool(_session_user_key(request))
+        return HTMLResponse(render(logged_in))
+
+    handler.__name__ = f"public_page_{path.strip('/') or 'home'}"
+    return handler
 
 
 async def select_repo(request: Request) -> Response:
@@ -1609,8 +1661,7 @@ def _html_memo(entries: list, short_by_id: dict) -> str:
     return (
         '<form method="post" action="/auth/memo/remove">'
         f'<ul class="m-list">{"".join(items)}</ul>'
-        '<p><button type="submit" style="padding:8px 16px;font-size:15px;'
-        'cursor:pointer;">고른 쪽지 떼기</button> '
+        '<p><button type="submit" class="btn">고른 쪽지 떼기</button> '
         "<small>뗀 쪽지는 저장소에서 실제로 사라집니다(되돌릴 수 없습니다).</small>"
         "</p></form>"
     )
@@ -1740,15 +1791,19 @@ def _html_task_board(rows: list) -> str:
     return f'<ul class="m-list">{"".join(items)}</ul>'
 
 
+# 내 기억 화면에만 필요한 조각들. 공통 부품(ui.py)에 올리지 않는 이유는 이 화면
+# 밖에서 쓸 일이 없기 때문이다 — 색과 모서리 값은 ui.py가 정한 것을 그대로 쓴다.
 _MEMORY_CSS = (
     "<style>"
     ".m-tabs{margin:0 0 16px;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:8px}"
-    ".m-tabs a{display:inline-block;padding:6px 12px;border:1px solid currentColor;"
-    "border-radius:6px;text-decoration:none}"
-    ".m-tabs a.on{font-weight:bold;text-decoration:underline}"
+    ".m-tabs a{display:inline-block;padding:6px 12px;border:1px solid var(--border);"
+    "border-radius:999px;text-decoration:none;background:var(--bg-card);"
+    "font-size:.9rem;font-weight:600}"
+    ".m-tabs a.on{background:var(--accent);border-color:var(--accent);"
+    "color:var(--on-accent)}"
     ".m-list{list-style:none;padding:0;margin:0}"
-    ".m-item{border:1px solid rgba(128,128,128,.4);border-radius:8px;padding:12px;"
-    "margin:0 0 12px}"
+    ".m-item{border:1px solid var(--border);border-radius:10px;padding:12px 14px;"
+    "background:var(--bg-card);margin:0 0 12px}"
     ".m-sum{margin:0 0 6px}"
     ".m-why{margin:0 0 6px;opacity:.85}"
     ".m-meta{margin:6px 0 0;opacity:.7}"
@@ -1830,10 +1885,8 @@ def _html_memory_page(
         + '<form method="get" action="/auth/memory">'
         + f'<input type="hidden" name="bowl" value="{html.escape(bowl)}">'
         + f'<input type="text" name="q" value="{html.escape(query)}" '
-        'placeholder="찾을 낱말" style="padding:8px;font-size:15px;'
-        'max-width:100%;box-sizing:border-box;"> '
-        '<button type="submit" style="padding:8px 16px;font-size:15px;'
-        'cursor:pointer;">찾기</button>'
+        'placeholder="찾을 낱말"> '
+        '<button type="submit" class="btn">찾기</button>'
         + (' <a href="/auth/memory?bowl=' + bowl + '">전체 보기</a>' if query else "")
         + "</form>"
         + f"<p><small>{rule}</small></p>"
@@ -2125,14 +2178,22 @@ async def logout(request: Request) -> Response:
 
 
 def build_auth_app() -> Starlette:
-    """web_auth 라우트 9개를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
+    """로그인 라우트 + 공개 페이지를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
 
     lifespan 훅을 선언하지 않는다 — routing_server._AuthOrMcpDispatcher가
     lifespan scope를 이 앱으로 보내지 않는다(FastMCP 세션 매니저를 기동하는
     쪽은 MCP 앱 하나뿐이어야 한다).
+
+    공개 페이지 목록을 여기 손으로 다시 적지 않고 `pages.PAGES`를 돌린다 —
+    routing_server의 공개 경로 목록도 같은 곳(`ui.PUBLIC_PATHS`)을 보므로,
+    메뉴를 하나 늘릴 때 한쪽만 늘어나 404가 나는 사고가 생기지 않는다.
     """
+    public_routes = [
+        Route(path, _public_page(path), methods=["GET"]) for path in pages.PAGES
+    ]
     return Starlette(
-        routes=[
+        routes=public_routes
+        + [
             Route("/auth/github/login", login, methods=["GET"]),
             Route("/auth/github/install", install, methods=["GET"]),
             Route("/auth/github/callback", callback, methods=["GET"]),
