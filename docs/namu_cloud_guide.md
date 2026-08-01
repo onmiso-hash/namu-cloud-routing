@@ -1,6 +1,11 @@
 # NAMU 공용 클라우드 MCP 사용 가이드 (경로 A — 중앙 호스팅·멀티유저)
 
-> 📅 2026-07-31 개정(namu-60) · 최초 작성 2026-07-19(namu-54) · 선행 문서: [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md)(경로 B 셀프호스팅 가이드) · [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md)(플러그인 설치 가이드) · [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md)(설계 원본).
+> 🌳 **처음 오셨다면 이 문서가 아니라 <https://namu-cloud.onnamu.kr/> 로 가세요.**
+> 가입 절차는 사이트 화면이 안내합니다. 이 문서는 그 뒤에 "안에서 어떻게
+> 도는가"를 알고 싶은 사람을 위한 것입니다.
+
+> 📅 2026-08-02 개정(namu-70, 사이트 신설로 2-2절 교체) · 2026-07-31 개정(namu-60)
+> · 최초 작성 2026-07-19(namu-54) · 선행 문서: [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md)(경로 B 셀프호스팅 가이드) · [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md)(플러그인 설치 가이드) · [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md)(설계 원본).
 >
 > **범위** — 경로 A는 "중앙에서 우리가 대신 호스팅해주는 공용 서버에 접속만 하면 되는" 형태다(사용자가 직접 서버를 띄우는 경로 B와 반대).
 >
@@ -29,11 +34,24 @@
 
 왜 Claude Code·agy는 주소를 붙이면 안 되나 — 이 주소로 넘어가는 것은 **기억 도구 3개뿐**이다. 세션 시작 브리핑, `/namu-task` 작업 절차, 워커 호출, 마무리 훅처럼 나무의 나머지 절반은 플러그인에만 들어 있고 주소로는 따라오지 않는다. 게다가 기억이 쌓이는 자리도 갈라진다(플러그인은 그 PC의 `~/.namu`, 이 주소는 사용자 GitHub 저장소). 반쪽짜리 나무를 쓰면서 기억까지 두 곳으로 흩어지는 셈이라, 터미널 사용자에게는 권하지 않는다.
 
-### 2-2. 접속 주소 받기
+### 2-2. 접속 주소 받기 — 절차는 사이트가 안내한다
 
-1. 브라우저로 <https://namu-cloud.onnamu.kr/auth/github/login> 에 접속해 GitHub으로 로그인한다.
-2. 안내에 따라 **NAMU 앱을 설치**하고, 기억을 저장할 **내 GitHub 저장소를 하나 고른다**(비공개 저장소 권장. 없으면 그 화면에서 새로 만들 수 있다).
-3. 연결이 끝나면 화면에 **접속 주소**가 그대로 뜬다. 창을 닫았어도 언제든 <https://namu-cloud.onnamu.kr/auth/me>(내 페이지)에서 다시 볼 수 있다.
+**<https://namu-cloud.onnamu.kr/> 에서 시작하면 된다.** 화면이 시키는 대로
+따라가면 로그인 → 저장소 마련 → 권한 → 접속 주소까지 끝난다. 창을 닫았어도
+<https://namu-cloud.onnamu.kr/auth/me>(내 페이지)에서 주소를 다시 볼 수 있다.
+
+> **왜 여기 절차를 다시 적지 않나** (namu-70) — 화면과 문서 두 곳에 같은 절차가
+> 있으면 화면을 고칠 때 한쪽만 고쳐진다. 이 프로젝트에서 반복된 사고 양식이라,
+> **절차의 원본은 화면 자체**로 두고 문서는 사이트를 가리키기만 한다.
+> 사이트 안의 [시작하기](https://namu-cloud.onnamu.kr/start) 페이지가 그 원본이다.
+
+| 사이트 페이지 | 무엇이 있나 |
+|---|---|
+| [홈](https://namu-cloud.onnamu.kr/) | 한 줄 소개 · 기억이 어디 있는지 · 웹/터미널 갈림길 |
+| [시작하기](https://namu-cloud.onnamu.kr/start) | 가입부터 AI에 붙이기까지 네 걸음 |
+| [무엇을 기억하나](https://namu-cloud.onnamu.kr/memory) | 3층 기록 · 그릇 세 가지 · 담기지 않는 것 |
+| [안전](https://namu-cloud.onnamu.kr/safety) | 원본 위치 · 권한 범위 · 주소 관리 · 그만두는 법 |
+| [자주 묻는 질문](https://namu-cloud.onnamu.kr/faq) | 요금 · 저장소 · 여러 AI 연결 등 |
 
 주소 형식은 다음과 같다.
 
