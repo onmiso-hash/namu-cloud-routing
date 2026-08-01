@@ -667,31 +667,62 @@ def _html_no_repos(installation_id: int) -> str:
     return _html_page("NAMU 저장소 없음", body)
 
 
-def _html_next_steps(user_key: str) -> str:
-    # GitHub 설치 주소로 곧장 걸지 않는다 — 링크는 쿠키를 심을 수 없어 설치 후
-    # 콜백이 state 없이 돌아오고, callback이 이를 거절해 400이 난다(실측). 우리
-    # /auth/github/install을 한 번 경유시켜 state 쿠키를 심고 보낸다.
-    install_url = "/auth/github/install"
-    new_repo_url = "https://github.com/new?" + urlencode(
-        {"name": "namu-memory", "visibility": "private"}
+# ---------------------------------------------------------------------------
+# 2단계 — 기억 저장소 마련하기 (namu-70)
+#
+# 이 화면이 이번 작업의 심장이다. 예전 "다음 단계" 화면은 **순서가 뒤집혀** 있었다:
+# 눈에 띄는 링크가 [앱 설치]였고, "저장소가 없으면 만드세요"는 그 아래 딸린
+# 문장이었다. 그런데 앱 설치 화면이 곧 "어느 저장소에 접근을 허용할지 고르는
+# 화면"이다 — 저장소가 없는 사람이 먼저 그리로 가면 고를 것이 없는 화면을 만나고
+# 돌아오는 길도 없었다. **저장소가 먼저, 권한이 나중이다.**
+#
+# 새로 만드는 것은 [만들었어요, 다음] 버튼 하나다. 미리 채워진 저장소 생성
+# 링크는 namu-58부터 이미 있었고(사이트가 대신 만들지 않는 이유는 pages.py의
+# 안전 페이지에 적혀 있다), 없던 것은 **만들고 돌아온 사람이 이어갈 길**뿐이다.
+# ---------------------------------------------------------------------------
+_INSTALL_PATH = "/auth/github/install"
+
+
+def _html_repo_step() -> str:
+    return _html_page(
+        "NAMU 기억 저장소 마련하기",
+        ui.stepper(2, label="기억 저장소")
+        + "<h1>기억을 담을 저장소를 마련합니다</h1>"
+        + '<p class="lead">방금 지나온 화면은 <b>회원님이 누구인지만</b> '
+        "확인했습니다. 저장소 권한은 아직 아무것도 드리지 않았습니다 — "
+        "그건 다음 단계에서 따로 여쭙습니다.</p>"
+        + "<details><summary>저장소가 뭔가요?</summary>"
+        "<p>회원님 GitHub 안의 폴더 하나입니다. 나무가 남기는 기억이 전부 그 "
+        "안에 글자 파일로 쌓입니다. 원본은 회원님 것이고, 나무는 그 사본을 두고 "
+        "읽고 씁니다.</p></details>"
+        + '<div class="card">'
+        '<h2 style="margin-top:0">새로 만들기 <span class="pill">권장</span></h2>'
+        + ui.steps(
+            [
+                (
+                    "GitHub에서 만드세요",
+                    f'<p><a class="btn btn-primary" href="{pages.NEW_REPO_URL}" '
+                    'target="_blank" rel="noopener">GitHub에서 만들기 ↗</a></p>'
+                    "<p>이름(<code>namu-memory</code>)과 <b>비공개</b>가 미리 "
+                    "채워진 채로 새 탭에 열립니다 — 만들기 단추 한 번만 "
+                    "누르세요.</p>",
+                ),
+                (
+                    "만드셨으면 이리로 돌아오세요",
+                    '<p><a class="btn btn-primary" href="/auth/repo/done">'
+                    "만들었어요, 다음 →</a></p>"
+                    "<p>다음 화면에서 방금 만든 저장소에 접근을 허용해 주시면 "
+                    "됩니다.</p>",
+                ),
+            ]
+        )
+        + "</div>"
+        + '<div class="card card-soft">'
+        '<h2 style="margin-top:0">이미 쓰던 저장소가 있어요</h2>'
+        "<p>그 저장소를 그대로 쓰셔도 됩니다.</p>"
+        f'<p style="margin-bottom:0"><a class="btn" href="{_INSTALL_PATH}">'
+        "있는 저장소 고르기</a></p></div>",
     )
-    body = (
-        "<h1>로그인 완료 (Logged in) — 다음 단계</h1>"
-        f"<p>사용자 키: <code>{html.escape(user_key)}</code></p>"
-        "<p><strong>주의</strong>: 방금 지나온 화면은 신원 확인(로그인 승인)만 했을 뿐, "
-        "저장소 접근 권한은 아직 부여하지 않았습니다 — 그 화면에는 'Verify your GitHub "
-        "identity', 'Know which resources you can access', 'Act on your behalf' 3줄만 "
-        "떴을 것입니다. 아래 '앱 설치' 링크로 넘어가면 그때 비로소 저장소 접근 권한 "
-        "목록이 표시되는 <strong>별도의 설치 승인 화면</strong>이 나옵니다 — 서로 다른 "
-        "화면이니 권한 문구가 안 보였다고 놀라지 마세요.</p>"
-        f'<p><a href="{html.escape(install_url)}">NAMU 앱 설치하고 저장소 연결하기 '
-        "(Install the app)</a></p>"
-        "<p>기억을 저장할 저장소가 아직 없다면 먼저 만드세요(비공개로 이름을 미리 "
-        "채워뒀습니다):</p>"
-        f'<p><a href="{html.escape(new_repo_url)}" target="_blank" rel="noopener">'
-        "새 비공개 저장소 만들기 (Create a new private repo)</a></p>"
-    )
-    return _html_page("NAMU 다음 단계", body)
 
 
 # ---------------------------------------------------------------------------
@@ -1248,12 +1279,38 @@ async def callback(request: Request) -> Response:
                 # 사용자 토큰으로 기존 설치를 직접 조회한다.
                 installation_ids, installs_truncated = _fetch_user_installations(user_token)
 
+            # 저장소를 아직 하나도 허용하지 않은 사람 — 2단계 화면으로 보낸다.
+            # 화면을 여기서 그려 주지 않고 주소를 넘기는 이유: 그 화면은 새 탭에
+            # 다녀와서 **다시 돌아올** 자리라 자기 주소가 있어야 한다(그리고
+            # 새로고침해도 살아 있어야 한다).
             if not installation_ids:
-                body_html = _html_next_steps(user_key)
-            elif len(installation_ids) == 1:
+                logger.info("GitHub 로그인 완료(저장소 미연결, user_key=%s)", user_key)
+                resp = RedirectResponse(url="/auth/repo", status_code=302)
+                resp.set_cookie(
+                    _SESSION_COOKIE_NAME,
+                    _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
+                    max_age=_SESSION_COOKIE_TTL_SEC,
+                    httponly=True,
+                    secure=True,
+                    samesite="lax",
+                    path="/auth",
+                )
+                resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
+                return resp
+
+            hint = _repo_hint(request)
+            if len(installation_ids) == 1:
                 installation_id = installation_ids[0]
                 repos, truncated = _fetch_installation_repos(user_token, installation_id)
-                if truncated:
+                hinted = _pick_hinted_repo(hint, repos)
+                if hinted:
+                    # 방금 만들어 온 저장소가 목록에 있다 — "어느 거였죠?"라고
+                    # 되묻지 않는다. 목록이 잘렸는지는 상관없다(찾던 것을 찾았다).
+                    identity.set_installation(conn, user_key, installation_id, hinted)
+                    body_html = _html_connected(
+                        user_key, hinted, _mcp_url_for(request, conn, user_key)
+                    )
+                elif truncated:
                     # 목록이 잘렸을 수 있으므로 몇 개가 잡혔든 자동 연결(1개일 때
                     # 곧장 연결하는 경로)을 타지 않는다 — "이게 정말 유일한
                     # 저장소"라는 확신이 없기 때문이다. 사용자가 직접 고르게 하고
@@ -1279,8 +1336,22 @@ async def callback(request: Request) -> Response:
                     repos, repos_truncated = _fetch_installation_repos(user_token, iid)
                     truncated = truncated or repos_truncated
                     pairs.extend((iid, repo) for repo in repos)
+                hinted_pairs = [
+                    (iid, repo)
+                    for iid, repo in pairs
+                    if _pick_hinted_repo(hint, [repo])
+                ]
                 if not pairs:
                     body_html = _html_no_repos(installation_ids[0])
+                elif len(hinted_pairs) == 1:
+                    # 방금 만들어 온 저장소가 어느 설치에 붙었는지까지 하나로
+                    # 정해진 경우에만 건너뛴다 — 개인 계정과 조직에 같은 이름이
+                    # 둘 다 있으면 지어내지 않고 고르게 한다.
+                    hint_iid, hint_repo = hinted_pairs[0]
+                    identity.set_installation(conn, user_key, hint_iid, hint_repo)
+                    body_html = _html_connected(
+                        user_key, hint_repo, _mcp_url_for(request, conn, user_key)
+                    )
                 elif len(pairs) == 1 and not truncated:
                     # 목록이 잘리지 않은 상태에서 후보가 하나뿐이면 고를 것이
                     # 없다 — 설치가 1개일 때와 같은 기준으로 곧장 연결한다.
@@ -1309,6 +1380,9 @@ async def callback(request: Request) -> Response:
         path="/auth",
     )
     resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
+    # "만들었어요" 표시는 이 왕복에서 쓰고 버린다 — 남겨 두면 나중에 저장소를
+    # 바꾸려고 다시 온 사람이 옛 이름으로 조용히 연결되는 사고가 난다.
+    resp.delete_cookie(_REPO_HINT_COOKIE_NAME, path="/auth")
     return resp
 
 
@@ -1342,6 +1416,83 @@ def _public_page(path: str):
 
     handler.__name__ = f"public_page_{path.strip('/') or 'home'}"
     return handler
+
+
+# ---------------------------------------------------------------------------
+# 2단계 화면과 "만들었어요, 다음" (namu-70)
+#
+# ## 왜 저장소 이름을 쿠키에 실어 보내나
+#
+# [만들었어요, 다음]을 누른 사람은 방금 `namu-memory`를 만들고 온 사람이다.
+# 그런데 그 다음 왕복(GitHub 설치 승인)이 끝나 돌아왔을 때, 우리는 그 사실을
+# 기억할 방법이 없어 **저장소가 여러 개면 다시 고르라고** 묻게 된다 — 방금
+# 만들어 온 사람에게 "어느 거였죠?"라고 되묻는 셈이다. 그래서 그 이름을 서명
+# 쿠키에 담아 두었다가, 돌아온 목록에 그 이름이 있으면 고르기 화면을 건너뛴다.
+#
+# 이 쿠키는 **권한을 주지 않는다.** 고를 수 있는 것은 어차피 GitHub이 그 설치에
+# 허용한 저장소 목록 안뿐이라, 이름을 위조해도 남의 저장소에 닿지 못한다.
+# 그래도 서명하는 이유는 값이 손대졌는지 서버가 알아야 조용한 오작동을 피하기
+# 때문이다(이 파일의 다른 쿠키와 같은 규약).
+#
+# 이름을 바꿔 만든 사람도 막히지 않는다 — 목록에 그 이름이 없으면 아무 일도
+# 일어나지 않고 평소대로 고르기 화면이 나온다.
+# ---------------------------------------------------------------------------
+_REPO_HINT_COOKIE_NAME = "namu_repo_hint"
+_REPO_HINT_TTL_SEC = 1800
+_DEFAULT_NEW_REPO_NAME = "namu-memory"
+
+
+def _repo_hint(request: Request) -> "str | None":
+    """[만들었어요, 다음]을 눌렀을 때 담아 둔 저장소 이름. 없거나 위조면 None."""
+    return _unsign_with_expiry(request.cookies.get(_REPO_HINT_COOKIE_NAME))
+
+
+def _pick_hinted_repo(hint: "str | None", repos: "list[str]") -> "str | None":
+    """돌아온 목록에서 그 이름의 저장소를 찾는다. 없으면 None(평소대로 고르기).
+
+    목록의 항목은 `소유자/이름` 꼴이라 뒷부분만 견준다 — 사용자가 담아 둔 것은
+    저장소 이름뿐이고, 소유자는 로그인한 본인이거나 그 설치의 주인이다.
+    """
+    if not hint:
+        return None
+    matches = [full for full in repos if full.rsplit("/", 1)[-1] == hint]
+    # 이름이 같은 저장소가 둘 이상이면(개인 계정과 조직에 같은 이름) 어느 쪽인지
+    # 알 수 없다 — 지어내지 않고 평소대로 사용자에게 고르게 한다.
+    return matches[0] if len(matches) == 1 else None
+
+
+async def repo_step(request: Request) -> Response:
+    """2단계 — 기억 저장소 마련하기."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    # 이미 연결을 끝낸 사람이 이 주소를 다시 열면 막다른 길이 된다(할 일이 없는
+    # 화면이라 다음 버튼이 전부 제자리걸음이다) — 내 페이지로 보낸다.
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+    if row and row.get("installation_id") and row.get("repo_full_name"):
+        return RedirectResponse(url="/auth/me", status_code=302)
+
+    return HTMLResponse(_html_repo_step())
+
+
+async def repo_done(request: Request) -> Response:
+    """"만들었어요, 다음" — 저장소 이름을 담아 두고 3단계(권한 주기)로 넘긴다."""
+    if not _session_user_key(request):
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+
+    resp = RedirectResponse(url=_INSTALL_PATH, status_code=302)
+    resp.set_cookie(
+        _REPO_HINT_COOKIE_NAME,
+        _sign_with_expiry(_DEFAULT_NEW_REPO_NAME, _REPO_HINT_TTL_SEC),
+        max_age=_REPO_HINT_TTL_SEC,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/auth",
+    )
+    return resp
 
 
 async def select_repo(request: Request) -> Response:
@@ -2197,6 +2348,10 @@ def build_auth_app() -> Starlette:
             Route("/auth/github/login", login, methods=["GET"]),
             Route("/auth/github/install", install, methods=["GET"]),
             Route("/auth/github/callback", callback, methods=["GET"]),
+            # 2단계 — 저장소 마련하기. `/auth/repo/done`은 아무것도 바꾸지 않고
+            # (이름을 담아 3단계로 넘길 뿐) 링크로 눌러도 안전하다.
+            Route("/auth/repo", repo_step, methods=["GET"]),
+            Route("/auth/repo/done", repo_done, methods=["GET"]),
             Route("/auth/github/select-repo", select_repo, methods=["GET"]),
             Route("/auth/me", me, methods=["GET"]),
             Route("/auth/memory", memory, methods=["GET"]),

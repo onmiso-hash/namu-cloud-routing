@@ -321,25 +321,159 @@ def test_outbound_requests_use_github_contract_body_keys_headers_and_query(clien
 # ---------------------------------------------------------------------------
 # 로그인 복귀(installation_id 없음) — 안내 화면
 # ---------------------------------------------------------------------------
-def test_callback_login_only_return_shows_install_and_prefilled_create_links(client, monkeypatch):
+def test_callback_login_only_return_sends_you_to_the_repository_step(client, monkeypatch):
+    """저장소가 하나도 없는 사람은 2단계(저장소 마련하기) 화면으로 간다.
+
+    그 화면을 콜백이 직접 그려 주지 않고 **주소로 넘기는** 이유: 새 탭에서
+    저장소를 만들고 돌아올 자리라 자기 주소가 있어야 하고, 새로고침해도
+    살아 있어야 한다(namu-70).
+    """
     state = _do_login(client)
     fake, calls = _make_fake_http_json()
     monkeypatch.setattr(wa, "_http_json", fake)
 
-    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode"},
+        follow_redirects=False,
+    )
 
-    assert r.status_code == 200
-    body = r.text
-    # 설치 링크 — GitHub 설치 주소로 직접 걸면 state 쿠키를 심지 못해 설치 후
-    # 콜백이 400으로 거절된다(2026-07-26 실측). 반드시 우리 경로를 경유한다.
-    assert 'href="/auth/github/install"' in body
-    assert "https://github.com/apps/" not in body
-    # 미리 채운 저장소 생성 링크 — 계약값 리터럴로 확인
-    assert "https://github.com/new?" in body
-    assert "name=namu-memory" in body
-    assert "visibility=private" in body
+    assert r.status_code == 302
+    assert r.headers["location"] == "/auth/repo"
     # installation_id가 없었으니 저장소 목록 조회는 아예 없었어야 한다.
     assert not any(c["url"].startswith("https://api.github.com/user/installations/") for c in calls)
+
+
+def test_repo_step_puts_creating_the_repository_before_granting_access(client, monkeypatch):
+    """순서가 이 화면의 존재 이유다.
+
+    예전 화면은 [앱 설치]가 먼저 눈에 띄고 "저장소가 없으면 만드세요"가 아래
+    딸린 문장이었다. 그런데 앱 설치 화면이 곧 저장소를 고르는 화면이라,
+    저장소가 없는 사람은 고를 것이 없는 화면에 도착해 길이 끊겼다.
+    """
+    state = _do_login(client)
+    fake, _calls = _make_fake_http_json()
+    monkeypatch.setattr(wa, "_http_json", fake)
+    client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+
+    body = client.get("/auth/repo").text
+
+    create_at = body.find("https://github.com/new?")
+    install_at = body.find('href="/auth/github/install"')
+    assert 0 < create_at < install_at, "저장소 만들기가 권한 주기보다 먼저 나와야 한다"
+    # 미리 채운 저장소 생성 링크 — 계약값 리터럴로 확인
+    assert "name=namu-memory" in body
+    assert "visibility=private" in body
+    # 설치는 반드시 우리 경로를 경유한다(링크는 state 쿠키를 심지 못한다).
+    assert "https://github.com/apps/" not in body
+    # 만들고 돌아온 사람이 이어갈 길 — 이것이 이번에 새로 생긴 하나다.
+    assert 'href="/auth/repo/done"' in body
+
+
+def test_repo_step_needs_a_session(client):
+    """남의 진행 화면을 세션 없이 열 수 있으면 안 된다."""
+    assert client.get("/auth/repo").status_code == 401
+    assert client.get("/auth/repo/done", follow_redirects=False).status_code == 401
+
+
+def test_repo_step_does_not_dead_end_an_already_connected_member(client, monkeypatch):
+    """연결을 끝낸 사람에게 이 화면은 할 일이 없는 막다른 길이다."""
+    _connect_via_login(client, monkeypatch, github_id=40001, repo="pat/memories")
+
+    r = client.get("/auth/repo", follow_redirects=False)
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/auth/me"
+
+
+def test_i_made_it_button_carries_the_name_to_the_permission_step(client, monkeypatch):
+    state = _do_login(client)
+    fake, _calls = _make_fake_http_json()
+    monkeypatch.setattr(wa, "_http_json", fake)
+    client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+
+    r = client.get("/auth/repo/done", follow_redirects=False)
+
+    assert r.status_code == 302
+    assert r.headers["location"] == "/auth/github/install"
+    hint = [h for h in r.headers.get_list("set-cookie") if "namu_repo_hint" in h]
+    assert hint and "HttpOnly" in hint[0]
+
+
+def test_the_name_you_brought_skips_the_choosing_screen(client, monkeypatch):
+    """방금 만들어 온 사람에게 "어느 거였죠?"라고 되묻지 않는다."""
+    state = _do_login(client)
+    fake, _calls = _make_fake_http_json()
+    monkeypatch.setattr(wa, "_http_json", fake)
+    client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    client.get("/auth/repo/done", follow_redirects=False)  # 이름을 담는다
+
+    state2 = _do_login(client)
+    fake2, _c2 = _make_fake_http_json(
+        repos=["octocat/old-notes", "octocat/namu-memory", "octocat/blog"]
+    )
+    monkeypatch.setattr(wa, "_http_json", fake2)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode", "installation_id": "77"},
+    )
+
+    assert "octocat/namu-memory" in r.text
+    assert "저장소를 하나만 고르세요" not in r.text
+    conn = identity.connect()
+    try:
+        user_key = wa._unsign_with_expiry(client.cookies.get("namu_session"))
+        row = identity.get_by_user_key(conn, user_key)
+    finally:
+        conn.close()
+    assert row["repo_full_name"] == "octocat/namu-memory"
+
+
+def test_a_different_name_does_not_block_you(client, monkeypatch):
+    """새 탭에서 이름을 바꿔 만든 사람도 막히지 않는다 — 담아 둔 이름이 목록에
+    없으면 아무 일도 일어나지 않고 평소대로 고르기 화면이 나온다."""
+    state = _do_login(client)
+    fake, _calls = _make_fake_http_json()
+    monkeypatch.setattr(wa, "_http_json", fake)
+    client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    client.get("/auth/repo/done", follow_redirects=False)
+
+    state2 = _do_login(client)
+    fake2, _c2 = _make_fake_http_json(repos=["octocat/my-brain", "octocat/blog"])
+    monkeypatch.setattr(wa, "_http_json", fake2)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode", "installation_id": "77"},
+    )
+
+    assert "저장소를 하나만 고르세요" in r.text
+    assert "octocat/my-brain" in r.text
+
+
+def test_the_name_is_used_once_and_thrown_away(client, monkeypatch):
+    """남겨 두면 나중에 저장소를 바꾸려고 다시 온 사람이 옛 이름으로 조용히
+    연결된다."""
+    state = _do_login(client)
+    fake, _calls = _make_fake_http_json()
+    monkeypatch.setattr(wa, "_http_json", fake)
+    client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    client.get("/auth/repo/done", follow_redirects=False)
+
+    state2 = _do_login(client)
+    fake2, _c2 = _make_fake_http_json(repos=["octocat/namu-memory", "octocat/blog"])
+    monkeypatch.setattr(wa, "_http_json", fake2)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode", "installation_id": "77"},
+        follow_redirects=False,
+    )
+
+    cleared = [
+        h
+        for h in r.headers.get_list("set-cookie")
+        if "namu_repo_hint" in h and "Max-Age=0" in h
+    ]
+    assert cleared, "쓰고 난 이름표가 지워지지 않았다"
 
 
 def test_callback_without_installation_id_finds_existing_installation(client, monkeypatch):
@@ -426,7 +560,14 @@ def test_callback_session_cookie_set_after_login(client, monkeypatch):
     fake, _ = _make_fake_http_json()
     monkeypatch.setattr(wa, "_http_json", fake)
 
-    r = client.get("/auth/github/callback", params={"state": state, "code": "goodcode"})
+    # 저장소가 없는 사람은 2단계 화면으로 **넘겨진다** — 세션 쿠키는 그 넘기는
+    # 응답 자체에 실려야 한다(따라간 뒤의 화면에는 실리지 않는다).
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state, "code": "goodcode"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 302
     cookie_names = [h.split("=", 1)[0] for h in r.headers.get_list("set-cookie")]
     assert any(name != "" for name in cookie_names)
     # 세션 쿠키 자체가 HttpOnly인지도 함께 확인.
