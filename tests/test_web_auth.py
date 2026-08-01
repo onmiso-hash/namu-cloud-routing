@@ -1833,3 +1833,197 @@ def test_mcp_management_routes_are_registered_in_build_auth_app():
     assert ("/auth/mcp/test", ("POST",)) in paths
     assert ("/auth/mcp/rotate", ("POST",)) in paths
     assert ("/auth/mcp/revoke", ("POST",)) in paths
+
+
+# ---------------------------------------------------------------------------
+# 기억 열람·검색 + 쪽지 떼기 (namu-60 완료조건 4·5)
+#
+# 저장소 왕복(user_repo.ensure_ready/push)은 걷어낸다 — 이 화면이 검증할 것은
+# "무엇을 보여주고 무엇을 지우는가"이지 git 동작이 아니다. 다만 **push를 부르긴
+# 하는지**는 반드시 본다: 안 부르면 다음 최신화 때 뗀 쪽지가 되살아난다.
+# ---------------------------------------------------------------------------
+def _memory_env(monkeypatch, tmp_path, user_key):
+    """그 사용자의 기억 파일 자리를 만들고 저장소 왕복을 스텁으로 바꾼다.
+
+    돌려주는 pushes 리스트가 비어 있으면 "이 서버에서만 지우고 회원 저장소에는
+    반영하지 않았다"는 뜻이다(부활 사고의 정확한 재현 조건).
+    """
+    monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path / "store"))
+    monkeypatch.setattr(
+        wa.user_repo, "ensure_ready", lambda conn, key: wa.user_repo.user_dir(key)
+    )
+    pushes = []
+
+    def _fake_push(conn, key, message=""):
+        pushes.append((key, message))
+        return True
+
+    monkeypatch.setattr(wa.user_repo, "push", _fake_push)
+
+    paths = wa._memory_paths(user_key)
+    for p in (paths.learnings_yaml, paths.profile_yaml, paths.memo_yaml, paths.db_path):
+        p.parent.mkdir(parents=True, exist_ok=True)
+    return paths, pushes
+
+
+def test_memory_page_requires_login():
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = c.get("/auth/memory")
+    assert r.status_code == 401
+    assert "로그인" in r.text
+
+
+def test_memory_page_offers_three_bowls_and_no_task_board(client, monkeypatch, tmp_path):
+    """클라우드에는 작업일지가 없다(namu-68 격리 결정) — 그릇 셋만 보이고
+    '작업 보드'를 만들어 놓고 빈 화면을 보여주는 일이 없어야 한다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41001, repo="ann/mem")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/memory")
+
+    assert r.status_code == 200
+    assert "교훈" in r.text
+    assert "개인 사실" in r.text
+    assert "쪽지" in r.text
+    assert "작업일지" not in r.text
+    assert "작업 보드" not in r.text
+
+
+def test_memory_lists_learnings_summary_and_hides_body_behind_details(
+    client, monkeypatch, tmp_path
+):
+    row = _connect_via_login(client, monkeypatch, github_id=41002, repo="bob/mem")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, db_mod, _memo, _profile = wa._core()
+    db_mod.record(
+        "작업하나",
+        "success",
+        "이유 문단입니다",
+        paths=paths,
+        summary="교훈요약마커",
+        body="아주 긴 원문마커",
+    )
+
+    r = client.get("/auth/memory?bowl=learnings")
+
+    assert r.status_code == 200
+    assert "교훈요약마커" in r.text
+    assert "이유 문단입니다" in r.text
+    # 원문은 접혀 있어야 한다(목록에서 항목 하나가 화면을 다 먹지 않게)
+    assert "<details>" in r.text
+    assert "아주 긴 원문마커" in r.text
+
+
+def test_memory_search_without_match_says_none_instead_of_showing_latest(
+    client, monkeypatch, tmp_path
+):
+    """db.recall은 검색 결과가 없으면 최신 목록으로 물러난다 — 그대로 쓰면
+    찾는 말이 없는데도 뭔가 나온 것처럼 보인다. 그 함정에 빠지지 않는지 본다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41003, repo="cat/mem")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, db_mod, _memo, _profile = wa._core()
+    db_mod.record("작업하나", "success", "이유", paths=paths, summary="사과에관한교훈")
+
+    r = client.get("/auth/memory", params={"bowl": "learnings", "q": "존재하지않는낱말zzz"})
+
+    assert r.status_code == 200
+    assert "사과에관한교훈" not in r.text
+    assert "없습니다" in r.text
+
+
+def test_memo_bowl_shows_remove_form_but_learnings_and_profile_do_not(
+    client, monkeypatch, tmp_path
+):
+    """그릇마다 되는 동작이 다르다 — 지울 수 있는 그릇에만 폼을 그린다.
+    설명만 다르고 버튼은 다 있으면 눌러 보고 나서야 알게 된다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41004, repo="dan/mem")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, db_mod, memo, profile = wa._core()
+    memo.add(paths=paths, summary="쪽지요약마커", reason="왜", body="본문")
+    db_mod.record("작업하나", "success", "이유", paths=paths, summary="교훈요약마커")
+    profile.record_fact("주제", paths=paths, summary="사실요약마커", reason="왜", body="본문")
+
+    memo_page = client.get("/auth/memory?bowl=memo")
+    learn_page = client.get("/auth/memory?bowl=learnings")
+    prof_page = client.get("/auth/memory?bowl=profile")
+
+    assert "쪽지요약마커" in memo_page.text
+    assert 'action="/auth/memo/remove"' in memo_page.text
+    assert 'name="memo_id"' in memo_page.text
+
+    assert "교훈요약마커" in learn_page.text
+    assert "/auth/memo/remove" not in learn_page.text
+    assert "사실요약마커" in prof_page.text
+    assert "/auth/memo/remove" not in prof_page.text
+
+
+def test_memo_remove_deletes_from_file_and_pushes_so_it_cannot_come_back(
+    client, monkeypatch, tmp_path
+):
+    """완료조건 5의 핵심 — 뗀 쪽지가 파일에서 실제로 사라지고, 그 결과가 회원
+    저장소로 밀려나간다. push를 빠뜨리면 다음 최신화에 그대로 부활한다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41005, repo="eve/mem")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, _db, memo, _profile = wa._core()
+    keep_id = memo.add(paths=paths, summary="남길쪽지", reason="왜", body="본문")
+    drop_id = memo.add(paths=paths, summary="뗄쪽지", reason="왜", body="본문")
+
+    r = client.post("/auth/memo/remove", data={"memo_id": drop_id})
+
+    assert r.status_code == 200
+    remaining = {e.get("id") for e in memo.load_all(paths=paths)}
+    assert drop_id not in remaining
+    assert keep_id in remaining
+    assert "뗐습니다" in r.text
+    assert "뗄쪽지" not in r.text
+    assert "남길쪽지" in r.text
+    assert len(pushes) == 1 and pushes[0][0] == row["user_key"]
+
+
+def test_memo_remove_can_delete_several_at_once(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=41006, repo="fay/mem")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, _db, memo, _profile = wa._core()
+    ids = [
+        memo.add(paths=paths, summary=f"쪽지{i}", reason="왜", body="본문")
+        for i in range(3)
+    ]
+
+    r = client.post("/auth/memo/remove", data={"memo_id": [ids[0], ids[2]]})
+
+    assert r.status_code == 200
+    remaining = {e.get("id") for e in memo.load_all(paths=paths)}
+    assert remaining == {ids[1]}
+    assert len(pushes) == 1
+
+
+def test_memo_remove_without_selection_changes_nothing_and_does_not_push(
+    client, monkeypatch, tmp_path
+):
+    row = _connect_via_login(client, monkeypatch, github_id=41007, repo="gil/mem")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _cfg, _db, memo, _profile = wa._core()
+    memo.add(paths=paths, summary="그대로남는쪽지", reason="왜", body="본문")
+
+    r = client.post("/auth/memo/remove", data={})
+
+    assert r.status_code == 200
+    assert "고르지 않으셨습니다" in r.text
+    assert len(memo.load_all(paths=paths)) == 1
+    assert pushes == []
+
+
+def test_memo_remove_rejects_missing_session_and_get_method(monkeypatch, tmp_path):
+    """파괴적 동작이라 남의 요청(세션 없음)도, 링크 클릭(GET)도 통과하면 안 된다."""
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    assert c.post("/auth/memo/remove", data={"memo_id": "x"}).status_code == 401
+    assert c.get("/auth/memo/remove").status_code == 405
+
+
+def test_memory_routes_are_registered_in_build_auth_app():
+    paths = {
+        (route.path, tuple(sorted(route.methods - {"HEAD"})))
+        for route in wa.build_auth_app().routes
+    }
+    assert ("/auth/memory", ("GET",)) in paths
+    assert ("/auth/memo/remove", ("POST",)) in paths

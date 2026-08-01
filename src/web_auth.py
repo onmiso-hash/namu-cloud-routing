@@ -45,6 +45,7 @@ import logging
 import math
 import os
 import secrets
+import sqlite3
 import time
 from contextlib import closing
 from urllib.parse import urlencode
@@ -63,6 +64,7 @@ from starlette.routing import Route
 
 import github_app as ga
 import identity
+import user_repo
 
 logger = logging.getLogger("namu.web_auth")
 
@@ -829,6 +831,7 @@ def _html_me_connected(
         "<h1>내 페이지 (My page)</h1>",
         notice_html,
         f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
+        '<p><a href="/auth/memory">내 기억 보기 (기억 열람·검색)</a></p>',
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
@@ -1392,6 +1395,453 @@ def _me_page_response(
 
 
 # ---------------------------------------------------------------------------
+# 기억 열람·검색 + 메모 떼기 (namu-60 완료조건 4·5)
+#
+# 그릇은 **세 개뿐이다** — 교훈(learnings)·개인 사실(profile)·쪽지(memo).
+# 작업일지(tasks)는 이 화면에 없다. 못 만든 것이 아니라 서버에 데이터가 없기
+# 때문이다: 코어의 작업일지 저장 위치는 요청마다 갈아끼울 수 없는 컨테이너 홈
+# 한 곳이라 허용하면 전 사용자 기록이 한 폴더에 섞인다(namu-68에서 클라우드가
+# 받지 않는 그릇으로 못박았다 — routing_server._CLOUD_UNSUPPORTED_BOWLS).
+# 그래서 task.md 완료조건 7("열린 작업 보드")은 이 화면으로는 채울 수 없다.
+#
+# 그릇마다 화면에서 되는 일이 다르다는 것이 이 화면의 핵심 요구다:
+#   learnings — 열람만(고치거나 지울 수 없다. 쌓인 배움을 사후에 손대면 기록의
+#               값어치가 사라진다)
+#   profile   — 열람만(정정은 supersedes로 새 항목을 쌓는 방식이라 대화에서 한다)
+#   memo      — 유일하게 **실제로 지워지는** 그릇이라 체크박스로 뗄 수 있다
+# 화면은 이 차이를 문구로 설명하는 데서 그치지 않고, 뗄 수 있는 그릇에만 폼을
+# 그린다(설명만 다르고 버튼은 다 있으면 결국 눌러 보고 알게 된다).
+# ---------------------------------------------------------------------------
+_MEMORY_BOWLS = ("learnings", "profile", "memo")
+
+_BOWL_LABEL = {
+    "learnings": "교훈",
+    "profile": "개인 사실",
+    "memo": "쪽지",
+}
+
+# 한 화면에 올리는 최대 건수. 페이지 넘기기는 이번 범위가 아니라, 넘치면 "더
+# 있습니다"라고 알리고 검색으로 좁히게 안내한다(조용히 자르지 않는다).
+_MEMORY_PAGE_LIMIT = 30
+
+_core_modules = None
+
+
+def _core():
+    """vendor 코어(config/db/memo/profile)를 지연 로드한다.
+
+    모듈 로드 시점에 얹지 않는 이유: `sys.path` 맨 앞에 vendor를 끼우는 부작용을
+    web_auth를 import하는 것만으로 일으키면, 이름이 겹치는 모듈(access_log 등)이
+    어느 쪽으로 풀릴지가 import 순서에 좌우된다. routing_server가 이미 같은
+    경로를 얹으므로 실서버에서는 여기서 하는 일이 없고, 테스트가 web_auth만
+    단독으로 import할 때만 실제로 얹힌다.
+    """
+    global _core_modules
+    if _core_modules is None:
+        import sys
+        from pathlib import Path
+
+        vendor_plugin = (
+            Path(__file__).resolve().parent.parent
+            / "vendor"
+            / "namu-agent"
+            / "namu-plugin"
+        )
+        if str(vendor_plugin) not in sys.path:
+            sys.path.append(str(vendor_plugin))
+        import config as cfg
+        import db
+        import memo
+        import profile
+
+        _core_modules = (cfg, db, memo, profile)
+    return _core_modules
+
+
+def _memory_paths(user_key: str):
+    """그 사용자의 기억 파일 묶음(DataPaths).
+
+    폴더는 `user_repo.user_dir`로 구한다 — routing_server가 읽고 쓰는 바로 그
+    폴더이며, 경로 탈출 이중 차단(슬러그 검증 + resolve 후 재확인)이 그 함수
+    안에 이미 들어 있다. 여기서 경로를 새로 조립하면 그 방어선이 갈라진다.
+    """
+    cfg, _db, _memo, _profile = _core()
+    return cfg.data_paths_for(user_repo.user_dir(user_key))
+
+
+def _ensure_learnings_cache(paths) -> None:
+    """교훈 조회용 캐시(sqlite)가 없거나 낡았으면 yaml에서 다시 만든다.
+
+    routing_server._ensure_fresh와 같은 처리다 — 웹에서 먼저 열어 본 사용자의
+    화면이 비어 보이지 않게 하려면 이 화면도 같은 보정을 해야 한다.
+    """
+    _cfg, db, _memo, _profile = _core()
+    if not paths.db_path.exists() or db.cache_is_stale(
+        paths.learnings_yaml, paths.db_path
+    ):
+        db.rebuild_from_yaml(paths=paths)
+
+
+def _matches(query: str, *texts: str) -> bool:
+    """쪽지·개인 사실용 단순 부분일치. 교훈과 달리 이 두 그릇은 색인이 없다."""
+    q = query.strip().lower()
+    if not q:
+        return True
+    return any(q in (t or "").lower() for t in texts)
+
+
+def _html_layers(summary: str, reason: str, body: str, meta_html: str = "") -> str:
+    """3층(요약·왜·상세)을 한 덩어리로 그린다.
+
+    요약만 굵게 세우고 왜는 그 아래 한 문단, 상세는 접어 둔다 — 목록에서 상세를
+    펼쳐 두면 항목 하나가 화면을 다 먹어 "훑어보기"가 불가능해진다.
+    """
+    parts = [f"<p class=\"m-sum\"><b>{html.escape(summary or '(요약 없음)')}</b></p>"]
+    if reason:
+        parts.append(f"<p class=\"m-why\">{html.escape(reason)}</p>")
+    if body:
+        parts.append(
+            "<details><summary>상세 보기</summary>"
+            f"<pre class=\"m-body\">{html.escape(body)}</pre></details>"
+        )
+    if meta_html:
+        parts.append(f"<p class=\"m-meta\"><small>{meta_html}</small></p>")
+    return "".join(parts)
+
+
+def _html_learnings(rows: list) -> str:
+    if not rows:
+        return ""
+    items = []
+    for row in rows:
+        summary, reason, body = (
+            str(row.get("summary") or row.get("statement") or ""),
+            str(row.get("reason") or row.get("source") or ""),
+            str(row.get("body") or ""),
+        )
+        meta_bits = []
+        for key in ("created_at", "ts", "date"):
+            if row.get(key):
+                meta_bits.append(html.escape(str(row[key])))
+                break
+        for key in ("topic", "task"):
+            if row.get(key):
+                meta_bits.append(html.escape(str(row[key])))
+                break
+        if row.get("outcome"):
+            meta_bits.append(html.escape(str(row["outcome"])))
+        items.append(
+            '<li class="m-item">'
+            + _html_layers(summary, reason, body, " · ".join(meta_bits))
+            + "</li>"
+        )
+    return f'<ul class="m-list">{"".join(items)}</ul>'
+
+
+def _html_profile(docs: list) -> str:
+    if not docs:
+        return ""
+    _cfg, _db, _memo, profile = _core()
+    items = []
+    for doc in docs:
+        summary, reason, body = profile.layers(doc)
+        meta_bits = []
+        if doc.get("subject") or doc.get("topic"):
+            meta_bits.append(html.escape(str(doc.get("subject") or doc.get("topic"))))
+        for tag in doc.get("tags") or []:
+            meta_bits.append(html.escape(str(tag)))
+        items.append(
+            '<li class="m-item">'
+            + _html_layers(summary, reason, body, " · ".join(meta_bits))
+            + "</li>"
+        )
+    return f'<ul class="m-list">{"".join(items)}</ul>'
+
+
+def _html_memo(entries: list, short_by_id: dict) -> str:
+    """쪽지 목록 — 이 그릇만 체크박스가 붙는다(유일하게 실제로 지워지는 그릇).
+
+    표시 id는 목록 안에서 서로 구별되는 최단 접두(`memo.short_ids`)를 쓴다.
+    폼이 실제로 보내는 값은 전체 id다 — 화면에 짧게 보이는 것과 서버가 받는
+    것을 같게 만들면 목록이 바뀔 때마다 지우는 대상이 달라진다.
+    """
+    if not entries:
+        return ""
+    _cfg, _db, memo, _profile = _core()
+    items = []
+    for entry in entries:
+        full_id = str(entry.get("id") or "")
+        short = short_by_id.get(full_id, full_id)
+        summary, reason, body = memo.layers(entry)
+        meta_bits = [f"id <code>{html.escape(short)}</code>"]
+        if entry.get("created_at"):
+            meta_bits.append(html.escape(str(entry["created_at"])))
+        if entry.get("via"):
+            meta_bits.append(html.escape(str(entry["via"])))
+        items.append(
+            '<li class="m-item">'
+            f'<label class="m-pick"><input type="checkbox" name="memo_id" '
+            f'value="{html.escape(full_id)}"> 떼기</label>'
+            + _html_layers(summary, reason, body, " · ".join(meta_bits))
+            + "</li>"
+        )
+    return (
+        '<form method="post" action="/auth/memo/remove">'
+        f'<ul class="m-list">{"".join(items)}</ul>'
+        '<p><button type="submit" style="padding:8px 16px;font-size:15px;'
+        'cursor:pointer;">고른 쪽지 떼기</button> '
+        "<small>뗀 쪽지는 저장소에서 실제로 사라집니다(되돌릴 수 없습니다).</small>"
+        "</p></form>"
+    )
+
+
+_MEMORY_CSS = (
+    "<style>"
+    ".m-tabs{margin:0 0 16px;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:8px}"
+    ".m-tabs a{display:inline-block;padding:6px 12px;border:1px solid currentColor;"
+    "border-radius:6px;text-decoration:none}"
+    ".m-tabs a.on{font-weight:bold;text-decoration:underline}"
+    ".m-list{list-style:none;padding:0;margin:0}"
+    ".m-item{border:1px solid rgba(128,128,128,.4);border-radius:8px;padding:12px;"
+    "margin:0 0 12px}"
+    ".m-sum{margin:0 0 6px}"
+    ".m-why{margin:0 0 6px;opacity:.85}"
+    ".m-meta{margin:6px 0 0;opacity:.7}"
+    ".m-body{white-space:pre-wrap;word-break:break-word;overflow-x:auto;margin:8px 0 0}"
+    ".m-pick{float:right;margin-left:12px}"
+    "</style>"
+)
+
+
+def _html_memory_page(
+    bowl: str,
+    query: str,
+    listing_html: str,
+    *,
+    count: int,
+    notice_html: str = "",
+) -> str:
+    tabs = []
+    for name in _MEMORY_BOWLS:
+        cls = ' class="on"' if name == bowl else ""
+        q = f"&q={_urlquote(query)}" if query else ""
+        tabs.append(
+            f'<li><a href="/auth/memory?bowl={name}{q}"{cls}>'
+            f"{html.escape(_BOWL_LABEL[name])}</a></li>"
+        )
+
+    if bowl == "memo":
+        rule = (
+            "쪽지는 <b>쓰고 버리는 그릇</b>이라 네 그릇 중 유일하게 화면에서 실제로 "
+            "지울 수 있습니다."
+        )
+    elif bowl == "profile":
+        rule = (
+            "개인 사실은 <b>화면에서 고치거나 지울 수 없습니다.</b> 틀린 내용은 "
+            "AI에게 말해 새 사실로 정정하시면, 옛 항목이 자동으로 물러납니다."
+        )
+    else:
+        rule = (
+            "교훈은 <b>화면에서 고치거나 지울 수 없습니다.</b> 쌓인 배움을 나중에 "
+            "손대면 그때 무엇을 알았는지가 남지 않기 때문입니다."
+        )
+
+    if listing_html:
+        body_html = listing_html
+        if count >= _MEMORY_PAGE_LIMIT:
+            body_html += (
+                f"<p><small>가장 최근 {_MEMORY_PAGE_LIMIT}건만 보여드렸습니다 — "
+                "더 있는 경우 위 검색창으로 좁혀 찾으세요.</small></p>"
+            )
+    elif query:
+        body_html = (
+            f"<p><b>'{html.escape(query)}'</b>에 해당하는 "
+            f"{html.escape(_BOWL_LABEL[bowl])}이(가) 없습니다.</p>"
+        )
+    else:
+        body_html = (
+            f"<p>아직 {html.escape(_BOWL_LABEL[bowl])}이(가) 없습니다 — AI와 "
+            "대화하며 기억을 남기시면 여기에 쌓입니다.</p>"
+        )
+
+    body = (
+        _MEMORY_CSS
+        + "<h1>내 기억 (My memory)</h1>"
+        + notice_html
+        + f'<ul class="m-tabs">{"".join(tabs)}</ul>'
+        + '<form method="get" action="/auth/memory">'
+        + f'<input type="hidden" name="bowl" value="{html.escape(bowl)}">'
+        + f'<input type="text" name="q" value="{html.escape(query)}" '
+        'placeholder="찾을 낱말" style="padding:8px;font-size:15px;'
+        'max-width:100%;box-sizing:border-box;"> '
+        '<button type="submit" style="padding:8px 16px;font-size:15px;'
+        'cursor:pointer;">찾기</button>'
+        + (' <a href="/auth/memory?bowl=' + bowl + '">전체 보기</a>' if query else "")
+        + "</form>"
+        + f"<p><small>{rule}</small></p>"
+        + body_html
+        + '<p><a href="/auth/me">← 내 페이지로</a></p>'
+    )
+    return _html_page("NAMU 내 기억", body)
+
+
+def _urlquote(text: str) -> str:
+    from urllib.parse import quote
+
+    return quote(text, safe="")
+
+
+def _load_bowl(user_key: str, bowl: str, query: str) -> "tuple[str, int]":
+    """그릇 하나를 읽어 (목록 HTML, 건수)를 돌려준다."""
+    _cfg, db_mod, memo, profile = _core()
+    paths = _memory_paths(user_key)
+
+    if bowl == "memo":
+        entries = [e for e in memo.load_all(paths=paths)]
+        if query:
+            entries = [
+                e for e in entries if _matches(query, *memo.layers(e))
+            ]
+        entries = entries[-_MEMORY_PAGE_LIMIT:]
+        short_by_id = memo.short_ids(entries)
+        return _html_memo(entries, short_by_id), len(entries)
+
+    if bowl == "profile":
+        docs = profile.active(paths=paths)
+        if query:
+            docs = [d for d in docs if _matches(query, *profile.layers(d))]
+        docs = docs[-_MEMORY_PAGE_LIMIT:]
+        return _html_profile(docs), len(docs)
+
+    _ensure_learnings_cache(paths)
+    with closing(sqlite3.connect(paths.db_path)) as conn:
+        if query:
+            # 검색은 db.search를 쓴다 — db.recall은 결과가 없으면 최신 목록으로
+            # 물러나므로, 찾는 말이 없는데도 뭔가 나온 것처럼 보인다.
+            rows = db_mod.search(conn, query, None, _MEMORY_PAGE_LIMIT).get(
+                "results", []
+            )
+        else:
+            rows = db_mod.recall(conn, None, None, _MEMORY_PAGE_LIMIT)
+    return _html_learnings(rows), len(rows)
+
+
+def _memory_response(
+    request: Request,
+    user_key: str,
+    notice_html: str = "",
+    bowl_override: "str | None" = None,
+) -> Response:
+    # POST(쪽지 떼기)에는 쿼리 문자열이 없다 — 그대로 두면 뗀 직후에 교훈 그릇이
+    # 열려 "방금 뭘 지웠는지" 확인할 자리가 사라진다. 동작을 한 그릇에서 시작했으면
+    # 결과도 그 그릇에서 보여준다.
+    bowl = (bowl_override or request.query_params.get("bowl") or "learnings").strip()
+    if bowl not in _MEMORY_BOWLS:
+        bowl = "learnings"
+    query = (request.query_params.get("q") or "").strip()
+
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+        if not row.get("installation_id") or not row.get("repo_full_name"):
+            return HTMLResponse(_html_me_not_connected(user_key))
+        try:
+            # 읽기 전에 회원 저장소 복제를 최신으로 맞춘다 — 다른 기기·웹 AI가
+            # 남긴 기억이 화면에만 안 보이는 상태를 만들지 않기 위해서다.
+            user_repo.ensure_ready(conn, user_key)
+        except user_repo.UserRepoError as exc:
+            logger.warning("기억 화면: 저장소 준비 실패 (user_key=%s): %s", user_key, exc)
+            notice_html += _html_notice(
+                "저장소를 최신으로 맞추지 못해 <b>마지막으로 받아 둔 내용</b>을 "
+                "보여드립니다.",
+                tone="warn",
+            )
+
+    try:
+        listing_html, count = _load_bowl(user_key, bowl, query)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        logger.warning("기억 화면: %s 그릇 읽기 실패 (user_key=%s): %s", bowl, user_key, exc)
+        listing_html, count = "", 0
+        notice_html += _html_notice(
+            "기억을 읽지 못했습니다 — 잠시 후 새로고침해 보세요.", tone="warn"
+        )
+
+    return HTMLResponse(
+        _html_memory_page(
+            bowl, query, listing_html, count=count, notice_html=notice_html
+        )
+    )
+
+
+async def memory(request: Request) -> Response:
+    """기억 열람·검색 화면(namu-60 완료조건 4)."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+    return await run_in_threadpool(_memory_response, request, user_key)
+
+
+def _memo_remove_sync(request: Request, user_key: str, memo_ids: list) -> Response:
+    _cfg, _db, memo, _profile = _core()
+    paths = _memory_paths(user_key)
+
+    removed = 0
+    missing = 0
+    for memo_id in memo_ids:
+        try:
+            memo.remove(memo_id, paths=paths)
+            removed += 1
+        except (KeyError, ValueError, LookupError):
+            # 이미 없는 id(다른 기기에서 먼저 뗐거나 새로고침 후 재제출) — 실패로
+            # 취급하지 않는다. 결과가 같으므로 사용자에게 오류를 보일 이유가 없다.
+            missing += 1
+        except OSError as exc:
+            logger.warning("쪽지 떼기 실패 (user_key=%s, id=%s): %s", user_key, memo_id, exc)
+
+    notice = ""
+    if removed:
+        # 뗀 결과를 회원 저장소에 밀어 넣지 않으면, 다음 최신화 때 원격 내용이
+        # 다시 내려와 **뗀 쪽지가 부활한다**(완료조건 5가 못박은 실패 양식).
+        try:
+            with closing(identity.connect()) as conn:
+                user_repo.push(conn, user_key, "쪽지 떼기(웹)")
+            notice = _html_notice(f"쪽지 {removed}장을 뗐습니다.", tone="good")
+        except user_repo.UserRepoError as exc:
+            logger.warning("쪽지 떼기 후 push 실패 (user_key=%s): %s", user_key, exc)
+            notice = _html_notice(
+                f"쪽지 {removed}장을 이 서버에서는 뗐지만 <b>회원님 저장소에 "
+                "반영하지 못했습니다.</b> 잠시 후 다시 시도해 주세요 — 그때까지는 "
+                "다른 기기에서 다시 나타날 수 있습니다.",
+                tone="warn",
+            )
+    elif missing:
+        notice = _html_notice("고르신 쪽지는 이미 떼어져 있습니다.", tone="info")
+    else:
+        notice = _html_notice("뗄 쪽지를 고르지 않으셨습니다.", tone="info")
+
+    return _memory_response(request, user_key, notice_html=notice, bowl_override="memo")
+
+
+async def memo_remove(request: Request) -> Response:
+    """쪽지 떼기(namu-60 완료조건 5) — POST 전용.
+
+    파괴적 동작이라 GET으로 두지 않는다(주소 재발급·폐기와 같은 원칙). 세션
+    검증도 새 경로를 만들지 않고 `_session_user_key`를 그대로 쓴다.
+    """
+    user_key = _session_user_key(request)
+    if not user_key:
+        return PlainTextResponse(
+            "로그인이 필요합니다 — 세션이 없거나 만료됐습니다. "
+            "Login required: session missing or expired.",
+            status_code=401,
+        )
+    form = await request.form()
+    memo_ids = [str(v).strip() for v in form.getlist("memo_id") if str(v).strip()]
+    return await run_in_threadpool(_memo_remove_sync, request, user_key, memo_ids)
+
+
+# ---------------------------------------------------------------------------
 # 주소 관리(namu-60) — 연결 시험 / 재발급 / 폐기. 셋 다 **POST 전용**이다.
 #
 # GET으로 두면 링크 프리페치나 채팅 미리보기 크롤러가 눌러 버릴 수 있고,
@@ -1524,6 +1974,10 @@ def build_auth_app() -> Starlette:
             Route("/auth/github/callback", callback, methods=["GET"]),
             Route("/auth/github/select-repo", select_repo, methods=["GET"]),
             Route("/auth/me", me, methods=["GET"]),
+            Route("/auth/memory", memory, methods=["GET"]),
+            # 떼기는 되돌릴 수 없으므로 POST 전용 — 링크 프리페치·미리보기
+            # 크롤러가 눌러 버리는 사고를 방법(method) 단계에서 막는다.
+            Route("/auth/memo/remove", memo_remove, methods=["POST"]),
             # 주소 관리 3종은 POST만 받는다 — GET(링크·프리페치)으로는 절대
             # 실행되지 않아야 한다(파괴적 동작).
             Route("/auth/mcp/test", mcp_test, methods=["POST"]),
