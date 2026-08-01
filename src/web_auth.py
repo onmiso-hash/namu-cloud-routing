@@ -831,7 +831,8 @@ def _html_me_connected(
         "<h1>내 페이지 (My page)</h1>",
         notice_html,
         f"<p>연결된 저장소: <code>{html.escape(repo_full_name)}</code></p>",
-        '<p><a href="/auth/memory">내 기억 보기 (기억 열람·검색)</a></p>',
+        '<p><a href="/auth/memory">내 기억 보기 (기억 열람·검색)</a> · '
+        '<a href="/auth/memory?bowl=tasks">열린 작업 보기</a></p>',
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
@@ -1395,29 +1396,35 @@ def _me_page_response(
 
 
 # ---------------------------------------------------------------------------
-# 기억 열람·검색 + 메모 떼기 (namu-60 완료조건 4·5)
+# 기억 열람·검색 + 메모 떼기 + 열린 작업 보드 (namu-60 완료조건 4·5·7)
 #
-# 그릇은 **세 개뿐이다** — 교훈(learnings)·개인 사실(profile)·쪽지(memo).
-# 작업일지(tasks)는 이 화면에 없다. 못 만든 것이 아니라 서버에 데이터가 없기
-# 때문이다: 코어의 작업일지 저장 위치는 요청마다 갈아끼울 수 없는 컨테이너 홈
-# 한 곳이라 허용하면 전 사용자 기록이 한 폴더에 섞인다(namu-68에서 클라우드가
-# 받지 않는 그릇으로 못박았다 — routing_server._CLOUD_UNSUPPORTED_BOWLS).
-# 그래서 task.md 완료조건 7("열린 작업 보드")은 이 화면으로는 채울 수 없다.
+# 그릇은 네 개다 — 교훈(learnings)·개인 사실(profile)·쪽지(memo)·작업일지(tasks).
+#
+# 작업일지가 **읽기 전용**인 이유(namu-68 정정): 클라우드가 거절하는 것은 작업일지에
+# **쓰는** 것뿐이다(routing_server._CLOUD_UNSUPPORTED_BOWLS). 코어의 tasks 저장
+# 위치가 요청마다 갈아끼울 수 없는 컨테이너 홈 한 곳이라 허용하면 전 사용자 기록이
+# 섞이기 때문인데, 그 제약은 쓰기 경로에만 걸린다. 읽을 데이터는 이미 서버에 있다 —
+# 회원 저장소에는 `tasks/<프로젝트>/<작업>/{task.md,log.md}`가 통째로 올라오고,
+# user_repo가 그것을 `STORE_ROOT/users/<키>/`로 복제한다. 즉 이 화면은 그 복제본을
+# 읽을 뿐이고 컨테이너 홈은 건드리지 않는다. (2026-08-01 이전 주석은 이 구분을
+# 놓쳐 "서버에 데이터가 없어 완료조건 7은 못 채운다"고 단정했다 — 틀린 판단이었다.)
 #
 # 그릇마다 화면에서 되는 일이 다르다는 것이 이 화면의 핵심 요구다:
 #   learnings — 열람만(고치거나 지울 수 없다. 쌓인 배움을 사후에 손대면 기록의
 #               값어치가 사라진다)
 #   profile   — 열람만(정정은 supersedes로 새 항목을 쌓는 방식이라 대화에서 한다)
 #   memo      — 유일하게 **실제로 지워지는** 그릇이라 체크박스로 뗄 수 있다
+#   tasks     — 열람만. 쓰기는 위 이유로 이 서비스 전체에서 막혀 있다
 # 화면은 이 차이를 문구로 설명하는 데서 그치지 않고, 뗄 수 있는 그릇에만 폼을
 # 그린다(설명만 다르고 버튼은 다 있으면 결국 눌러 보고 알게 된다).
 # ---------------------------------------------------------------------------
-_MEMORY_BOWLS = ("learnings", "profile", "memo")
+_MEMORY_BOWLS = ("learnings", "profile", "memo", "tasks")
 
 _BOWL_LABEL = {
     "learnings": "교훈",
     "profile": "개인 사실",
     "memo": "쪽지",
+    "tasks": "작업일지",
 }
 
 # 한 화면에 올리는 최대 건수. 페이지 넘기기는 이번 범위가 아니라, 넘치면 "더
@@ -1456,6 +1463,20 @@ def _core():
 
         _core_modules = (cfg, db, memo, profile)
     return _core_modules
+
+
+def _core_tasks():
+    """작업일지 읽기용 코어 모듈(`task_resolve`).
+
+    `_core()`가 돌려주는 네 모듈 묶음에 끼워 넣지 않는다 — 그 튜플은 이미 여러
+    곳에서 `cfg, db, memo, profile = _core()`로 펼쳐 받고 있어, 한 칸 늘리는 것이
+    작업일지와 상관없는 모든 호출부를 고치는 일이 된다. sys.path를 얹는 일은
+    `_core()`가 이미 하므로 여기서는 먼저 부르기만 한다.
+    """
+    _core()
+    import task_resolve
+
+    return task_resolve
 
 
 def _memory_paths(user_key: str):
@@ -1595,6 +1616,130 @@ def _html_memo(entries: list, short_by_id: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# 열린 작업 보드 (namu-60 완료조건 7)
+#
+# "CLI 브리핑과 같은 내용"이 완료조건 문구다. 그래서 무엇이 열린 작업인지·어떤
+# 순서로 세우는지를 여기서 새로 정하지 않고, 코어(task_resolve)의 판정 함수를
+# 그대로 부른다 — 닫힘 판정(context의 `(완료)` 우선, 없으면 log 폴백)이나 책갈피
+# 우선 순서를 이 파일에 다시 구현하면 규칙이 두 벌로 갈려 웹과 CLI가 서로 다른
+# 목록을 보여주게 된다(코어가 `find_open_tasks` 주석에서 못박은 실패 양식이다).
+#
+# 코어의 `open_tasks_briefing()`을 통째로 못 쓰는 이유: 그 함수는 프로젝트 목록을
+# `~/.namu`(컨테이너 홈) 기준으로 스스로 훑는다. 클라우드는 사용자마다 뿌리가
+# 달라야 하므로, 뿌리를 인자로 받는 하위 함수들만 골라 쓰고 프로젝트를 훑는 한
+# 겹만 여기서 만든다.
+# ---------------------------------------------------------------------------
+def _task_project_dirs(user_key: str) -> list:
+    """그 사용자 저장소 사본의 `tasks/<프로젝트>` 폴더 목록.
+
+    회원 저장소에 작업 기록이 한 번도 올라온 적 없으면 폴더 자체가 없다 — 이것은
+    오류가 아니라 "아직 없음"이므로 빈 목록으로 돌려준다.
+    """
+    tasks_root = user_repo.user_dir(user_key) / "tasks"
+    try:
+        return sorted(d for d in tasks_root.iterdir() if d.is_dir())
+    except OSError:
+        return []
+
+
+def _task_last_ts(task_dir) -> "str | None":
+    """그 작업 log.md의 가장 늦은 기록 시각(정렬용). 없으면 None.
+
+    코어의 비공개 함수를 부른다 — 시각을 뽑는 규칙(줄 순서가 아니라 최댓값을
+    고른다)을 여기에 베껴 오면 시간대가 다른 호스트가 남긴 줄에서 웹과 CLI의
+    정렬이 갈린다. 이 이름이 사라지면 `test_web_auth.py`의 전용 시험이 먼저
+    실패해, 코어를 올릴 때 조용히 어긋나지 않는다.
+    """
+    ts = _core_tasks()._latest_log_ts(task_dir / "log.md")
+    return f"{ts[0]} {ts[1]}" if ts else None
+
+
+def _open_task_rows(user_key: str, query: str = "") -> list:
+    """열린 작업 전부를 브리핑과 같은 순서(책갈피 먼저, 그다음 최근 활동순)로."""
+    tr = _core_tasks()
+    rows = []
+    for project_dir in _task_project_dirs(user_key):
+        pins = tr.pins_by_slug(project_dir)
+        for task_dir in tr.find_open_tasks(project_dir):
+            pin = pins.get(task_dir.name)
+            rows.append(
+                {
+                    "project": project_dir.name,
+                    "slug": task_dir.name,
+                    "title": tr.task_title(task_dir),
+                    "next": tr.next_note(task_dir),
+                    "why": tr.next_why(task_dir),
+                    "last_ts": _task_last_ts(task_dir),
+                    "pin_machine": pin["machine"] if pin else None,
+                    "pin_ts": pin["ts"] if pin else None,
+                }
+            )
+
+    rows.sort(
+        key=lambda r: (r["pin_ts"] is not None, r["pin_ts"] or "", r["last_ts"] or ""),
+        reverse=True,
+    )
+    if query:
+        rows = [
+            r
+            for r in rows
+            if _matches(
+                query, r["project"], r["slug"], r["title"], r["next"] or "", r["why"] or ""
+            )
+        ]
+    return rows
+
+
+def _html_task_board(rows: list) -> str:
+    """열린 작업 목록 — 각 항목의 주인공은 제목이 아니라 **다음에 할 일**이다.
+
+    브리핑에서 이 화면을 보는 목적이 "어디서부터 이어서 하지?"이기 때문에, 다음
+    줄은 접지 않고 자르지도 않는다(잘리면 재진입 지점의 의미가 없어진다). 대신
+    분량이 들쭉날쭉한 '왜' 한 줄만 접어 둔다.
+    """
+    if not rows:
+        return ""
+    items = []
+    for row in rows:
+        head = html.escape(row["title"] or row["slug"])
+        if row["pin_machine"]:
+            head = "📌 " + head
+        next_text = (row["next"] or "").strip()
+        if next_text:
+            next_html = (
+                '<p class="m-why"><b>다음:</b> ' + html.escape(next_text) + "</p>"
+            )
+        else:
+            next_html = (
+                '<p class="m-why">다음에 할 일이 아직 적혀 있지 않습니다 — '
+                "AI와 작업을 이어가면 여기에 채워집니다.</p>"
+            )
+
+        why_html = ""
+        if (row["why"] or "").strip():
+            why_html = (
+                "<details><summary>왜 거기서부터인지</summary>"
+                f'<pre class="m-body">{html.escape(row["why"].strip())}</pre></details>'
+            )
+
+        meta_bits = [html.escape(row["project"]), f"<code>{html.escape(row['slug'])}</code>"]
+        if row["last_ts"]:
+            meta_bits.append("마지막 기록 " + html.escape(row["last_ts"]))
+        if row["pin_machine"]:
+            meta_bits.append("책갈피 " + html.escape(row["pin_machine"]))
+
+        items.append(
+            '<li class="m-item">'
+            f'<p class="m-sum"><b>{head}</b></p>'
+            + next_html
+            + why_html
+            + f'<p class="m-meta"><small>{" · ".join(meta_bits)}</small></p>'
+            + "</li>"
+        )
+    return f'<ul class="m-list">{"".join(items)}</ul>'
+
+
 _MEMORY_CSS = (
     "<style>"
     ".m-tabs{margin:0 0 16px;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:8px}"
@@ -1630,7 +1775,13 @@ def _html_memory_page(
             f"{html.escape(_BOWL_LABEL[name])}</a></li>"
         )
 
-    if bowl == "memo":
+    if bowl == "tasks":
+        rule = (
+            "작업일지는 <b>여기서 보기만 합니다</b> — 작업 기록을 남기는 일은 "
+            "회원님 PC의 나무가 합니다. 이 목록은 그 기록을 그대로 옮겨 온 것이라, "
+            "PC에서 보시는 브리핑과 같은 내용입니다."
+        )
+    elif bowl == "memo":
         rule = (
             "쪽지는 <b>쓰고 버리는 그릇</b>이라 네 그릇 중 유일하게 화면에서 실제로 "
             "지울 수 있습니다."
@@ -1657,6 +1808,13 @@ def _html_memory_page(
         body_html = (
             f"<p><b>'{html.escape(query)}'</b>에 해당하는 "
             f"{html.escape(_BOWL_LABEL[bowl])}이(가) 없습니다.</p>"
+        )
+    elif bowl == "tasks":
+        # 작업일지는 웹에서 만들 수 없는 그릇이라, 다른 그릇의 "AI와 대화하며
+        # 남기시면 쌓입니다"를 그대로 쓰면 여기서 할 수 없는 일을 안내하게 된다.
+        body_html = (
+            "<p>지금 열려 있는 작업이 없습니다 — 회원님 PC의 나무에서 작업을 "
+            "시작하시면 여기에 나타납니다.</p>"
         )
     else:
         body_html = (
@@ -1695,6 +1853,12 @@ def _load_bowl(user_key: str, bowl: str, query: str) -> "tuple[str, int]":
     """그릇 하나를 읽어 (목록 HTML, 건수)를 돌려준다."""
     _cfg, db_mod, memo, profile = _core()
     paths = _memory_paths(user_key)
+
+    if bowl == "tasks":
+        # 다른 그릇과 달리 뒤에서 자르지 않는다 — 이미 "책갈피 먼저, 그다음 최근
+        # 활동순"으로 세워져 있어 앞쪽이 가장 급한 작업이다.
+        rows = _open_task_rows(user_key, query)[:_MEMORY_PAGE_LIMIT]
+        return _html_task_board(rows), len(rows)
 
     if bowl == "memo":
         entries = [e for e in memo.load_all(paths=paths)]

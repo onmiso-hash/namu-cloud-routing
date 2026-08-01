@@ -1873,9 +1873,13 @@ def test_memory_page_requires_login():
     assert "로그인" in r.text
 
 
-def test_memory_page_offers_three_bowls_and_no_task_board(client, monkeypatch, tmp_path):
-    """클라우드에는 작업일지가 없다(namu-68 격리 결정) — 그릇 셋만 보이고
-    '작업 보드'를 만들어 놓고 빈 화면을 보여주는 일이 없어야 한다."""
+def test_memory_page_offers_four_bowls_including_tasks(client, monkeypatch, tmp_path):
+    """그릇은 넷이다 — 작업일지도 포함된다.
+
+    이 시험은 원래 "작업일지는 없어야 한다"고 반대로 못박고 있었다. 근거였던
+    namu-68 격리 결정은 작업일지에 **쓰는** 것을 막은 것이고, 회원 저장소에는
+    tasks/ 폴더가 통째로 올라와 서버 사본에 이미 들어 있다(2026-08-01 실측).
+    """
     row = _connect_via_login(client, monkeypatch, github_id=41001, repo="ann/mem")
     _memory_env(monkeypatch, tmp_path, row["user_key"])
 
@@ -1885,8 +1889,8 @@ def test_memory_page_offers_three_bowls_and_no_task_board(client, monkeypatch, t
     assert "교훈" in r.text
     assert "개인 사실" in r.text
     assert "쪽지" in r.text
-    assert "작업일지" not in r.text
-    assert "작업 보드" not in r.text
+    assert "작업일지" in r.text
+    assert "bowl=tasks" in r.text
 
 
 def test_memory_lists_learnings_summary_and_hides_body_behind_details(
@@ -2018,6 +2022,187 @@ def test_memo_remove_rejects_missing_session_and_get_method(monkeypatch, tmp_pat
     c = TestClient(wa.build_auth_app(), base_url="https://testserver")
     assert c.post("/auth/memo/remove", data={"memo_id": "x"}).status_code == 401
     assert c.get("/auth/memo/remove").status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# 열린 작업 보드 (namu-60 완료조건 7)
+#
+# 확인할 것은 "무엇이 열린 작업이고 어떤 순서로 서는가"를 이 화면이 **스스로
+# 정하지 않는다**는 점이다 — 판정은 코어(task_resolve)가 하고 웹은 옮겨 담기만
+# 한다. 그래서 시험도 코어가 닫힘으로 보는 모양(log의 [완료])·책갈피 파일을
+# 실물 그대로 만들어 넣는다.
+# ---------------------------------------------------------------------------
+def _make_task(user_key, project, slug, *, log_lines, title=None):
+    """회원 저장소 사본에 작업 폴더 하나(task.md + log.md)를 만든다."""
+    task_dir = wa.user_repo.user_dir(user_key) / "tasks" / project / slug
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.md").write_text(
+        f"# {slug} — {title or slug}\n", encoding="utf-8"
+    )
+    (task_dir / "log.md").write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+    return task_dir
+
+
+def test_task_board_shows_open_tasks_with_next_line_and_omits_closed_ones(
+    client, monkeypatch, tmp_path
+):
+    """보드의 주인공은 제목이 아니라 '다음에 할 일'이다 — 그 줄이 없으면 어디서
+    이어서 할지 모르므로 화면이 있으나 마나다. 닫힌 작업은 빠져야 한다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41010, repo="ann/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-open",
+        title="열린작업제목마커",
+        log_lines=[
+            "[시작] 2026-07-30 10:00:00 hp · 착수",
+            "[다음] 2026-07-30 11:00:00 hp · 다음할일마커부터",
+            "    왜: 왜여기서부터마커",
+        ],
+    )
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-closed",
+        title="닫힌작업제목마커",
+        log_lines=[
+            "[시작] 2026-07-29 10:00:00 hp · 착수",
+            "[완료] 2026-07-29 12:00:00 hp · 끝",
+        ],
+    )
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert r.status_code == 200
+    assert "열린작업제목마커" in r.text
+    assert "다음할일마커부터" in r.text
+    assert "왜여기서부터마커" in r.text
+    assert "닫힌작업제목마커" not in r.text
+
+
+def test_task_board_puts_pinned_task_first(client, monkeypatch, tmp_path):
+    """책갈피가 꽂힌 작업이 맨 위에 선다 — 최근 활동순 하나로만 세우면 만든
+    순서가 곧 중요도가 된다(코어 namu-70이 흡수한 규칙과 같은 결과여야 한다)."""
+    row = _connect_via_login(client, monkeypatch, github_id=41011, repo="bob/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-recent",
+        title="최근작업마커",
+        log_lines=["[다음] 2026-07-31 23:00:00 hp · 나중"],
+    )
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-pinned",
+        title="책갈피작업마커",
+        log_lines=["[다음] 2026-07-20 09:00:00 hp · 먼저"],
+    )
+    pin = wa.user_repo.user_dir(row["user_key"]) / "tasks" / "myproj" / ".pin.hp"
+    pin.write_text("task-pinned\n2026-08-01 10:00:00\n", encoding="utf-8")
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert r.status_code == 200
+    assert r.text.index("책갈피작업마커") < r.text.index("최근작업마커")
+    assert "📌" in r.text
+
+
+def test_task_board_search_narrows_instead_of_showing_everything(
+    client, monkeypatch, tmp_path
+):
+    row = _connect_via_login(client, monkeypatch, github_id=41012, repo="cat/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-apple",
+        title="사과작업마커",
+        log_lines=["[다음] 2026-07-30 11:00:00 hp · 사과를 깎는다"],
+    )
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-pear",
+        title="배작업마커",
+        log_lines=["[다음] 2026-07-30 12:00:00 hp · 배를 깎는다"],
+    )
+
+    hit = client.get("/auth/memory", params={"bowl": "tasks", "q": "사과작업마커"})
+    miss = client.get("/auth/memory", params={"bowl": "tasks", "q": "없는낱말zzz"})
+
+    assert "사과작업마커" in hit.text
+    assert "배작업마커" not in hit.text
+    assert "없습니다" in miss.text
+
+
+def test_task_board_without_tasks_folder_says_none_instead_of_failing(
+    client, monkeypatch, tmp_path
+):
+    """작업 기록을 한 번도 올린 적 없는 회원 — 폴더 자체가 없다. 오류가 아니라
+    '아직 없음'이며, 안내는 웹에서 할 수 없는 일(대화로 남기기)을 시키지 않는다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41013, repo="dan/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert r.status_code == 200
+    assert "열려 있는 작업이 없습니다" in r.text
+
+
+def test_task_board_reads_only_its_own_owner_folder(client, monkeypatch, tmp_path):
+    """남의 작업 기록이 섞여 보이면 안 된다 — 사용자별 뿌리로 읽는지 확인한다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41014, repo="eve/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "mine",
+        title="내작업마커",
+        log_lines=["[다음] 2026-07-30 11:00:00 hp · 내 다음 할 일"],
+    )
+    _make_task(
+        "someone-else",
+        "myproj",
+        "theirs",
+        title="남의작업마커",
+        log_lines=["[다음] 2026-07-31 11:00:00 hp · 남의 다음 할 일"],
+    )
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert "내작업마커" in r.text
+    assert "남의작업마커" not in r.text
+
+
+def test_task_board_is_read_only_and_offers_no_remove_form(
+    client, monkeypatch, tmp_path
+):
+    """쓰기는 이 서비스 전체에서 막혀 있다(namu-68) — 보드에도 손대는 버튼이
+    있으면 안 된다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41015, repo="fox/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "mine",
+        title="내작업마커",
+        log_lines=["[다음] 2026-07-30 11:00:00 hp · 다음"],
+    )
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert "/auth/memo/remove" not in r.text
+    assert 'type="checkbox"' not in r.text
+
+
+def test_core_still_exposes_the_timestamp_helper_the_board_depends_on():
+    """보드 정렬은 코어의 비공개 함수(_latest_log_ts)를 부른다 — 규칙을 베끼지
+    않으려는 의도적 선택이라, 코어를 올릴 때 이름이 사라지면 여기서 먼저 걸려야
+    한다(화면이 조용히 엉뚱한 순서로 서는 것보다 낫다)."""
+    assert callable(getattr(wa._core_tasks(), "_latest_log_ts", None))
 
 
 def test_memory_routes_are_registered_in_build_auth_app():
