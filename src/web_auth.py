@@ -927,6 +927,43 @@ def _html_me_connected(
     return _html_page("NAMU 내 페이지", "".join(body))
 
 
+def _html_rotate_confirm() -> str:
+    """재발급 확인 화면 — 폐기와 같은 문턱을 둔다.
+
+    왜 필요한가: 재발급은 "새 주소가 생긴다"로 들려서 무해해 보이지만, 실제
+    결과는 **옛 주소가 그 자리에서 막히는 것**이다. AI에 등록해 둔 커넥터는
+    그 순간부터 기억에 닿지 못하고, 사용자는 등록 절차를 다시 밟아야 한다.
+    폐기는 한 번 더 묻는데 재발급은 안 묻는 것은, 결과의 무게가 비슷한데
+    문턱만 다른 상태였다(사용자 지적, 2026-08-02).
+
+    확인을 자바스크립트 알림창이 아니라 화면으로 받는 이유: 폐기가 이미 그
+    방식이라 같은 결로 맞추고, 스크립트가 막힌 브라우저에서도 똑같이 동작한다.
+    """
+    body = (
+        "<h1>주소를 새로 발급할까요?</h1>"
+        '<div class="card">'
+        "<p>새 주소를 만들면 <b>지금 쓰는 주소는 그 즉시 막힙니다.</b> "
+        "AI에 등록해 둔 커넥터도 그 순간부터 회원님 기억에 닿지 못합니다.</p>"
+        '<p style="margin-bottom:0">그래서 발급 후에는 <b>AI의 커넥터 주소를 '
+        "새것으로 바꿔 주셔야</b> 합니다 — 그 일까지 하실 준비가 되셨을 때 "
+        "진행하세요.</p>"
+        "</div>"
+        + _html_notice(
+            "주소가 새어 나갔거나 남이 알게 된 경우가 아니라면, 굳이 바꾸실 "
+            "이유는 없습니다.",
+            tone="info",
+        )
+        + '<div class="btn-row">'
+        '<form method="post" action="/auth/mcp/rotate">'
+        '<input type="hidden" name="confirm" value="yes">'
+        '<button type="submit" class="btn btn-primary">네, 새로 발급합니다</button>'
+        "</form>"
+        '<a class="btn" href="/auth/me">아니요, 돌아가기</a>'
+        "</div>"
+    )
+    return _html_page("NAMU 주소 재발급 확인", body)
+
+
 def _html_revoke_confirm() -> str:
     """폐기 확인 화면 — 실수로 한 번 누른 것만으로는 주소가 사라지지 않게 하는
     단계. 이 화면 자체는 아무것도 바꾸지 않는다(확인 폼을 다시 POST해야 실행)."""
@@ -2286,14 +2323,27 @@ async def mcp_rotate(request: Request) -> Response:
     `identity.get_by_mcp_secret`으로 장부를 조회하므로, 장부 행이 바뀌는 순간
     옛 열쇠는 조회에 잡히지 않아 404가 된다(tests/test_web_auth.py가 이
     성질을 실제 앱으로 못 박는다).
+
+    **쓰던 주소가 있으면 확인 화면을 한 번 거친다**(폐기와 같은 문턱). 그
+    한 번이 곧 "AI에 등록해 둔 커넥터가 지금 끊긴다"는 뜻이기 때문이다.
+    반대로 **폐기해 둔 상태에서 부르는 발급은 묻지 않는다** — 없던 주소를
+    새로 만드는 것이라 끊길 연결 자체가 없고, 되돌리러 온 사람에게 문턱을
+    세우면 그건 방해일 뿐이다.
     """
     user_key = _session_user_key(request)
     if not user_key:
         return HTMLResponse(_html_me_login_required(), status_code=401)
 
+    form = await request.form()
+    confirmed = (form.get("confirm") or "") == "yes"
+
     with closing(identity.connect()) as conn:
-        if identity.get_by_user_key(conn, user_key) is None:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
             return HTMLResponse(_html_me_login_required(), status_code=401)
+        if row.get("mcp_secret") and not confirmed:
+            # 아직 아무것도 바꾸지 않았다 — 확인 화면만 보여준다.
+            return HTMLResponse(_html_rotate_confirm())
         identity.rotate_mcp_secret(conn, user_key)
         logger.info("MCP 접속 열쇠 재발급 (user_key=%s)", user_key)  # 값 자체는 남기지 않는다
         return _me_page_response(request, conn, user_key, _NOTICE_ROTATED)

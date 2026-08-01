@@ -1820,7 +1820,7 @@ def test_rotate_issues_new_address_and_shows_it_immediately(client, monkeypatch)
     row = _connect_via_login(client, monkeypatch, github_id=32001, repo="vera/memories")
     old_secret = row["mcp_secret"]
 
-    r = client.post("/auth/mcp/rotate")
+    r = client.post("/auth/mcp/rotate", data={"confirm": "yes"})
 
     assert r.status_code == 200
     new_secret = _ledger_row(row["user_key"])["mcp_secret"]
@@ -1833,12 +1833,44 @@ def test_rotate_issues_new_address_and_shows_it_immediately(client, monkeypatch)
     _assert_onboarding_guide(r.text)
 
 
+def test_rotate_asks_once_before_breaking_the_address_you_are_using(client, monkeypatch):
+    """재발급은 "새 주소가 생긴다"로 들리지만 실제 결과는 **쓰던 주소가 그 자리에서
+    막히는 것**이다. 그냥 눌러 본 사람이 AI 커넥터를 스스로 끊게 되므로, 폐기와
+    같은 문턱을 둔다(사용자 지적, 2026-08-02)."""
+    row = _connect_via_login(client, monkeypatch, github_id=32011, repo="ian/memories")
+    old_secret = row["mcp_secret"]
+
+    r = client.post("/auth/mcp/rotate")
+
+    assert r.status_code == 200
+    # 확인 화면일 뿐, 아직 아무것도 바뀌지 않았다.
+    assert _ledger_row(row["user_key"])["mcp_secret"] == old_secret
+    assert _mcp_gate(old_secret)[0] == 200, "묻기만 했는데 옛 주소가 끊겼다"
+    assert "새로 발급할까요" in r.text
+    assert 'value="yes"' in r.text
+    # 되돌아갈 길이 반드시 함께 있어야 한다.
+    assert 'href="/auth/me"' in r.text
+
+
+def test_rotate_does_not_ask_when_there_is_nothing_to_break(client, monkeypatch):
+    """폐기해 둔 사람이 되돌리러 왔을 때는 끊길 연결 자체가 없다 — 그 자리에
+    문턱을 세우면 그건 안전장치가 아니라 방해다."""
+    row = _connect_via_login(client, monkeypatch, github_id=32012, repo="jane/memories")
+    client.post("/auth/mcp/revoke", data={"confirm": "yes"})
+
+    r = client.post("/auth/mcp/rotate")
+
+    assert "새로 발급할까요" not in r.text
+    new_secret = _ledger_row(row["user_key"])["mcp_secret"]
+    assert new_secret and new_secret != row["mcp_secret"]
+
+
 def test_rotate_blocks_the_old_address_on_the_real_gate(client, monkeypatch):
     row = _connect_via_login(client, monkeypatch, github_id=32002, repo="walt/memories")
     old_secret = row["mcp_secret"]
     assert _mcp_gate(old_secret)[0] == 200  # 재발급 전에는 통과한다
 
-    client.post("/auth/mcp/rotate")
+    client.post("/auth/mcp/rotate", data={"confirm": "yes"})
     new_secret = _ledger_row(row["user_key"])["mcp_secret"]
 
     assert _mcp_gate(old_secret)[0] == 404, "옛 주소가 여전히 통한다"
