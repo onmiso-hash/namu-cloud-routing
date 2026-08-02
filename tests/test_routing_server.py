@@ -366,21 +366,203 @@ def test_bowl_is_mandatory(tmp_path):
     assert not (tmp_path / "users" / "alice" / "memory").exists()
 
 
-def test_tasks_bowl_rejected_on_cloud(tmp_path, monkeypatch):
-    """작업일지는 코어가 사용자별로 갈라지지 않는 위치(홈/.namu/tasks)에 쓰므로
-    클라우드에서 허용하면 모든 사용자의 기록이 한 폴더에 섞인다 — 명시 거절."""
-    fake_home = tmp_path / "fakehome"
-    fake_home.mkdir()
-    monkeypatch.setenv("HOME", str(fake_home))
+# ---------------------------------------------------------------------------
+# 작업일지(tasks) — 회원 폴더의 tasks/<프로젝트>/<작업>/
+#
+# namu-68은 이 그릇을 거절했었다. 근거로 적혀 있던 "코어가 컨테이너 홈에 쓰므로
+# 갈아끼울 자리가 없다"는 코어의 한 함수(tasks_root_for)에만 해당하는 사실이었고,
+# 이 서버는 그 함수를 부르지 않는다. 아래 시험들은 그 사실을 **파일 위치로** 고정한다
+# — 기록이 회원 폴더 안에 생기고, 컨테이너 홈(.namu)에는 아무것도 안 생긴다.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def _fake_home(monkeypatch, tmp_path):
+    """컨테이너 홈을 빈 임시 폴더로 바꿔 둔다 — 홈 오염을 실제로 검사하기 위한
+    관문이다(개인용 코어 함수가 실수로 끼어들면 여기에 `.namu`가 생긴다)."""
+    home = tmp_path / "fakehome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
 
+
+def _make_task(user="alice", project="namu-agent", slug="namu-99-demo", **kw):
+    params = dict(
+        bowl="tasks", create=True, project=project, topic=slug,
+        summary="시험용 작업", reason="시험을 위해 만든 작업",
+        body="다음에 시작할 지점", ctx=_ctx(user),
+    )
+    params.update(kw)
+    return rs.namu_record(**params)
+
+
+def test_task_create_writes_into_user_folder_not_container_home(tmp_path, _fake_home):
+    result = _make_task()
+
+    task_dir = tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo"
+    assert (task_dir / "task.md").exists()
+    assert (task_dir / "log.md").exists()
+    assert "시험을 위해 만든 작업" in (task_dir / "task.md").read_text(encoding="utf-8")
+    log = (task_dir / "log.md").read_text(encoding="utf-8")
+    assert "[시작]" in log and "[다음] " in log
+    assert "다음에 시작할 지점" in log
+    assert "namu-99-demo" in result
+    # 컨테이너 홈은 손대지 않는다 — 이게 namu-68이 걱정했던 바로 그 지점이다.
+    assert not (_fake_home / ".namu").exists()
+
+
+def test_task_log_line_is_appended(tmp_path, _fake_home):
+    _make_task()
+    written = rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        summary="1단계를 끝냈다", status="단계", reason="시험이 통과했다",
+        body="생략", ctx=_ctx("alice"),
+    )
+    log = (
+        tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo" / "log.md"
+    ).read_text(encoding="utf-8")
+    assert "[단계]" in log and "1단계를 끝냈다" in log
+    assert "    왜: 시험이 통과했다" in log, "3층(왜) 줄이 들여쓰기로 붙지 않았다"
+    assert "상세: 생략" not in log, "'생략'은 줄을 만들지 않아야 한다"
+    assert "1단계를 끝냈다" in written
+
+
+def test_recall_returns_open_tasks(_fake_home):
+    _make_task()
+    result = rs.namu_recall(ctx=_ctx("alice"))
+    slugs = [t["slug"] for t in result["tasks"]]
+    assert slugs == ["namu-99-demo"]
+    assert result["tasks"][0]["next"] == "다음에 시작할 지점"
+    assert result["tasks"][0]["project"] == "namu-agent"
+
+
+def test_search_tasks_bowl_finds_log_line(_fake_home):
+    _make_task()
+    rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        summary="검색으로 찾을 줄", status="기록", reason="생략", body="생략",
+        ctx=_ctx("alice"),
+    )
+    result = rs.namu_search(query="검색으로", bowl="tasks", ctx=_ctx("alice"))
+    assert result["bowl"] == "tasks"
+    assert result["count"] == 1
+    assert result["results"][0]["task_slug"] == "namu-99-demo"
+
+
+def test_closed_task_drops_out_of_open_list(_fake_home):
+    _make_task()
+    rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        summary="다 끝냈다", status="완료", reason="생략", body="생략",
+        ctx=_ctx("alice"),
+    )
+    assert rs.namu_recall(ctx=_ctx("alice"))["tasks"] == []
+
+
+def test_tasks_are_isolated_between_users(tmp_path, _fake_home):
+    _make_task(user="alice")
+    assert rs.namu_recall(ctx=_ctx("bob"))["tasks"] == []
+    # 조회(검색)로도 남의 기록이 새지 않는다 — 브리핑만 막고 검색이 열려 있으면
+    # 격리가 아니다.
+    assert rs.namu_search(bowl="tasks", ctx=_ctx("bob"))["count"] == 0
+    assert rs.namu_search(bowl="tasks", ctx=_ctx("alice"))["count"] >= 1
+    assert not (tmp_path / "users" / "bob" / "tasks").exists()
+
+
+def test_search_tasks_project_filter(_fake_home):
+    _make_task(project="namu-agent", slug="alpha-one")
+    _make_task(project="onnamu-project", slug="beta-one")
+    merged = rs.namu_search(bowl="tasks", ctx=_ctx("alice"))
+    only = rs.namu_search(bowl="tasks", project="onnamu-project", ctx=_ctx("alice"))
+    assert {r["project"] for r in merged["results"]} == {"namu-agent", "onnamu-project"}
+    assert {r["project"] for r in only["results"]} == {"onnamu-project"}
+
+
+def test_task_record_requires_project(_fake_home):
+    """웹에는 '지금 이 폴더'가 없다 — 프로젝트를 안 주면 어디에 쓸지 정할 수 없다."""
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
-            bowl="tasks", topic="namu-68", summary="한 줄", reason="생략",
-            body="생략", ctx=_ctx("alice"),
+            bowl="tasks", topic="namu-99-demo", summary="한 줄",
+            reason="생략", body="생략", ctx=_ctx("alice"),
         )
-    assert "작업일지" in str(exc.value)
-    # 서버 공용 폴더에 아무것도 만들지 않았어야 한다.
-    assert not (fake_home / ".namu").exists()
+    assert "project" in str(exc.value)
+
+
+def test_project_name_cannot_escape_user_folder(tmp_path, _fake_home):
+    """프로젝트 이름은 회원이 보내는 값이 곧 폴더 이름이 된다 — 경로 이탈 차단."""
+    with pytest.raises(ValueError) as exc:
+        _make_task(project="../../bob")
+    assert "project" in str(exc.value)
+    assert not (tmp_path / "users" / "bob").exists()
+    assert not (tmp_path / "bob").exists()
+
+
+def test_closing_synonym_is_rejected(_fake_home):
+    """'종료'는 닫는 말이 아니다 — 저장은 되는데 목록에는 계속 열려 있게 된다."""
+    _make_task()
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            bowl="tasks", project="namu-agent", topic="namu-99-demo",
+            summary="끝냈다", status="종료", reason="생략", body="생략",
+            ctx=_ctx("alice"),
+        )
+    assert "완료" in str(exc.value) and "중단" in str(exc.value)
+
+
+def test_closing_with_unmet_done_when_warns(_fake_home):
+    _make_task(done_when=["실측 한 바퀴", "배포"])
+    written = rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        summary="여기서 접는다", status="중단", reason="생략", body="생략",
+        ctx=_ctx("alice"),
+    )
+    assert "안 채운 완료조건 2개" in written
+    assert "실측 한 바퀴" in written
+
+
+def test_task_name_prefix_match(_fake_home):
+    """작업 이름 앞부분만 줘도 찾는다(개인용과 같은 규칙)."""
+    _make_task()
+    written = rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99",
+        summary="앞부분만 줬다", status="기록", reason="생략", body="생략",
+        ctx=_ctx("alice"),
+    )
+    assert "앞부분만 줬다" in written
+
+
+def test_unknown_task_is_not_created_silently(tmp_path, _fake_home):
+    """없는 이름으로 부르면 폴더를 새로 만들지 않는다 — 목적 없는 유령 작업 방지."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            bowl="tasks", project="namu-agent", topic="없는작업",
+            summary="한 줄", status="기록", reason="생략", body="생략",
+            ctx=_ctx("alice"),
+        )
+    assert "찾을 수 없습니다" in str(exc.value)
+    assert not (tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "없는작업").exists()
+
+
+def test_task_create_refuses_to_overwrite(_fake_home):
+    _make_task()
+    with pytest.raises(ValueError) as exc:
+        _make_task()
+    assert "이미 있습니다" in str(exc.value)
+
+
+def test_task_record_pushes_to_user_repo(monkeypatch, _fake_home):
+    """작업일지도 다른 그릇과 똑같이 기록 직후 회원 저장소로 올라가야 한다."""
+    calls = []
+    monkeypatch.setattr(
+        ur, "push", lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: calls.append(key)
+    )
+    _make_task()
+    assert calls == ["alice"]
+
+
+def test_search_rejects_project_on_learnings_bowl(_fake_home):
+    """조용히 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을 낸다."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_search(query="아무거나", project="namu-agent", ctx=_ctx("alice"))
+    assert "tasks 전용" in str(exc.value)
 
 
 def test_old_field_names_still_work_and_say_where_they_went(tmp_path):

@@ -11,11 +11,14 @@
 그대로 미러링하되, 전역 경로(cfg.NAMU_DB_PATH 등) 하드코딩 대신 매 호출마다
 `paths=cfg.data_paths_for(user_root)`를 코어에 넘긴다.
 
-그릇(bowl)은 네 개 중 셋만 받는다 — 교훈(learnings)·개인 사실(profile)·쪽지
-(memo)는 전부 DataPaths로 사용자별로 갈리지만, 작업일지(tasks)는 코어가
-`Path.home()/".namu"/tasks`에 쓰므로 요청별로 갈아끼울 자리가 없다. 그래서
-tasks는 명시적으로 거절한다(`_TASKS_BOWL_ERROR`) — 허용하면 모든 사용자의 작업
-기록이 서버 공용 폴더 한 곳에 섞인다(namu-68).
+그릇(bowl)은 네 개 다 받는다. 교훈(learnings)·개인 사실(profile)·쪽지(memo)는
+DataPaths로 갈리고, 작업일지(tasks)는 파일이 아니라 폴더 구조라 DataPaths에
+자리가 없으므로 회원 폴더의 `tasks/<프로젝트>/<작업>/`에 직접 읽고 쓴다.
+
+namu-68은 tasks를 거절했었다 — 근거는 "코어가 `Path.home()/.namu/tasks`에 쓰므로
+갈아끼울 자리가 없다"였는데, 그건 코어의 한 함수(`task_resolve.tasks_root_for`)에만
+해당하는 사실이었고 이 서버는 그 함수를 쓸 이유가 없었다. 나머지 코어 함수는 전부
+폴더를 인자로 받는다. 자세한 경위는 아래 "작업일지" 절 주석에 있다.
 
 보안 경계(멀티테넌트 격리의 핵심)는 `_resolve_user`/`_validate_user_key`/
 `_paths_for_user` 세 함수에 있다 — 키가 없거나 안전하지 않으면(경로 이탈 문자
@@ -58,6 +61,7 @@ import identity  # noqa: E402
 import memo  # noqa: E402
 import profile  # noqa: E402
 import record_input  # noqa: E402
+import task_resolve  # noqa: E402
 import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
@@ -399,6 +403,7 @@ def namu_recall(
     query: str | None = None,
     task_type: str | None = None,
     limit: int = 5,
+    project: str | None = None,
     ctx: Context | None = None,
 ):
     """Load relevant past memory for the requesting user (multi-tenant routing).
@@ -407,15 +412,22 @@ def namu_recall(
     (append `?user=<your-key>` to the MCP URL), scoped strictly to this user's
     own memory (STORE_ROOT/users/<key>/).
 
+    ALSO call this whenever the user asks "what's left to do" / "let's
+    continue" / "where were we" — there is no session hook on the web, so the
+    "tasks" field IS the briefing: every currently-open task with its exact
+    re-entry point.
+
     Args:
       query: topic keywords (optional; omit to get the most recent learnings)
       task_type: filter by code/doc/analysis/other (optional; learnings only)
       limit: max learnings entries (default 5)
+      project: which project's open tasks to include (folder name, e.g.
+        'namu-agent'). Omit for all projects merged.
     Returns: {"memo": [...every sticky note currently up, oldest first...],
-      "profile": [...active facts...], "learnings": [...lesson/note dicts...]}.
-      The personal NAMU server also returns a "tasks" bowl (open task
-      briefing); this cloud address does not — task logs live per-machine on
-      the user's own computer, never on the server (see `_TASKS_BOWL_ERROR`).
+      "profile": [...active facts...], "learnings": [...lesson/note dicts...],
+      "tasks": [...every OPEN task, bookmarked first then most-recent-activity
+      first: {"project", "slug", "title", "last_ts", "next", "why",
+      "pin_machine", "pin_ts"}, where `next` is the full re-entry point...]}.
     Raises: ValueError if this user has not logged in and connected a GitHub
       repository yet (onboarding incomplete) — the message explains where to
       go, in Korean and English.
@@ -433,71 +445,537 @@ def namu_recall(
             "memo": memo.load_all(paths),
             "profile": profile.active(paths=paths),
             "learnings": db.recall(conn, query, task_type, limit),
+            "tasks": _open_tasks_for_user(key, project),
         }
 
 
 @mcp.tool()
 def namu_search(
-    query: str,
+    query: str | None = None,
+    bowl: str = "learnings",
+    project: str | None = None,
+    task: str | None = None,
+    machine: str | None = None,
+    via: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     outcome_filter: str | None = None,
     limit: int = 10,
     ctx: Context | None = None,
 ):
-    """Search this user's accumulated learnings for patterns (exact match,
-    no recency fallback). Routed via the `user` URL query param, same as
+    """Search this user's accumulated memory (exact match, no recency
+    fallback). Routed via the `user` URL query param, same as
     namu_recall/namu_record.
 
+    Two bowls are searchable here:
+      - 'learnings' (default): past lessons/notes.
+      - 'tasks': the scrollback of task log lines across every task — use this
+        for "what did I do yesterday", "what happened on this task", etc.
+        `project` narrows it to one project folder; omit for all merged.
+
+    `query` is optional — omit it to filter by axes alone (e.g. bowl='tasks',
+    machine='hp', since='2026-07-24').
+
     Args:
-      query: search terms
-      outcome_filter: 'success'/'failure'/'partial' to narrow returned rows (optional)
+      query: search terms (optional)
+      bowl: 'learnings' (default) | 'tasks'
+      project: project folder name (tasks only; omit for all merged)
+      task: task name, substring match (tasks only)
+      machine: which computer wrote the line, exact match (tasks only)
+      via: which AI wrote it, exact match (tasks only)
+      since/until: date or datetime bounds, inclusive (tasks only)
+      outcome_filter: 'success'/'failure'/'partial' (learnings only)
       limit: max returned rows (default 10)
-    Returns: {"results": [...dicts...], "summary": {"success": N, "failure": M, "partial": K}}
+    Returns: learnings → {"results": [...], "summary": {...}}; tasks →
+      {"bowl": "tasks", "results": [...{"ts","project","task_slug","tag",
+      "machine","via","text","detail"}...], "count": N}
     Raises: ValueError if this user has not logged in and connected a GitHub
       repository yet (onboarding incomplete) — the message explains where to
       go, in Korean and English.
     """
     key = _resolve_user(ctx)
     _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
+    if bowl not in ("learnings", "tasks"):
+        raise ValueError(
+            f"bowl은 'learnings' 또는 'tasks'여야 합니다: {bowl!r} — 개인 사실"
+            "(profile)과 쪽지(memo)는 namu_recall이 통째로 돌려줍니다"
+        )
+    if bowl != "tasks" and project is not None:
+        # 조용히 무시하지 않는다 — 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을
+        # 낸다(개인용 db.search_bowl과 같은 태도).
+        raise ValueError(f"project는 tasks 전용 축입니다 (bowl={bowl!r}에는 쓸 수 없습니다)")
+
     with closing(identity.connect()) as conn:
         _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
+
+    if bowl == "tasks":
+        entries = _task_journal_for_user(
+            key, project=project, since=since, until=until,
+            machine=machine, task=task, via=via,
+        )
+        if query:
+            q = query.lower()
+            # 거른 **뒤에** 자른다 — 먼저 자르면 걸러질 결과가 사라진다.
+            entries = [
+                e for e in entries
+                if q in (e["text"] or "").lower()
+                or q in (e["detail"] or "").lower()
+                or q in (e["tag"] or "").lower()
+                or q in e["task_slug"].lower()
+            ]
+        entries = entries[:limit]
+        return {"bowl": "tasks", "results": entries, "count": len(entries)}
+
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
-        return db.search(conn, query, outcome_filter, limit)
+        return db.search(
+            conn, query, outcome_filter, limit,
+            machine=machine, via=via, task=task, since=since, until=until,
+        )
 
 
-# 클라우드가 받지 않는 그릇 — 작업일지(tasks)뿐이다(namu-68).
+# ---------------------------------------------------------------------------
+# 작업일지(tasks) — 회원 저장소 사본 안의 `tasks/<프로젝트>/<작업>/`
+# ---------------------------------------------------------------------------
+# namu-68은 이 그릇을 거절했다. 근거로 적혀 있던 것은 "코어의 tasks 저장 위치가
+# `Path.home()/.namu/tasks`라서 요청별로 갈아끼울 자리가 없다"였는데, 그건 코어의
+# **한 함수**(`task_resolve.tasks_root_for`)에만 해당하는 사실이었다. 이 서버는 그
+# 함수를 쓸 이유가 없다 — 회원 폴더에서 뿌리를 직접 만들면 되고, 열람 화면
+# (`web_auth._task_project_dirs`)이 이미 그렇게 읽고 있었다.
 #
-# 이유는 "아직 안 만들었다"가 아니라 **격리 위반**이다: 코어의 tasks 저장 위치는
-# `task_resolve.tasks_root_for()` = `Path.home()/".namu"/tasks/<프로젝트>`로, 데이터
-# 루트(DataPaths)와 무관하게 정해진다. 즉 요청별로 갈아끼울 수 있는 자리가 아니라
-# 컨테이너 홈 한 곳이며, 여기서 허용하면 **모든 사용자의 작업 기록이 서버 공용
-# 폴더 한 곳에 섞인다.** 그래서 조용히 다른 그릇으로 보내지도, 조용히 버리지도
-# 않고 명시적으로 거절한다(record_input의 설계 원칙 4와 같은 태도).
-_CLOUD_UNSUPPORTED_BOWLS = ("tasks",)
+# 나머지 코어 함수는 전부 **폴더를 인자로 받으므로** 그대로 재사용한다
+# (find_open_tasks·task_title·next_note·pins_by_slug·_latest_log_ts·_parse_log_line
+# ·_display_text). 줄 형식·시각 해석·닫힘 판정을 여기에 베껴 오면 같은 log.md를
+# 개인용과 클라우드가 서로 다르게 읽게 된다.
+#
+# 반대로 **쓰는 쪽**(줄 조립·task.md 서식·검증)은 개인용 mcp_server.py 안에만 있어
+# 재사용할 수 없다(그 파일은 불러오는 순간 컨테이너 홈에 개인용 데이터를 만든다 —
+# 56·57행이 모듈 수준에서 실행된다). 이 파일이 3도구를 통째로 미러한 것과 같은
+# 이유·같은 방식으로 여기서도 미러한다.
 
-_TASKS_BOWL_ERROR = (
-    "작업일지(tasks) 그릇은 이 클라우드 주소로는 쓸 수 없습니다 — 작업 기록은 "
-    "회원님 PC의 나무(플러그인)에서만 남길 수 있습니다. 여기서는 교훈(learnings)·"
-    "개인 사실(profile)·쪽지(memo) 세 그릇을 쓰세요.  |  The 'tasks' bowl is not "
-    "available over the cloud MCP address (task logs are per-machine and stay on "
-    "your own computer). Use 'learnings', 'profile' or 'memo' here."
+# 프로젝트 이름은 회원이 보내는 값이 곧 폴더 이름이 된다 — `..`·`/` 같은 경로
+# 문자를 허용하면 남의 서랍으로 걸어 나갈 수 있다. `_validate_user_key`와 같은
+# 태도로 처음부터 좁게 막는다(개인용은 cwd에서 뽑으므로 이 위험이 없다).
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+_PROJECT_NAME_ERROR = (
+    "project(프로젝트 이름) 형식이 올바르지 않습니다 — 영숫자로 시작하고 "
+    "영숫자·점·하이픈·밑줄만 쓸 수 있습니다(경로 문자 금지). 예: 'namu-agent'"
+    "  |  Invalid 'project': letters/digits/dot/dash/underscore only."
+)
+
+
+def _validate_project_name(project: str) -> str:
+    name = (project or "").strip()
+    if not _PROJECT_NAME_RE.match(name) or ".." in name:
+        raise ValueError(_PROJECT_NAME_ERROR)
+    return name
+
+
+def _tasks_root_for(user_key: str, project: str) -> Path:
+    """그 회원의 `tasks/<프로젝트>` 폴더 (개인용 `tasks_root_for`의 회원별 판)."""
+    return user_repo.user_dir(user_key) / "tasks" / _validate_project_name(project)
+
+
+def _open_tasks_for_user(user_key: str, project: "str | None") -> list:
+    """열린 작업 브리핑 — 개인용 `task_resolve.open_tasks_briefing()`과 같은 모양·
+    같은 순서(책갈피 먼저, 그다음 최근 활동순)로 돌려준다.
+
+    계산 자체는 `web_auth._open_task_rows`가 이미 하고 있다(열람 화면이 쓰는 것과
+    글자 하나까지 같은 목록이어야 한다 — 화면과 도구가 다른 목록을 보여주면 어느
+    쪽이 맞는지 사용자가 알 수 없다). 비공개 이름을 부르는 것은 web_auth가 코어의
+    `_latest_log_ts`를 부르는 것과 같은 관례이고, 이름이 사라지면 시험이 먼저
+    실패한다.
+    """
+    rows = web_auth._open_task_rows(user_key)
+    if project is not None:
+        name = _validate_project_name(project)
+        rows = [r for r in rows if r["project"] == name]
+    return rows
+
+
+def _task_journal_for_user(
+    user_key: str,
+    project: "str | None" = None,
+    since: "str | None" = None,
+    until: "str | None" = None,
+    machine: "str | None" = None,
+    task: "str | None" = None,
+    via: "str | None" = None,
+) -> list:
+    """작업일지 통합 조회 — 개인용 `task_resolve.journal()`의 회원별 판.
+
+    코어 함수를 그대로 못 쓰는 곳은 **조회 대상 폴더를 정하는 첫 세 줄뿐**이다
+    (그 함수는 컨테이너 홈을 훑는다). 줄을 해석하고 축으로 거르는 부분은 코어의
+    `_parse_log_line`/`_display_text`/`_task_matches`/`_normalize_bound`를 그대로
+    부른다 — 같은 파일을 개인용과 다르게 읽으면 안 된다.
+    """
+    if project is None:
+        targets = [(d.name, d) for d in _task_project_dirs_for_user(user_key)]
+    else:
+        root = _tasks_root_for(user_key, project)
+        targets = [(root.name, root)]
+
+    since_bound = task_resolve._normalize_bound(since, end=False) if since else None
+    until_bound = task_resolve._normalize_bound(until, end=True) if until else None
+
+    entries: list = []
+    for project_name, tasks_root in targets:
+        try:
+            log_files = list(tasks_root.glob("*/log.md"))
+        except OSError:
+            continue
+
+        for log_path in log_files:
+            task_slug = log_path.parent.name
+            if task is not None and not task_resolve._task_matches(task_slug, task):
+                continue
+            try:
+                lines = log_path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+
+            for index, line in enumerate(lines):
+                parsed = task_resolve._parse_log_line(line)
+                if parsed is None:
+                    continue
+                ts = parsed["ts"]
+                if since_bound is not None and ts < since_bound:
+                    continue
+                if until_bound is not None and ts > until_bound:
+                    continue
+                if machine is not None and parsed["machine"] != machine:
+                    continue
+                if via is not None and parsed["via"] != via:
+                    continue
+                shown, rest = task_resolve._display_text(lines, index, parsed["text"])
+                entries.append({
+                    "ts": ts,
+                    "project": project_name,
+                    "task_slug": task_slug,
+                    "tag": parsed["tag"],
+                    "machine": parsed["machine"],
+                    "via": parsed["via"],
+                    "text": shown,
+                    "detail": rest,
+                })
+
+    entries.sort(key=lambda e: (e["ts"], e["project"], e["task_slug"]), reverse=True)
+    return entries
+
+
+def _task_project_dirs_for_user(user_key: str) -> list:
+    """그 회원 사본의 `tasks/<프로젝트>` 폴더 목록. 한 번도 기록이 없으면 빈 목록."""
+    tasks_root = user_repo.user_dir(user_key) / "tasks"
+    try:
+        return sorted(d for d in tasks_root.iterdir() if d.is_dir())
+    except OSError:
+        return []
+
+
+# ── 쓰기 (개인용 mcp_server.py 미러) ──────────────────────────────────────
+# 작업을 닫는 태그는 이 둘뿐이다(코어 `_log_says_closed`가 보는 것도 이 둘).
+_CLOSING_TAGS = ("완료", "중단")
+
+# "닫는다"는 뜻으로 흔히 쓰이지만 실제로는 닫히지 **않는** 말들(namu-66).
+_CLOSING_SYNONYMS = (
+    "종료", "마무리", "끝", "종결", "완결", "닫음", "닫기", "done", "close", "closed", "finish",
+)
+
+_LOG_INDENT = "    "
+_LOG_REASON_LABEL = "왜: "
+_LOG_BODY_LABEL = "상세: "
+
+_NEW_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _validate_task_tag_text(tag: "str | None", text: "str | None") -> tuple:
+    """tag/text 정리 — 개인용 `mcp_server._validate_task_tag_text` 미러.
+
+    닫는 뜻의 유의어를 거절하는 이유가 핵심이다: 태그는 자유 문자열이라 '종료'라고
+    적어도 저장은 되지만 판정은 '완료'/'중단'만 보므로, 적은 쪽은 닫았다고 믿고
+    목록에는 계속 열려 있게 된다.
+    """
+    tag = "기록" if tag is None else tag.strip()
+    text = (text or "").strip()
+    if not tag:
+        raise ValueError("tag는 빈 값일 수 없습니다")
+    if "]" in tag or "\n" in tag or "\r" in tag:
+        raise ValueError("tag에는 ']'나 개행을 쓸 수 없습니다")
+    if tag.lower() in _CLOSING_SYNONYMS:
+        raise ValueError(
+            f"tag={tag!r}는 작업을 닫지 못합니다 — 닫는 말은 '완료'(다 끝냄)와 "
+            "'중단'(더 안 함) 둘뿐입니다. 정말 닫는 것이면 그 둘 중 하나로 다시 "
+            "적고, 한 단계만 끝난 것이면 '기록'처럼 닫지 않는 말을 쓰세요"
+        )
+    if not text:
+        raise ValueError("text는 필수입니다(빈 값 불가)")
+    return tag, " ".join(text.split())
+
+
+def _validate_new_task_slug(task: "str | None") -> str:
+    """새 작업 이름 검증 — 폴더명으로 안전한 문자만 허용해 경로 조작을 차단한다."""
+    task = (task or "").strip()
+    if not task:
+        raise ValueError("topic(작업 이름)은 필수입니다")
+    if not _NEW_SLUG_RE.match(task):
+        raise ValueError(
+            f"작업 이름 {task!r}가 올바르지 않습니다 — 영문/숫자/하이픈(-)/"
+            "언더스코어(_)만 허용되고 첫 글자는 영문/숫자여야 합니다"
+        )
+    return task
+
+
+def _resolve_task_slug(tasks_root: Path, project: str, task: "str | None") -> str:
+    """작업 이름을 폴더 이름으로 정규화한다(완전일치 우선, 없으면 앞부분 일치).
+
+    없는 이름으로 폴더를 새로 만들지 않는다 — task.md(목적) 없이 log만 생기면
+    나중에 아무도 못 읽는 유령 작업이 된다.
+    """
+    if not task or not task.strip():
+        raise ValueError("topic(작업 이름)은 필수입니다")
+    task = task.strip()
+
+    try:
+        candidates = sorted(d.name for d in tasks_root.iterdir() if d.is_dir())
+    except OSError:
+        candidates = []
+
+    if task in candidates:
+        return task
+
+    prefix = [c for c in candidates if c.startswith(f"{task}-")]
+    if len(prefix) == 1:
+        return prefix[0]
+
+    open_slugs = [d.name for d in task_resolve.find_open_tasks(tasks_root)]
+    hint = f" (열린 작업: {', '.join(open_slugs)})" if open_slugs else " (열린 작업 없음)"
+    if not prefix:
+        raise ValueError(
+            f"프로젝트 {project!r}에서 작업 {task!r}를 찾을 수 없습니다{hint}"
+            " — 새로 만들려면 create=True와 reason(목적)을 함께 주세요"
+        )
+    raise ValueError(
+        f"작업 {task!r}가 여러 후보와 일치합니다: {', '.join(prefix)}{hint} — "
+        "더 구체적으로 지정하세요"
+    )
+
+
+def _append_task_log_line(task_dir: Path, line: str) -> None:
+    """log.md에 한 줄 append. 파일이 개행으로 끝나지 않으면 먼저 개행을 넣는다."""
+    log_path = task_dir / "log.md"
+    needs_leading_nl = False
+    if log_path.exists():
+        with log_path.open("rb") as f:
+            f.seek(0, 2)
+            if f.tell() > 0:
+                f.seek(-1, 2)
+                needs_leading_nl = f.read(1) != b"\n"
+    with log_path.open("a", encoding="utf-8") as f:
+        if needs_leading_nl:
+            f.write("\n")
+        f.write(line + "\n")
+
+
+def _log_block(head: str, reason: "str | None", body: "str | None") -> str:
+    """머리줄 + (왜/상세) 이어지는 줄을 한 덩어리로 만든다(namu-65 3층).
+
+    '생략' 한 단어는 줄 자체를 만들지 않는다 — 화면에서 감추기로 한 값을 파일에
+    남기면 브리핑이 '왜: 생략'이라는 빈 소리를 하게 된다.
+    """
+    lines = [head]
+    for label, value in ((_LOG_REASON_LABEL, reason), (_LOG_BODY_LABEL, body)):
+        value = " ".join((value or "").split())
+        if not value or cfg.is_omitted(value):
+            continue
+        lines.append(f"{_LOG_INDENT}{label}{value}")
+    return "\n".join(lines)
+
+
+def _unmet_done_when_warning(task_dir: Path, tag: str) -> str:
+    """닫는 줄인데 task.md에 안 채운 완료조건이 남아 있으면 붙일 경고(namu-66).
+
+    막지 않고 경고만 하는 이유: 이관·범위 축소로 닫는 것은 정당하고 실제로 자주
+    있다. 다만 "무엇을 안 하고 닫는지"가 기록에 드러나야 한다.
+    """
+    if tag not in _CLOSING_TAGS:
+        return ""
+    try:
+        lines = (task_dir / "task.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    unmet = [ln.strip()[5:].strip() for ln in lines if ln.strip().startswith("- [ ]")]
+    unmet = [u for u in unmet if u and u != "..."]
+    if not unmet:
+        return ""
+    listed = "\n".join(f"  · {u}" for u in unmet[:5])
+    more = f"\n  · … 외 {len(unmet) - 5}개" if len(unmet) > 5 else ""
+    return (
+        f"\n⚠ 안 채운 완료조건 {len(unmet)}개가 남은 채로 [{tag}] 했습니다:\n"
+        f"{listed}{more}\n"
+        "  정말 충족했다면 task.md의 네모칸을 채우고, 안 하고 닫는 것이라면 "
+        "왜 안 하는지를 이 줄에 남기세요(이관·범위 축소는 정당한 종결 사유입니다)."
+    )
+
+
+def _record_task_entry(
+    user_key: str,
+    project: "str | None",
+    task: "str | None",
+    text: "str | None",
+    tag: "str | None",
+    via: "str | None",
+    reason: "str | None" = None,
+    body: "str | None" = None,
+) -> str:
+    """작업일지 한 줄(또는 세 줄 묶음)을 append하고 적힌 그대로 돌려준다."""
+    if project is None:
+        raise ValueError(_TASKS_PROJECT_REQUIRED)
+    tasks_root = _tasks_root_for(user_key, project)
+    slug = _resolve_task_slug(tasks_root, project, task)
+    tag, text = _validate_task_tag_text(tag, text)
+
+    # 시각은 기준 시간대로 통일한 시계를 쓴다(cfg.now) — 컨테이너 호스트는 UTC라
+    # 현지시각 그대로 적으면 같은 파일 안에서 PC가 남긴 줄과 선후가 뒤집힌다.
+    ts = cfg.now().strftime("%Y-%m-%d %H:%M:%S")
+    machine = cfg.NAMU_MACHINE
+    line = f"[{tag}] {ts} {machine} · {text}"
+    if via:
+        line += f" (via {via})"
+    block = _log_block(line, reason, body)
+
+    task_dir = tasks_root / slug
+    _append_task_log_line(task_dir, block)
+    if tag in _CLOSING_TAGS:
+        # 닫는 줄이면 이 기기 이름으로 꽂힌 책갈피도 같이 뺀다(namu-70).
+        task_resolve.clear_pin_if_points_to(tasks_root, machine, slug)
+    return block + _unmet_done_when_warning(task_dir, tag)
+
+
+def _create_task_entry(
+    user_key: str,
+    project: "str | None",
+    task: "str | None",
+    title: "str | None",
+    purpose: "str | None",
+    done_when: "list[str] | None",
+    text: "str | None",
+    tag: "str | None",
+    via: "str | None",
+) -> str:
+    """새 작업 폴더(task.md + log.md)를 만들고 `[시작]` 줄을 append한다."""
+    if project is None:
+        raise ValueError(_TASKS_PROJECT_REQUIRED)
+    tasks_root = _tasks_root_for(user_key, project)
+    slug = _validate_new_task_slug(task)
+
+    purpose = (purpose or "").strip()
+    if not purpose:
+        raise ValueError(
+            "새 작업에는 reason(목적)이 필수입니다 — 목적 없는 작업은 나중에 "
+            "아무도 못 읽습니다"
+        )
+
+    # 폴더를 만들기 전에 검증한다 — 뒤에서 터지면 목적만 적힌 껍데기가 남는다.
+    if (text or "").strip():
+        follow_tag, follow_text = _validate_task_tag_text(tag, text)
+    else:
+        if (tag or "").strip():
+            raise ValueError(
+                f"tag={tag!r}만 주고 남길 내용이 비었습니다 — 둘을 함께 주세요"
+            )
+        follow_tag = follow_text = None
+
+    task_dir = tasks_root / slug
+    if task_dir.exists():
+        raise ValueError(
+            f"작업 {slug!r}는 프로젝트 {tasks_root.name!r}에 이미 있습니다 — 덮어쓸 "
+            "수 없습니다(task.md는 불변 목적, log.md는 append-only). 기존 작업에 "
+            "기록하려면 create 없이 부르세요"
+        )
+
+    # 호출자가 제목에 작업 이름을 이미 넣어 넘기는 일이 잦다 — 그대로 두면 머리줄이
+    # `# <이름> — <이름> — 설명`이 되고 task.md는 불변이라 사후 수정도 못 한다.
+    display_title = task_resolve.strip_slug_prefix((title or slug).strip() or slug, slug)
+    if len(display_title) > task_resolve.TITLE_LINE_LIMIT:
+        raise ValueError(
+            f"제목이 너무 깁니다({len(display_title)}자 > "
+            f"{task_resolve.TITLE_LINE_LIMIT}자) — 제목은 목록 한 줄에 실리는 "
+            "'이름'입니다. 짧은 이름만 남기고 설명은 reason(목적)으로 옮기세요. "
+            f"받은 제목: {display_title!r}"
+        )
+
+    machine = cfg.NAMU_MACHINE
+    today = cfg.now().strftime("%Y-%m-%d")
+    done_when_lines = (
+        "\n".join(f"- [ ] {item}" for item in done_when) if done_when else "- [ ] ..."
+    )
+
+    task_md = (
+        f"# {slug} — {display_title}\n"
+        f"📅 생성 {today} [{machine}] · 🔗 관련: __\n"
+        "\n"
+        "## 목적\n"
+        f"{purpose}\n"
+        "\n"
+        "## 완료조건\n"
+        f"{done_when_lines}\n"
+    )
+    log_md = f"# log — {slug}\n(append만. 이 파일이 이 task의 권위 있는 기록이다)\n\n"
+
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.md").write_text(task_md, encoding="utf-8")
+    (task_dir / "log.md").write_text(log_md, encoding="utf-8")
+
+    ts = cfg.now().strftime("%Y-%m-%d %H:%M:%S")
+    start_line = f"[시작] {ts} {machine} · 작업 생성, 목적·완료조건 확정"
+    if via:
+        start_line += f" (via {via})"
+    _append_task_log_line(task_dir, start_line)
+
+    summary = f"작업을 만들었습니다: {tasks_root.name}/{slug}\n{start_line}"
+
+    if follow_text:
+        follow_line = f"[{follow_tag}] {ts} {machine} · {follow_text}"
+        if via:
+            follow_line += f" (via {via})"
+        _append_task_log_line(task_dir, follow_line)
+        summary += f"\n{follow_line}"
+    else:
+        summary += (
+            "\n⚠ 이어갈 지점([다음] 줄)이 비어 있습니다 — 브리핑에 "
+            '"다음: (기록 없음)"으로 뜨고, 다음 세션은 어디서 시작할지 모릅니다. '
+            f"지금 바로 namu_record(bowl='tasks', project={tasks_root.name!r}, "
+            f"topic={slug!r}, status='다음', summary='<다음에 시작할 지점>')을 한 번 "
+            "더 부르세요(만들 때 함께 주면 한 번에 들어갑니다)."
+        )
+
+    return summary
+
+
+# 웹에는 "지금 이 폴더"라는 것이 없다 — 개인용은 cwd에서 프로젝트를 뽑지만
+# 여기서는 뽑을 자리가 없으므로 명시를 요구한다(개인용의 웹 경로와 같은 규칙).
+_TASKS_PROJECT_REQUIRED = (
+    "작업일지 기록에는 project(프로젝트 이름)를 명시해야 합니다 — 이 주소에는 "
+    "'지금 이 폴더'라는 것이 없습니다. 예: project='namu-agent'  |  Recording to "
+    "the 'tasks' bowl requires an explicit 'project' here (no cwd on the web)."
 )
 
 # 도구 설명문은 손으로 쓰지 않고 코어의 표(config.FIELDS)에서 만든 것을 그대로
 # 붙인다(namu-65의 규칙 — 설명문을 두 곳에 적으면 갈라지고, 갈라진 설명을 읽은 AI가
 # 잘못된 그릇에 담는 것이 그 작업의 발단이었다). 클라우드에만 해당하는 사실(라우팅
-# 키·못 쓰는 그릇·반환 모양)만 앞뒤에 덧붙인다.
+# 키·프로젝트 명시·반환 모양)만 앞뒤에 덧붙인다.
 _RECORD_TOOL_DESCRIPTION = (
     record_input.tool_description()
     + "\n\n"
     "── 이 클라우드 주소에서만 다른 점 ──\n"
     "- 기록은 요청 URL의 `?user=<키>`가 가리키는 **회원님 전용 저장소**에 남는다.\n"
-    "- 작업일지(tasks) 그릇은 쓸 수 없다(그 기록은 PC별로 남는 것이라 클라우드에 "
-    "두지 않는다). 교훈·개인 사실·쪽지 세 그릇만 쓴다.\n"
-    "- 반환은 보통 새 기록의 id(문자열) 하나다. 알릴 것이 있을 때만 "
-    "{\"id\": …, \"notices\": [...], \"warning\": …} 형태의 dict가 되므로, "
-    "`isinstance(result, dict)`로 두 모양을 가른다."
+    "- 작업일지(tasks) 그릇은 `project`(프로젝트 이름)를 반드시 함께 줘야 한다 — "
+    "이 주소에는 '지금 이 폴더'라는 것이 없다.\n"
+    "- 반환은 보통 새 기록의 id(문자열) 하나이고, 작업일지는 실제로 적힌 줄이다. "
+    "알릴 것이 있을 때만 {\"id\": …, \"notices\": [...], \"warning\": …} 형태의 "
+    "dict가 되므로, `isinstance(result, dict)`로 두 모양을 가른다."
 )
 
 
@@ -512,8 +990,11 @@ def namu_record(
     status: str | None = None,
     category: str | None = None,
     tags: "list[str] | None" = None,
+    project: str | None = None,
     confidence: str | None = None,
     supersedes: str | None = None,
+    create: bool = False,
+    done_when: "list[str] | None" = None,
     # ── 옛 이름 (그대로 불러도 새 칸으로 옮겨 저장하고 어디로 옮겼는지 알린다)
     task: str | None = None,
     outcome: str | None = None,
@@ -525,6 +1006,8 @@ def namu_record(
     source: str | None = None,
     text: str | None = None,
     tag: str | None = None,
+    title: str | None = None,
+    purpose: str | None = None,
     ctx: Context | None = None,
 ):
     """Record one memory into this user's own bowl (append-only), routed via
@@ -540,10 +1023,11 @@ def namu_record(
         그 그릇이 받지 않는 칸/빈 필수 칸/정해진 값 밖의 값을 거절한다. 저장소
         동기화(clone/pull)보다 **먼저** 부른다 — 어차피 거절될 호출 때문에 사용자
         저장소를 내려받는 것은 낭비이고, 입력 검증은 부작용이 없다.
-    (2) 작업일지(tasks) 그릇은 여기서 명시적으로 거절한다(`_TASKS_BOWL_ERROR`).
-    (3) 그릇별 저장 계층으로 넘기되, 전역 경로 대신 **그 사용자 전용 paths**를
+    (2) 그릇별 저장 계층으로 넘기되, 전역 경로 대신 **그 사용자 전용 paths**를
         넘긴다(교훈=db.record, 개인 사실=profile.record_fact, 쪽지=memo.add).
-    (4) 로컬 기록이 끝난 뒤에만 push를 시도한다(namu-58 4차 결정 3).
+        작업일지(tasks)만 paths가 아니라 회원 폴더의 `tasks/<프로젝트>`에 직접
+        쓴다(그 그릇은 파일이 아니라 폴더 구조라 DataPaths에 자리가 없다).
+    (3) 로컬 기록이 끝난 뒤에만 push를 시도한다(namu-58 4차 결정 3).
 
     Returns: 평소에는 새 기록의 id(str) — 이 흔한 경로의 모양은 종전 그대로다
       (반환값을 그대로 다음 호출의 `supersedes=`에 넣는 호출자가 계속 동작한다).
@@ -554,8 +1038,8 @@ def namu_record(
         - `warning`: 로컬 기록은 성공했지만 GitHub push가 실패했을 때(다음 기록 때
           함께 재시도되므로 기억이 유실되지는 않는다).
       두 모양은 `isinstance(result, dict)`로 가른다.
-    Raises: ValueError — 입력이 규칙에 어긋날 때(그릇 미지정 등), 작업일지 그릇을
-      요청했을 때, 또는 아직 로그인·저장소 연결을 마치지 않은 사용자일 때(안내
+    Raises: ValueError — 입력이 규칙에 어긋날 때(그릇 미지정, 작업일지에 project
+      누락 등), 또는 아직 로그인·저장소 연결을 마치지 않은 사용자일 때(안내
       메시지가 한국어+영어로 어디로 가야 하는지 알려준다). push 실패는 raise하지
       않는다 — 위 `warning` 참고.
     """
@@ -565,13 +1049,13 @@ def namu_record(
     parsed = record_input.normalize({
         "bowl": bowl, "summary": summary, "reason": reason, "body": body,
         "topic": topic, "status": status, "category": category, "tags": tags,
-        "confidence": confidence, "supersedes": supersedes,
+        "project": project, "confidence": confidence, "supersedes": supersedes,
+        "create": create, "done_when": done_when,
         "task": task, "outcome": outcome, "task_type": task_type,
         "verified_by": verified_by, "kind": kind, "subject": subject,
         "statement": statement, "source": source, "text": text, "tag": tag,
+        "title": title, "purpose": purpose,
     })
-    if parsed.bowl in _CLOUD_UNSUPPORTED_BOWLS:
-        raise ValueError(_TASKS_BOWL_ERROR)
 
     v = parsed.values
     v_summary = v.get("summary")
@@ -584,6 +1068,33 @@ def namu_record(
         _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
         paths = _paths_for_user(key)
         _ensure_fresh(paths)
+        if parsed.bowl == "tasks":
+            # 작업일지만 반환이 id가 아니라 **실제로 적힌 줄**이다(개인용과 같다) —
+            # 부른 쪽이 무엇이 어떻게 적혔는지 그대로 확인할 수 있어야 한다.
+            if v.get("create"):
+                # 새 작업에서 body는 "다음 세션이 시작할 지점"이다(namu-62 ③).
+                # '생략'이면 줄을 만들지 않고 기존 경고가 그대로 뜨게 둔다.
+                start_point = None if cfg.is_omitted(v_body) else v_body
+                entry_id = _create_task_entry(
+                    key, v.get("project"), v_topic, v_summary, v_reason,
+                    v.get("done_when"), start_point,
+                    (v.get("status") or "다음") if start_point else None, via,
+                )
+            else:
+                entry_id = _record_task_entry(
+                    key, v.get("project"), v_topic, v_summary, v.get("status"), via,
+                    reason=v_reason, body=v_body,
+                )
+            warning = _push_and_collect_warning(conn, key)
+            if warning or parsed.notices:
+                result: dict = {"id": entry_id}
+                if parsed.notices:
+                    result["notices"] = parsed.notices
+                if warning:
+                    result["warning"] = warning
+                return result
+            return entry_id
+
         if parsed.bowl == "learnings":
             # kind는 없앤 칸이다 — status(성패)가 있으면 교훈, 없으면 단순 기록으로
             # 본다(개인용 mcp_server와 같은 판정).
