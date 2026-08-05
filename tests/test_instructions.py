@@ -47,3 +47,28 @@ def test_instructions_say_why_the_other_tools_are_missing():
     assert "플러그인으로 설치했을 때만" in text
     for missing in ("namu_memo_remove", "namu_task_pin", "namu_task_unpin"):
         assert missing in text
+
+
+# ---------------------------------------------------------------------------
+# 셀프호스팅과의 기능 동등성 (2026-08-05)
+#
+# 원칙: 셀프호스팅(내 서버에 나무 MCP를 띄운 것)에서 되는 일이 나무 클라우드에서
+# 안 되면 안 된다. 실제로 어긋나 있었다 — 코어는 네 종류(교훈·작업일지·개인
+# 사실·쪽지)를 다 검색할 수 있는데, 이 서버가 코어를 부르기 **전에** 두 종류만
+# 받겠다고 손으로 적어 둔 검사가 있었다. 아래 시험이 그 재발을 막는다.
+# ---------------------------------------------------------------------------
+import config as cfg
+
+
+def test_search_accepts_every_bowl_the_core_knows():
+    import inspect
+    import routing_server as rs_
+    src = inspect.getsource(rs_.namu_search)
+    # 허용 목록을 손으로 적으면 코어가 늘어날 때 또 갈라진다.
+    assert "cfg.BOWL_NAMES" in src, "허용 그릇을 코어에서 가져오지 않고 손으로 적었다"
+    assert '("learnings", "tasks")' not in src
+
+
+def test_core_and_this_server_agree_on_the_bowl_list():
+    import db
+    assert sorted(cfg.BOWL_NAMES) == sorted(db._VALID_BOWLS)

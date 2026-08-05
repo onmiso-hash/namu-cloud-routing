@@ -477,18 +477,20 @@ def namu_search(
     fallback). Routed via the `user` URL query param, same as
     namu_recall/namu_record.
 
-    Two bowls are searchable here:
+    All four bowls are searchable here (same as a self-hosted NAMU server):
       - 'learnings' (default): past lessons/notes.
       - 'tasks': the scrollback of task log lines across every task — use this
         for "what did I do yesterday", "what happened on this task", etc.
         `project` narrows it to one project folder; omit for all merged.
+      - 'profile': facts about the user (superseded ones excluded).
+      - 'memo': sticky notes currently up, oldest first.
 
     `query` is optional — omit it to filter by axes alone (e.g. bowl='tasks',
     machine='hp', since='2026-07-24').
 
     Args:
       query: search terms (optional)
-      bowl: 'learnings' (default) | 'tasks'
+      bowl: 'learnings' (default) | 'tasks' | 'profile' | 'memo'
       project: project folder name (tasks only; omit for all merged)
       task: task name, substring match (tasks only)
       machine: which computer wrote the line, exact match (tasks only)
@@ -505,10 +507,13 @@ def namu_search(
     """
     key = _resolve_user(ctx)
     _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
-    if bowl not in ("learnings", "tasks"):
+    # 허용 목록을 손으로 적지 않는다 — 코어(cfg.BOWL_NAMES)를 그대로 본다.
+    # 손으로 적어 두었던 탓에 코어가 네 그릇을 다 받게 된 뒤에도 이 서버만
+    # 두 그릇에서 멈춰 있었다(2026-08-05 실측: 셀프호스팅은 profile·memo 검색
+    # 성공, 클라우드는 거절). 셀프호스팅에서 되는 것이 여기서 안 되면 안 된다.
+    if bowl not in cfg.BOWL_NAMES:
         raise ValueError(
-            f"bowl은 'learnings' 또는 'tasks'여야 합니다: {bowl!r} — 개인 사실"
-            "(profile)과 쪽지(memo)는 namu_recall이 통째로 돌려줍니다"
+            f"bowl은 {list(cfg.BOWL_NAMES)} 중 하나여야 합니다: {bowl!r}"
         )
     if bowl != "tasks" and project is not None:
         # 조용히 무시하지 않는다 — 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을
@@ -539,9 +544,19 @@ def namu_search(
     paths = _paths_for_user(key)
     _ensure_fresh(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
-        return db.search(
-            conn, query, outcome_filter, limit,
-            machine=machine, via=via, task=task, since=since, until=until,
+        if bowl == "learnings":
+            # 옛 반환 형태(summary 포함)를 그대로 지킨다 — 붙어 있는 AI가 이 모양을
+            # 보고 있다.
+            return db.search(
+                conn, query, outcome_filter, limit,
+                machine=machine, via=via, task=task, since=since, until=until,
+            )
+        # 개인 사실·쪽지 — 거르는 규칙을 여기 베끼지 않고 코어에 맡긴다. 베끼면
+        # 그 순간 두 서버가 또 갈라진다. `paths`로 이 사용자 폴더를 가리킨다.
+        return db.search_bowl(
+            conn, bowl=bowl, query=query,
+            machine=machine, via=via, since=since, until=until,
+            limit=limit, paths=paths,
         )
 
 
