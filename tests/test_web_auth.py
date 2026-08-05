@@ -1390,12 +1390,13 @@ def test_callback_already_connected_redirects_to_me_without_reselecting_repo(cli
 # 화면에서만 설명하면 창을 닫은 사람은 다시 볼 방법이 없다).
 # ---------------------------------------------------------------------------
 _CLAUDE_CONNECTOR_STEPS = ["설정", "커넥터", "사용자 정의 커넥터", "붙여"]
+# 저장소의 마크다운이 아니라 펴낸 안내서 사이트를 가리켜야 한다 — 마크다운 쪽은
+# namu-74에서 "이 문서는 옮겨졌습니다" 표지판만 남아, 그리로 보내면 방문자가 한 번
+# 더 눌러야 진짜 안내서에 닿는다.
 _SELF_HOST_GUIDE_URL = (
-    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md"
+    "https://onmiso-hash.github.io/namu-agent/docs/remote_mcp_guide.html"
 )
-_PLUGIN_GUIDE_URL = (
-    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md"
-)
+_PLUGIN_GUIDE_URL = "https://onmiso-hash.github.io/namu-agent/docs/install_guide.html"
 
 
 def _assert_onboarding_guide(body: str) -> None:

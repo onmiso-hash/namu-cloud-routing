@@ -482,12 +482,11 @@ def _html_mcp_url_section(mcp_url: str) -> str:
 
 # 다른 길 안내 문서(경로 B 셀프호스팅 / 플러그인 설치). 저장소 밖 문서라
 # 상수로 모아 둔다 — 두 화면에서 같은 링크를 쓴다.
-_REMOTE_MCP_GUIDE_URL = (
-    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md"
-)
-_INSTALL_GUIDE_URL = (
-    "https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md"
-)
+# 주소는 ui가 한 곳에서 정한다 — 여기에 또 적어 두면 한쪽만 고쳐지고 사이트
+# 안에서 같은 문서로 가는 링크가 두 갈래로 갈린다(실제로 그렇게 갈려 있었다:
+# 꼬리말은 새 안내서, 이 화면은 옛 마크다운 표지판).
+_REMOTE_MCP_GUIDE_URL = ui.SELFHOST_GUIDE_URL
+_INSTALL_GUIDE_URL = ui.INSTALL_GUIDE_URL
 
 
 def _html_onboarding_section(mcp_url: str) -> str:

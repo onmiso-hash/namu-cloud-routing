@@ -336,8 +336,14 @@ MENU = (
 PUBLIC_PATHS = tuple(path for path, _label in MENU)
 
 GITHUB_URL = "https://github.com/onmiso-hash/namu-agent"
-INSTALL_GUIDE_URL = f"{GITHUB_URL}/blob/main/docs/install_guide.md"
-SELFHOST_GUIDE_URL = f"{GITHUB_URL}/blob/main/docs/remote_mcp_guide.md"
+
+# 안내서는 저장소의 마크다운이 아니라 **펴낸 안내서 사이트**를 가리킨다.
+# 저장소 쪽 `docs/*.md`는 namu-74에서 "이 문서는 옮겨졌습니다" 표지판만 남았다 —
+# 그리로 보내면 방문자가 한 번 더 눌러야 진짜 안내서에 닿는다.
+GUIDE_SITE = "https://onmiso-hash.github.io/namu-agent/docs"
+GUIDE_URL = f"{GUIDE_SITE}/index.html"
+INSTALL_GUIDE_URL = f"{GUIDE_SITE}/install_guide.html"
+SELFHOST_GUIDE_URL = f"{GUIDE_SITE}/remote_mcp_guide.html"
 
 
 def topbar(current: str = "", cta: str = "me") -> str:
@@ -350,6 +356,14 @@ def topbar(current: str = "", cta: str = "me") -> str:
         '<li><a href="%s"%s>%s</a></li>'
         % (path, ' class="on"' if path == current else "", html.escape(label))
         for path, label in MENU
+    )
+    # 안내서로 돌아가는 길. 안내서 쪽 머리줄에는 '나무 클라우드' 버튼이 늘 있는데
+    # 이쪽에는 돌아갈 문이 없어 왕복이 한쪽만 열려 있었다(꼬리말에만 있고, 꼬리말은
+    # 끝까지 내려야 보인다). **MENU에 넣지 않는다** — 그 튜플은 화면 메뉴이면서
+    # 동시에 `PUBLIC_PATHS`(로그인 없이 열어 주는 경로 목록)의 원본이라, 바깥
+    # 주소를 끼우면 문 목록에 사이트 밖 주소가 섞인다.
+    items += (
+        f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">나무 안내서 ↗</a></li>'
     )
     if cta == "start":
         button = '<a class="btn btn-primary" href="/auth/github/login">시작하기</a>'
@@ -381,6 +395,8 @@ def footer() -> str:
         "플러그인 설치 안내서 ↗</a></li>"
         f'<li><a href="{SELFHOST_GUIDE_URL}" target="_blank" rel="noopener">'
         "직접 서버 띄우기 ↗</a></li>"
+        f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">'
+        "나무 안내서 ↗</a></li>"
         f'<li><a href="{GITHUB_URL}" target="_blank" rel="noopener">'
         "GitHub 저장소 ↗</a></li>"
         "</ul></div>"
