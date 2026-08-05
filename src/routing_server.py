@@ -68,7 +68,17 @@ import web_auth  # noqa: E402
 from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
-mcp = FastMCP("namu-cloud-routing")
+# 이 서버가 내주는 도구. **소개문도 이 목록에서 만든다** — 목록과 소개문이 갈라지면
+# 붙은 AI가 없는 도구를 부른다. 셀프호스팅 쪽이 실제로 그랬고(소개 7종/노출 3종),
+# 클라우드는 반대로 소개문이 통째로 없어 붙은 AI가 네 그릇이 무엇인지 안내받지
+# 못했다(2026-08-05 두 서버를 띄워 실측). 코어(vendor/namu-agent)의 같은 함수를
+# 쓰므로 두 경로의 소개문이 한 원본에서 나온다.
+EXPOSED_TOOLS = frozenset({"namu_recall", "namu_search", "namu_record"})
+
+mcp = FastMCP(
+    "namu-cloud-routing",
+    instructions=record_input.server_instructions(EXPOSED_TOOLS),
+)
 
 logger = logging.getLogger("namu.routing_server")
 
