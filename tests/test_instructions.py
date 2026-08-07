@@ -32,7 +32,43 @@ def test_instructions_match_the_tools_actually_served():
 
 def test_instructions_come_from_the_core():
     # 손으로 옮겨 적었으면 두 경로가 갈라진다 — 코어 함수 결과와 글자까지 같아야 한다.
-    assert rs.mcp.instructions == record_input.server_instructions(rs.EXPOSED_TOOLS)
+    assert rs.mcp.instructions == record_input.server_instructions(
+        rs.EXPOSED_TOOLS, upload_takes_path=False,
+    )
+
+
+def _tool_schema(name: str) -> dict:
+    tools = {t.name: t for t in asyncio.run(rs.mcp.list_tools())}
+    return tools[name].inputSchema
+
+
+def _tool_line(name: str) -> str:
+    prefix = f"- {name} —"
+    return next(l for l in rs.mcp.instructions.splitlines() if l.startswith(prefix))
+
+
+def test_the_upload_line_does_not_offer_a_path_this_server_cannot_take():
+    """소개문이 없는 칸을 있다고 말하면 파일을 든 AI가 파일을 읽기 시작한다.
+
+    2026-08-07의 세 번째 base64 사고가 이 자리였다. 소개문에 "디스크에 있는 파일을
+    올린다"고 적혀 있었지만 이 서버의 도구는 글자 원문만 받는다. 파일을 작업공간에
+    들고 있던 웹 AI는 넣을 칸을 못 찾자 명령을 돌려 파일을 base64로 옮기기
+    시작했고(21:04 화면), 회원은 몇 분을 기다리다 응답을 멈췄다.
+
+    도구에서 base64 칸을 없앤 것으로는 이 자리가 안 막힌다 — 인코딩은 우리 도구의
+    인자가 아니라 그 앞 단계, AI의 작업공간에서 일어나기 때문이다. 그래서 막는
+    자리는 소개문이고, 이 시험은 그 소개가 실제 칸 목록과 어긋나는 것을 잡는다.
+    """
+    params = set(_tool_schema("namu_upload_file")["properties"])
+    assert "file_path" not in params, (
+        "이 서버가 파일 경로를 받게 됐다면 소개문의 upload_takes_path도 함께 바꿔야 한다"
+    )
+
+    line = _tool_line("namu_upload_file")
+    assert "디스크" not in line, f"없는 칸을 있다고 소개하고 있다: {line}"
+    assert "namu_create_upload_ticket" in line, (
+        "파일로 있는 것이 갈 곳을 안 알려 주면 AI는 파일을 읽는 쪽을 고른다"
+    )
 
 
 def test_instructions_explain_every_bowl():

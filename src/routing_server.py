@@ -89,7 +89,13 @@ EXPOSED_TOOLS = frozenset({
 
 mcp = FastMCP(
     "namu-cloud-routing",
-    instructions=record_input.server_instructions(EXPOSED_TOOLS),
+    # upload_takes_path=False — 이 서버의 namu_upload_file에는 파일 경로 칸이 없다
+    # (글자 원문 하나만 받는다). 소개문이 "디스크의 파일을 올린다"고 말하면 파일을
+    # 든 웹 AI가 넣을 칸을 못 찾아 파일을 읽어 base64로 옮기기 시작한다 — 2026-08-07
+    # 21:04에 실제로 그렇게 됐다. 상세는 record_input._WEB_TOOL_LINES 위 설명.
+    instructions=record_input.server_instructions(
+        EXPOSED_TOOLS, upload_takes_path=False,
+    ),
 )
 
 logger = logging.getLogger("namu.routing_server")
