@@ -2036,7 +2036,10 @@ def _memory_env(monkeypatch, tmp_path, user_key):
     monkeypatch.setattr(wa.user_repo, "push", _fake_push)
 
     paths = wa._memory_paths(user_key)
-    for p in (paths.learnings_yaml, paths.profile_yaml, paths.memo_yaml, paths.db_path):
+    for p in (
+        paths.learnings_yaml, paths.profile_yaml, paths.memo_yaml,
+        paths.attachments_yaml, paths.db_path,
+    ):
         p.parent.mkdir(parents=True, exist_ok=True)
     return paths, pushes
 
@@ -2387,3 +2390,100 @@ def test_memory_routes_are_registered_in_build_auth_app():
     }
     assert ("/auth/memory", ("GET",)) in paths
     assert ("/auth/memo/remove", ("POST",)) in paths
+
+
+# ---------------------------------------------------------------------------
+# 첨부 기록 화면 (2026-08-07 사용자 요구 — 어떤 파일이 어떤 경로로 오갔는지)
+# ---------------------------------------------------------------------------
+
+
+def _seed_attachment(paths, path, status, **kwargs):
+    attachments = wa._core_attachments()
+    base = dict(
+        summary="설계 문서", reason="파일째 남긴다", body="원문", paths=paths,
+    )
+    base.update(kwargs)
+    return attachments.record_attachment(
+        path=path, bytes_=base.pop("bytes_", 284915), status=status, **base
+    )
+
+
+def test_attachments_tab_shows_path_status_and_size(client, monkeypatch, tmp_path):
+    """이 화면을 보는 이유가 '무슨 파일이 있더라'이므로 경로가 반드시 보여야 하고,
+    크기는 사람이 읽는 단위로 나와야 한다(284915라고 적으면 큰지 알 수 없다)."""
+    row = _connect_via_login(client, monkeypatch, github_id=41020, repo="eve/att")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _seed_attachment(paths, "attach_file/설계마커.pdf", "올림", topic="namu-70")
+
+    r = client.get("/auth/memory?bowl=attachments")
+
+    assert r.status_code == 200
+    assert "attach_file/설계마커.pdf" in r.text
+    assert "올림" in r.text
+    assert "278 KB" in r.text
+    assert "namu-70" in r.text
+
+
+def test_attachments_tab_is_listed_and_labelled(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=41021, repo="eve/tab")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/memory?bowl=learnings")
+
+    assert 'href="/auth/memory?bowl=attachments"' in r.text
+    assert "첨부 기록" in r.text
+
+
+def test_attachments_tab_keeps_showing_removed_files(client, monkeypatch, tmp_path):
+    """지운 파일도 목록에 남아야 한다 — 이 화면을 보는 이유의 절반이 '그 파일
+    어디 갔지'이고, 살아 있는 것만 보이면 그 질문에 답할 수 없다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41022, repo="eve/gone")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _seed_attachment(paths, "attach_file/사라진마커.pdf", "올림")
+    _seed_attachment(
+        paths, "attach_file/사라진마커.pdf", "지움", reason="왜뺐는지마커",
+    )
+
+    r = client.get("/auth/memory?bowl=attachments")
+
+    assert "attach_file/사라진마커.pdf" in r.text
+    assert "지움" in r.text
+    assert "왜뺐는지마커" in r.text
+
+
+def test_attachments_search_matches_the_file_name(client, monkeypatch, tmp_path):
+    """다시 찾을 때 사람이 기억하는 것은 내용 설명이 아니라 파일 이름이다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41023, repo="eve/find")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _seed_attachment(paths, "attach_file/사과마커.pdf", "올림")
+    _seed_attachment(paths, "attach_file/배마커.pdf", "올림")
+
+    hit = client.get("/auth/memory", params={"bowl": "attachments", "q": "사과마커"})
+    miss = client.get("/auth/memory", params={"bowl": "attachments", "q": "없는낱말zzz"})
+
+    assert "사과마커" in hit.text
+    assert "배마커" not in hit.text
+    assert "없습니다" in miss.text
+
+
+def test_attachments_tab_has_no_remove_form(client, monkeypatch, tmp_path):
+    """첨부 기록은 지워지지 않는 기억이다 — 파일을 빼는 일과 기록을 지우는 일은
+    다르며, 화면에 지우기 버튼이 있으면 둘이 같은 일로 보인다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41024, repo="eve/noform")
+    paths, _ = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _seed_attachment(paths, "attach_file/a.pdf", "올림")
+
+    r = client.get("/auth/memory?bowl=attachments")
+
+    assert "/auth/memo/remove" not in r.text
+    assert 'type="checkbox"' not in r.text
+
+
+def test_attachments_tab_without_any_file_says_none(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=41025, repo="eve/empty")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/memory?bowl=attachments")
+
+    assert r.status_code == 200
+    assert "아직 올리신 파일이 없습니다" in r.text

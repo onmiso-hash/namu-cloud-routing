@@ -1656,13 +1656,16 @@ def _me_page_response(
 # 화면은 이 차이를 문구로 설명하는 데서 그치지 않고, 뗄 수 있는 그릇에만 폼을
 # 그린다(설명만 다르고 버튼은 다 있으면 결국 눌러 보고 알게 된다).
 # ---------------------------------------------------------------------------
-_MEMORY_BOWLS = ("learnings", "profile", "memo", "tasks")
+#   attachments — 열람만(올린 파일의 이력. 파일 몸통은 이 화면에 없다 —
+#               저장소의 attach_file/에 있고 그 폴더는 각 PC로 안 내려온다)
+_MEMORY_BOWLS = ("learnings", "profile", "memo", "tasks", "attachments")
 
 _BOWL_LABEL = {
     "learnings": "교훈",
     "profile": "개인 사실",
     "memo": "쪽지",
     "tasks": "작업일지",
+    "attachments": "첨부 기록",
 }
 
 # 한 화면에 올리는 최대 건수. 페이지 넘기기는 이번 범위가 아니라, 넘치면 "더
@@ -1715,6 +1718,19 @@ def _core_tasks():
     import task_resolve
 
     return task_resolve
+
+
+def _core_attachments():
+    """첨부 기록 읽기용 코어 모듈(`attachments`).
+
+    `_core()`의 네 모듈 묶음에 끼우지 않는 이유는 `_core_tasks`와 같다 — 그 튜플은
+    여러 곳에서 `cfg, db, memo, profile = _core()`로 펼쳐 받고 있어, 한 칸 늘리면
+    첨부와 상관없는 호출부를 전부 고쳐야 한다.
+    """
+    _core()
+    import attachments
+
+    return attachments
 
 
 def _memory_paths(user_key: str):
@@ -1851,6 +1867,60 @@ def _html_memo(entries: list, short_by_id: dict) -> str:
         "<small>뗀 쪽지는 저장소에서 실제로 사라집니다(되돌릴 수 없습니다).</small>"
         "</p></form>"
     )
+
+
+def _fmt_bytes(size) -> str:
+    """사람이 읽는 크기. 화면에 284915라고 적으면 큰지 작은지 알 수 없다."""
+    try:
+        n = int(size)
+    except (TypeError, ValueError):
+        return "크기 모름"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _html_attachments(entries: list) -> str:
+    """첨부 기록 목록 — 어떤 파일이 어떤 경로로 올라가고 지워졌는지.
+
+    다른 그릇과 달리 **경로가 요약보다 먼저 눈에 와야 한다**. 이 화면을 보는 이유가
+    "무슨 파일이 있더라"이고, 그 답은 요약문이 아니라 파일 이름이기 때문이다.
+
+    크기는 기록의 `bytes` 칸에서만 읽는다. 저장소에 물으면 git이 크기를 알아내려고
+    빠진 파일 몸통을 전부 내려받아 첨부 격리가 뚫린다(2026-08-07 실측).
+    """
+    if not entries:
+        return ""
+    items = []
+    for entry in entries:
+        path = str(entry.get("path") or "(경로 없음)")
+        status = str(entry.get("status") or "")
+        parts = [
+            f'<p class="m-sum"><code>{html.escape(path)}</code> '
+            f"<b>{html.escape(status)}</b></p>"
+        ]
+        if entry.get("summary"):
+            parts.append(f'<p>{html.escape(str(entry["summary"]))}</p>')
+        if entry.get("reason"):
+            parts.append(f'<p class="m-why">{html.escape(str(entry["reason"]))}</p>')
+        if entry.get("body"):
+            parts.append(
+                "<details><summary>상세 보기</summary>"
+                f'<pre class="m-body">{html.escape(str(entry["body"]))}</pre></details>'
+            )
+        meta_bits = [_fmt_bytes(entry.get("bytes"))]
+        if entry.get("timestamp"):
+            meta_bits.append(html.escape(str(entry["timestamp"])[:19].replace("T", " ")))
+        for key in ("task", "project"):
+            if entry.get(key):
+                meta_bits.append(html.escape(str(entry[key])))
+        for tag in entry.get("tags") or []:
+            meta_bits.append(html.escape(str(tag)))
+        parts.append(f'<p class="m-meta"><small>{" · ".join(meta_bits)}</small></p>')
+        items.append('<li class="m-item">' + "".join(parts) + "</li>")
+    return f'<ul class="m-list">{"".join(items)}</ul>'
 
 
 # ---------------------------------------------------------------------------
@@ -2032,6 +2102,13 @@ def _html_memory_page(
             "개인 사실은 <b>화면에서 고치거나 지울 수 없습니다.</b> 틀린 내용은 "
             "AI에게 말해 새 사실로 정정하시면, 옛 항목이 자동으로 물러납니다."
         )
+    elif bowl == "attachments":
+        rule = (
+            "올리신 파일의 <b>이력</b>입니다 — 파일 자체는 여기 없고 회원님 저장소에 "
+            "있습니다. 올림·새 판·지움이 모두 남으므로 <b>지운 파일도 목록에 "
+            "보입니다</b>(무엇이 있었고 왜 뺐는지가 남습니다). 파일을 올리고 "
+            "지우는 일은 AI와 대화하며 하시면 됩니다."
+        )
     else:
         rule = (
             "교훈은 <b>화면에서 고치거나 지울 수 없습니다.</b> 쌓인 배움을 나중에 "
@@ -2056,6 +2133,11 @@ def _html_memory_page(
         body_html = (
             "<p>지금 열려 있는 작업이 없습니다 — 회원님 PC의 나무에서 작업을 "
             "시작하시면 여기에 나타납니다.</p>"
+        )
+    elif bowl == "attachments":
+        body_html = (
+            "<p>아직 올리신 파일이 없습니다 — AI에게 “이 파일도 나무에 올려줘”라고 "
+            "하시면 여기에 쌓입니다.</p>"
         )
     else:
         body_html = (
@@ -2115,6 +2197,25 @@ def _load_bowl(user_key: str, bowl: str, query: str) -> "tuple[str, int]":
             docs = [d for d in docs if _matches(query, *profile.layers(d))]
         docs = docs[-_MEMORY_PAGE_LIMIT:]
         return _html_profile(docs), len(docs)
+
+    if bowl == "attachments":
+        # 지운 것까지 전부 보여준다 — 이 화면을 보는 이유의 절반이 "그 파일 어디
+        # 갔지"이고, 살아 있는 것만 보이면 그 질문에 답할 수 없다.
+        attachments = _core_attachments()
+        entries = attachments.load_all(paths=paths)
+        if query:
+            # 파일 이름(path)도 훑는다 — 다시 찾을 때 기억나는 것은 대개 이름이다.
+            entries = [
+                e for e in entries
+                if _matches(
+                    query,
+                    str(e.get("path") or ""), str(e.get("summary") or ""),
+                    str(e.get("reason") or ""), str(e.get("body") or ""),
+                    str(e.get("task") or ""), str(e.get("project") or ""),
+                )
+            ]
+        entries = list(reversed(entries))[:_MEMORY_PAGE_LIMIT]
+        return _html_attachments(entries), len(entries)
 
     _ensure_learnings_cache(paths)
     with closing(sqlite3.connect(paths.db_path)) as conn:
