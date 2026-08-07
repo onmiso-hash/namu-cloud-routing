@@ -36,6 +36,7 @@ git submodule update --init --recursive
 ## 문서
 
 - [`docs/namu_cloud_guide.md`](docs/namu_cloud_guide.md) — 공용 클라우드 MCP(경로 A) 사용 가이드
+- [`docs/namu_attach_files.md`](docs/namu_attach_files.md) — 첨부 파일 주고받기(완료 보고서) — 도구 일곱 개·티켓 주소·서버 사본 격리·크기 상한 실측
 
 ## 범위 (현 단계)
 
