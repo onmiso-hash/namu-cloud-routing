@@ -1579,3 +1579,33 @@ def test_delete_also_resyncs_before_writing_the_log(fake_github, monkeypatch):
     found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
     assert [e["status"] for e in found["results"]] == ["지움", "올림"]
     assert rs._sync_marker_path("alice").exists()
+
+
+def test_upload_does_not_require_body(fake_github, tmp_path):
+    """body를 필수로 두면 안 된다(2026-08-07 첫 실사용).
+
+    다른 기억처럼 필수로 뒀더니 붙은 AI가 그 칸을 빼고 불렀고, 거절당할 때마다
+    **파일 내용 전체를 처음부터 다시 써서** 재시도했다 — 회원 눈에는 몇 분째 멈춘
+    것으로 보였다. 첨부에서는 파일 자체가 원문이라 애초에 요구할 이유도 없다.
+    """
+    out = rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="설계요약마커",
+        reason="파일째 남긴다", ctx=_ctx("alice"),
+    )
+
+    assert out["status"] == "올림"
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert found["results"][0]["body"] == "생략"
+
+
+def test_upload_still_requires_summary_and_reason(fake_github):
+    """이 둘은 남긴다 — 파일 몸통이 각 PC로 안 내려오므로 나중에 그 파일을 찾는
+    단서가 이 두 줄뿐이다."""
+    for missing in ("summary", "reason"):
+        kwargs = {
+            "name": "설계.pdf", "content_base64": _b64(b"x"),
+            "summary": "s", "reason": "r", "ctx": _ctx("alice"),
+        }
+        kwargs[missing] = "   "
+        with pytest.raises(ValueError, match=missing):
+            rs.namu_upload_file(**kwargs)

@@ -1255,9 +1255,11 @@ _UPLOAD_DESCRIPTION = (
     "used; the file always lands at attach_file/<name>.\n"
     "- Uploading the same name again replaces the file on GitHub and is logged "
     "as a new revision ('새 판'); the earlier log entry stays.\n"
-    "- summary/reason/body are required, same as any memory: what this file is, "
-    "why it was kept, and the full story. They are what makes the file findable "
-    "later, because the file body itself is not synced to the user's PCs."
+    "- `summary` (what this file is) and `reason` (why it was kept) are "
+    "required: the file body is not synced to the user's PCs, so these two "
+    "lines are what makes the file findable later.\n"
+    "- `body` is optional here — for an attachment the file itself IS the full "
+    "story. Add it only when there is context the file does not carry."
 )
 
 
@@ -1267,7 +1269,7 @@ def namu_upload_file(
     content_base64: str,
     summary: str,
     reason: str,
-    body: str,
+    body: str | None = None,
     topic: str | None = None,
     project: str | None = None,
     tags: "list[str] | None" = None,
@@ -1275,9 +1277,12 @@ def namu_upload_file(
 ) -> dict:
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)
-    for field_name, value in (
-        ("summary", summary), ("reason", reason), ("body", body),
-    ):
+    # body는 일부러 필수가 아니다(2026-08-07 첫 실사용). 다른 기억처럼 필수로 뒀더니
+    # 붙은 AI가 그 칸을 빼고 불렀고, 거절당할 때마다 **파일 내용 전체를 처음부터 다시
+    # 써서** 재시도했다 — 회원 눈에는 몇 분째 멈춘 것으로 보였다. 첨부에서는 파일
+    # 자체가 원문이라 애초에 요구할 이유도 없었다.
+    body = (body or "").strip() or cfg.OMITTED
+    for field_name, value in (("summary", summary), ("reason", reason)):
         if not (value or "").strip():
             raise ValueError(
                 f"'{field_name}'은 첨부에도 필수입니다 — 파일 몸통은 각 PC로 "
