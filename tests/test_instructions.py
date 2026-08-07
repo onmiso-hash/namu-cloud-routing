@@ -72,3 +72,16 @@ def test_search_accepts_every_bowl_the_core_knows():
 def test_core_and_this_server_agree_on_the_bowl_list():
     import db
     assert sorted(cfg.BOWL_NAMES) == sorted(db._VALID_BOWLS)
+
+
+def test_cloud_and_self_hosted_expose_the_same_tools():
+    """개인 주소와 클라우드 주소는 기능이 같아야 한다(2026-08-07 사용자 원칙).
+
+    한쪽에만 도구가 있으면 같은 코어를 쓰는 의미가 없다 — 실제로 첨부 4종이
+    클라우드에만 있었고, 사용자가 그것을 짚어 이 시험이 생겼다. 코어의
+    `http_server.HTTP_EXPOSED_TOOLS`가 개인 주소가 내주는 목록이므로 그것과
+    글자까지 같은지 본다.
+    """
+    import http_server
+
+    assert rs.EXPOSED_TOOLS == http_server.HTTP_EXPOSED_TOOLS
