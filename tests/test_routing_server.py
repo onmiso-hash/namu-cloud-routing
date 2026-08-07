@@ -1609,3 +1609,18 @@ def test_upload_still_requires_summary_and_reason(fake_github):
         kwargs[missing] = "   "
         with pytest.raises(ValueError, match=missing):
             rs.namu_upload_file(**kwargs)
+
+
+def test_upload_reports_how_long_each_step_took(fake_github):
+    """서버 안에서 무엇이 오래 걸렸는지 밖에서 볼 방법이 없어 추측만 오갔다
+    (2026-08-07) — 붙은 AI가 화면에 보여줄 수 있게 반환값에 싣는다."""
+    out = rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+
+    assert set(out["seconds"]) == {
+        "사본_최신화_전", "깃허브_올리기", "사본_최신화_후", "기록_저장",
+        "기록_올리기", "합계",
+    }
+    assert all(isinstance(v, float) for v in out["seconds"].values())

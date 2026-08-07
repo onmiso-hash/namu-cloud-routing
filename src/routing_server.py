@@ -1296,15 +1296,31 @@ def namu_upload_file(
             "실어 보내세요."
         ) from None
 
+    # 단계별 시간을 재서 함께 돌려준다(2026-08-07). 회원이 "너무 느리다"고 했는데
+    # 서버 안에서 무엇이 오래 걸렸는지 볼 방법이 없어 추측만 오갔다 — 붙은 AI가
+    # 이 값을 화면에 보여주면 "AI가 파일을 글자로 옮기느라 느린 것"인지 "서버가
+    # 느린 것"인지가 그 자리에서 갈린다. 로그가 아니라 반환값에 싣는 이유가
+    # 그것이다(서버 로그는 홈서버에 들어가야 볼 수 있다).
+    timings: dict = {}
+    t0 = time.perf_counter()
+
+    def _mark(label: str, since: float) -> float:
+        now = time.perf_counter()
+        timings[label] = round(now - since, 2)
+        return now
+
     with closing(identity.connect()) as conn:
         _sync_or_reject(conn, key)
+        t = _mark("사본_최신화_전", t0)
         result = attach_files.upload(
             conn, key, name, content,
             attach_files.commit_message("올림", name),
         )
+        t = _mark("깃허브_올리기", t)
         # 기록을 쓰기 **전에** 맞춘다 — reset --hard가 안 커밋된 변경을 지우므로
         # 순서를 뒤집으면 방금 쓴 첨부 기록이 날아간다.
         _resync_after_repo_change(conn, key)
+        t = _mark("사본_최신화_후", t)
 
         paths = _paths_for_user(key)
         _ensure_fresh(paths)
@@ -1314,13 +1330,24 @@ def namu_upload_file(
             summary=summary, reason=reason, body=body,
             topic=topic, project=project, tags=tags, via=via,
         )
+        t = _mark("기록_저장", t)
         warning = _push_and_collect_warning(conn, key)
+        _mark("기록_올리기", t)
+
+    timings["합계"] = round(time.perf_counter() - t0, 2)
+    logger.info("첨부 올리기 시간(초): %s", timings)
 
     out = {
         "id": entry_id,
         "path": result["path"],
         "bytes": result["bytes"],
         "status": status,
+        "seconds": timings,
+        "note": (
+            "`seconds`는 서버가 이 요청을 받은 뒤 걸린 시간(초)입니다. 회원이 화면에서 "
+            "느낀 시간이 이보다 훨씬 길면, 느린 쪽은 서버가 아니라 파일 내용을 글자로 "
+            "옮겨 보내는 과정입니다 — 회원이 물으면 이 숫자를 그대로 보여주세요."
+        ),
     }
     if warning:
         out["warning"] = warning
