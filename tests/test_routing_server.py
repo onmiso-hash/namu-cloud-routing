@@ -1653,6 +1653,40 @@ def test_a_file_posted_to_the_ticket_lands_in_the_repo_and_the_log(fake_github):
     assert entry["project"] == "proj-x"
 
 
+def test_a_ticket_upload_may_read_the_ledger_while_storing(fake_github, monkeypatch):
+    """저장 단계가 장부 커넥션을 **실제로 읽어도** 올리기가 성공해야 한다.
+
+    운영에서 502로 드러난 결함의 자리다(2026-08-07 실측). 티켓 경로는 저장을
+    다른 실행 흐름(threadpool)으로 넘기는데, 장부 커넥션은 요청을 받은 쪽에서
+    열린다 — sqlite3는 만든 곳이 아닌 데서 쓰면 그 자리에서 거절한다. 이 파일의
+    다른 티켓 시험들은 `ensure_ready` 대역이 커넥션을 건드리지 않아 통과했고,
+    그래서 운영에서만 터졌다. 여기서는 대역이 운영처럼 커넥션을 읽는다.
+    """
+    def _reads_the_ledger(conn, key):
+        conn.execute("SELECT 1").fetchone()
+        (ur.user_dir(key) / ".git").mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(ur, "ensure_ready", _reads_the_ledger)
+    monkeypatch.setattr(
+        ur, "push",
+        lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: (
+            conn.execute("SELECT 1").fetchone() and False
+        ),
+    )
+
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+    )
+
+    r = _ticket_client().post(
+        f"/u/{ticket['ticket_id']}", files={"file": ("x.pptx", b"\x00\x01")},
+        headers={"accept": "application/json"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert fake_github["attach_file/발표.pptx"] == b"\x00\x01"
+
+
 def test_a_second_upload_of_the_same_name_is_logged_as_a_new_revision(fake_github):
     rs.namu_upload_file(
         name="발표.pptx", content_text="old", summary="s", reason="r",
@@ -1696,6 +1730,27 @@ def test_a_download_ticket_serves_the_file(fake_github):
     assert r.content == b"PDFBYTES"
     assert "attachment" in r.headers["content-disposition"]
     assert ticket["bytes"] == 8
+
+
+def test_a_download_ticket_may_read_the_ledger_while_fetching(fake_github, monkeypatch):
+    """받기도 올리기와 같은 자리에서 같은 이유로 502가 났다(2026-08-07).
+
+    운영의 `fetch_file`은 "이 회원이 저장소를 연결했나"를 장부에서 읽고 시작한다.
+    """
+    fake_github["attach_file/보고서.pdf"] = b"PDFBYTES"
+    real_download = rs.attach_files.download
+
+    def _reads_the_ledger(conn, key, name):
+        conn.execute("SELECT 1").fetchone()
+        return real_download(conn, key, name)
+
+    monkeypatch.setattr(rs.attach_files, "download", _reads_the_ledger)
+    ticket = rs.namu_create_download_ticket(name="보고서.pdf", ctx=_ctx("alice"))
+
+    r = _ticket_client().get(f"/d/{ticket['ticket_id']}")
+
+    assert r.status_code == 200, r.text
+    assert r.content == b"PDFBYTES"
 
 
 def test_a_download_ticket_is_refused_for_a_file_that_is_not_there(fake_github):
