@@ -11,7 +11,8 @@
 그대로 미러링하되, 전역 경로(cfg.NAMU_DB_PATH 등) 하드코딩 대신 매 호출마다
 `paths=cfg.data_paths_for(user_root)`를 코어에 넘긴다.
 
-그릇(bowl)은 네 개 다 받는다. 교훈(learnings)·개인 사실(profile)·쪽지(memo)는
+그릇(bowl)은 다섯 개 다 받는다. 교훈(learnings)·개인 사실(profile)·쪽지(memo)·
+첨부 기록(attachments)은
 DataPaths로 갈리고, 작업일지(tasks)는 파일이 아니라 폴더 구조라 DataPaths에
 자리가 없으므로 회원 폴더의 `tasks/<프로젝트>/<작업>/`에 직접 읽고 쓴다.
 
@@ -55,6 +56,7 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_PLUGIN_DIR))
 
 import access_log  # noqa: E402
+import attachments  # noqa: E402
 import config as cfg  # noqa: E402
 import db  # noqa: E402
 import identity  # noqa: E402
@@ -70,7 +72,7 @@ from mcp.server.transport_security import TransportSecuritySettings  # noqa: E40
 
 # 이 서버가 내주는 도구. **소개문도 이 목록에서 만든다** — 목록과 소개문이 갈라지면
 # 붙은 AI가 없는 도구를 부른다. 셀프호스팅 쪽이 실제로 그랬고(소개 7종/노출 3종),
-# 클라우드는 반대로 소개문이 통째로 없어 붙은 AI가 네 그릇이 무엇인지 안내받지
+# 클라우드는 반대로 소개문이 통째로 없어 붙은 AI가 그릇들이 무엇인지 안내받지
 # 못했다(2026-08-05 두 서버를 띄워 실측). 코어(vendor/namu-agent)의 같은 함수를
 # 쓰므로 두 경로의 소개문이 한 원본에서 나온다.
 EXPOSED_TOOLS = frozenset({"namu_recall", "namu_search", "namu_record"})
@@ -477,21 +479,25 @@ def namu_search(
     fallback). Routed via the `user` URL query param, same as
     namu_recall/namu_record.
 
-    All four bowls are searchable here (same as a self-hosted NAMU server):
+    Every bowl is searchable here (same as a self-hosted NAMU server):
       - 'learnings' (default): past lessons/notes.
       - 'tasks': the scrollback of task log lines across every task — use this
         for "what did I do yesterday", "what happened on this task", etc.
         `project` narrows it to one project folder; omit for all merged.
       - 'profile': facts about the user (superseded ones excluded).
       - 'memo': sticky notes currently up, oldest first.
+      - 'attachments': the log of files uploaded to this user's repo — what
+        was uploaded, why, its size and whether it is still there. Sizes are
+        read from this log only, never asked of the repository.
+        `project`/`task` narrow it.
 
     `query` is optional — omit it to filter by axes alone (e.g. bowl='tasks',
     machine='hp', since='2026-07-24').
 
     Args:
       query: search terms (optional)
-      bowl: 'learnings' (default) | 'tasks' | 'profile' | 'memo'
-      project: project folder name (tasks only; omit for all merged)
+      bowl: 'learnings' (default) | 'tasks' | 'profile' | 'memo' | 'attachments'
+      project: project folder name (tasks/attachments only; omit for all merged)
       task: task name, substring match (tasks only)
       machine: which computer wrote the line, exact match (tasks only)
       via: which AI wrote it, exact match (tasks only)
@@ -508,17 +514,19 @@ def namu_search(
     key = _resolve_user(ctx)
     _resolve_via(ctx)  # ?client= 출처 태그 검증 (개인용 미러 — 없거나 형식 틀리면 거부)
     # 허용 목록을 손으로 적지 않는다 — 코어(cfg.BOWL_NAMES)를 그대로 본다.
-    # 손으로 적어 두었던 탓에 코어가 네 그릇을 다 받게 된 뒤에도 이 서버만
+    # 손으로 적어 두었던 탓에 코어가 그릇을 다 받게 된 뒤에도 이 서버만
     # 두 그릇에서 멈춰 있었다(2026-08-05 실측: 셀프호스팅은 profile·memo 검색
     # 성공, 클라우드는 거절). 셀프호스팅에서 되는 것이 여기서 안 되면 안 된다.
     if bowl not in cfg.BOWL_NAMES:
         raise ValueError(
             f"bowl은 {list(cfg.BOWL_NAMES)} 중 하나여야 합니다: {bowl!r}"
         )
-    if bowl != "tasks" and project is not None:
+    if bowl not in ("tasks", "attachments") and project is not None:
         # 조용히 무시하지 않는다 — 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을
         # 낸다(개인용 db.search_bowl과 같은 태도).
-        raise ValueError(f"project는 tasks 전용 축입니다 (bowl={bowl!r}에는 쓸 수 없습니다)")
+        raise ValueError(
+            f"project는 tasks·attachments 전용 축입니다 (bowl={bowl!r}에는 쓸 수 없습니다)"
+        )
 
     with closing(identity.connect()) as conn:
         _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부(사용자 결정 1·2)
@@ -551,12 +559,15 @@ def namu_search(
                 conn, query, outcome_filter, limit,
                 machine=machine, via=via, task=task, since=since, until=until,
             )
-        # 개인 사실·쪽지 — 거르는 규칙을 여기 베끼지 않고 코어에 맡긴다. 베끼면
-        # 그 순간 두 서버가 또 갈라진다. `paths`로 이 사용자 폴더를 가리킨다.
+        # 개인 사실·쪽지·첨부 기록 — 거르는 규칙을 여기 베끼지 않고 코어에 맡긴다.
+        # 베끼면 그 순간 두 서버가 또 갈라진다. `paths`로 이 사용자 폴더를 가리킨다.
+        # project·task 축은 첨부 기록에서만 실제로 걸린다 — 다른 그릇에 얹어 넘기면
+        # 코어가 조용히 무시해, 부른 쪽은 걸러진 줄 알고 잘못된 결론을 낸다.
+        extra = {"project": project, "task": task} if bowl == "attachments" else {}
         return db.search_bowl(
             conn, bowl=bowl, query=query,
             machine=machine, via=via, since=since, until=until,
-            limit=limit, paths=paths,
+            limit=limit, paths=paths, **extra,
         )
 
 
@@ -1020,6 +1031,9 @@ def namu_record(
     supersedes: str | None = None,
     create: bool = False,
     done_when: "list[str] | None" = None,
+    # ── 첨부 기록 전용 2칸 (namu-file-upload-download 4단계)
+    path: str | None = None,
+    bytes: int | None = None,
     # ── 옛 이름 (그대로 불러도 새 칸으로 옮겨 저장하고 어디로 옮겼는지 알린다)
     task: str | None = None,
     outcome: str | None = None,
@@ -1049,7 +1063,8 @@ def namu_record(
         동기화(clone/pull)보다 **먼저** 부른다 — 어차피 거절될 호출 때문에 사용자
         저장소를 내려받는 것은 낭비이고, 입력 검증은 부작용이 없다.
     (2) 그릇별 저장 계층으로 넘기되, 전역 경로 대신 **그 사용자 전용 paths**를
-        넘긴다(교훈=db.record, 개인 사실=profile.record_fact, 쪽지=memo.add).
+        넘긴다(교훈=db.record, 개인 사실=profile.record_fact, 쪽지=memo.add,
+        첨부 기록=attachments.record_attachment).
         작업일지(tasks)만 paths가 아니라 회원 폴더의 `tasks/<프로젝트>`에 직접
         쓴다(그 그릇은 파일이 아니라 폴더 구조라 DataPaths에 자리가 없다).
     (3) 로컬 기록이 끝난 뒤에만 push를 시도한다(namu-58 4차 결정 3).
@@ -1076,6 +1091,7 @@ def namu_record(
         "topic": topic, "status": status, "category": category, "tags": tags,
         "project": project, "confidence": confidence, "supersedes": supersedes,
         "create": create, "done_when": done_when,
+        "path": path, "bytes": bytes,
         "task": task, "outcome": outcome, "task_type": task_type,
         "verified_by": verified_by, "kind": kind, "subject": subject,
         "statement": statement, "source": source, "text": text, "tag": tag,
@@ -1135,10 +1151,20 @@ def namu_record(
                 verified_by=v.get("confidence") or "human", tags=v_tags, via=via,
                 paths=paths, summary=v_summary, reason=v_reason, body=v_body,
             )
-        else:  # memo
+        elif parsed.bowl == "memo":
             entry_id = memo.add(
                 tags=v_tags, via=via, paths=paths,
                 summary=v_summary, reason=v_reason, body=v_body,
+            )
+        else:  # attachments — 첨부 기록(namu-file-upload-download 4단계)
+            # 이 자리가 예전에는 `else: # memo`였다. 그릇이 하나 늘 때 그대로 두면
+            # 첨부 기록이 **말없이 쪽지로 저장된다** — 잘못 담겨도 아무도 모르는
+            # 그 경로가 이 시스템이 없애려는 결함이라, 그릇마다 명시 분기로 둔다.
+            entry_id = attachments.record_attachment(
+                path=v.get("path"), bytes_=v.get("bytes"), status=v.get("status"),
+                summary=v_summary, reason=v_reason, body=v_body,
+                topic=v_topic, project=v.get("project"),
+                supersedes=v.get("supersedes"), tags=v_tags, via=via, paths=paths,
             )
 
         # 로컬 기록이 끝난 뒤에만 push를 시도한다(사용자 결정 3) — 위에서 raise된

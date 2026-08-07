@@ -355,6 +355,58 @@ def test_memo_bowl_is_stored_and_comes_back_in_recall(tmp_path):
     assert not result["learnings"]
 
 
+def test_attachments_bowl_is_stored_in_its_own_file(tmp_path):
+    """첨부 기록은 쪽지로 새면 안 된다 — 예전 이 자리의 분기가 `else: # memo`라,
+    그릇이 하나 늘면 새 그릇이 말없이 쪽지로 저장되는 구조였다."""
+    entry_id = rs.namu_record(
+        bowl="attachments", path="attach_file/설계.pdf", bytes=284915,
+        status="올림", summary="설계 문서", reason="파일째 남긴다",
+        body="원문", topic="namu-70", project="proj-x", ctx=_ctx("alice"),
+    )
+    text = _yaml_text(tmp_path, "alice", "attachments.yaml")
+    assert "attach_file/설계.pdf" in text
+    assert "284915" in text
+    # 쪽지 파일은 생기지도 않는다.
+    assert not (tmp_path / "users" / "alice" / "memory" / "memo.yaml").exists()
+
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert found["count"] == 1
+    assert found["results"][0]["id"] == entry_id
+    assert found["results"][0]["bytes"] == 284915
+
+
+def test_attachments_search_filters_by_project(tmp_path):
+    for name, project in (("a.pdf", "proj-x"), ("b.pdf", "다른방")):
+        rs.namu_record(
+            bowl="attachments", path=f"attach_file/{name}", bytes=10,
+            status="올림", summary="s", reason="r", body="b",
+            project=project, ctx=_ctx("alice"),
+        )
+    found = rs.namu_search(bowl="attachments", project="proj-x", ctx=_ctx("alice"))
+    assert [e["path"] for e in found["results"]] == ["attach_file/a.pdf"]
+
+
+def test_attachments_require_a_size(tmp_path):
+    """크기가 비면 거절한다 — 비어 있으면 목록 도구가 크기를 저장소에 묻는 쪽으로
+    되돌아갈 수밖에 없고, 그 순간 첨부가 통째로 내려와 격리가 뚫린다."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            bowl="attachments", path="attach_file/a.pdf", status="올림",
+            summary="s", reason="r", body="b", ctx=_ctx("alice"),
+        )
+    assert "bytes" in str(exc.value)
+
+
+def test_attachments_are_isolated_per_user(tmp_path):
+    """요청마다 사용자 폴더가 다르다 — paths가 안 타면 남의 첨부 이력을 읽는다."""
+    rs.namu_record(
+        bowl="attachments", path="attach_file/내파일.pdf", bytes=1,
+        status="올림", summary="s", reason="r", body="b", ctx=_ctx("alice"),
+    )
+    assert rs.namu_search(bowl="attachments", ctx=_ctx("bob"))["count"] == 0
+    assert rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"] == 1
+
+
 def test_bowl_is_mandatory(tmp_path):
     """그릇을 안 적으면 거절한다 — 옛 코어는 조용히 교훈으로 보냈고, 잘못 담겨도
     아무도 모르는 그 경로가 이번에 없애려는 결함이다."""
@@ -562,7 +614,7 @@ def test_search_rejects_project_on_learnings_bowl(_fake_home):
     """조용히 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을 낸다."""
     with pytest.raises(ValueError) as exc:
         rs.namu_search(query="아무거나", project="namu-agent", ctx=_ctx("alice"))
-    assert "tasks 전용" in str(exc.value)
+    assert "전용 축" in str(exc.value)
 
 
 def test_old_field_names_still_work_and_say_where_they_went(tmp_path):
