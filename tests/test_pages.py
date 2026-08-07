@@ -111,13 +111,25 @@ def test_start_page_does_not_promise_the_site_creates_the_repository():
     assert "GitHub에서 만들기" in out
 
 
-def test_memory_page_does_not_claim_the_web_can_write_the_work_log():
-    """작업일지는 이 주소로 남길 수 없다 — '무엇이든 기억한다'고 적으면
-    사용자가 되지 않는 일을 시키게 된다."""
+def test_memory_page_says_the_work_log_can_be_written_and_needs_a_project():
+    """작업일지는 이 주소로 **남길 수 있다**(`namu_record`의 bowl='tasks' 분기).
+
+    이 시험은 원래 정반대를 못 박고 있었다 — "작업일지는 남길 수 없다"가 화면
+    문구였고 시험이 그 문구를 지켰다. 그 사이 기능이 열렸는데(같은 저장소의
+    `test_routing_server.py`가 `bowl="tasks"`로 실제 기록에 성공한다) 시험은 옛
+    문구를 지키고 있었으므로, 화면을 사실대로 고치는 순간 빨개졌다. 즉 이 시험은
+    회귀를 막은 게 아니라 **낡은 사실을 붙잡고 있었다.**
+
+    지금 지켜야 할 것은 둘이다 — 되는 일을 안 된다고 적지 않기, 그리고 되는
+    조건을 함께 적기. 웹에는 "지금 열어 둔 폴더"가 없어 프로젝트 이름을 빼면
+    기록이 갈 곳을 잃는다.
+    """
     out = pages.memory_page(False)
 
     assert "작업일지" in out
-    assert "읽는 것" in out
+    assert "남길 수 있습니다" in out
+    assert "어느 프로젝트인지" in out
+    assert "남길 수 없습니다" not in out
 
 
 def test_safety_page_states_the_three_verdicts_of_the_connection_test():

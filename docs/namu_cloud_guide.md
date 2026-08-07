@@ -4,7 +4,7 @@
 > 가입 절차는 사이트 화면이 안내합니다. 이 문서는 그 뒤에 "안에서 어떻게
 > 도는가"를 알고 싶은 사람을 위한 것입니다.
 
-> 📅 2026-08-02 개정(namu-70, 사이트 신설로 2-2절 교체) · 2026-07-31 개정(namu-60)
+> 📅 2026-08-08 개정(첨부 파일·다섯 그릇 검색 반영 — 1절·5절 끝) · 2026-08-02 개정(namu-70, 사이트 신설로 2-2절 교체) · 2026-07-31 개정(namu-60)
 > · 최초 작성 2026-07-19(namu-54) · 선행 문서: [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md)(경로 B 셀프호스팅 가이드) · [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md)(플러그인 설치 가이드) · [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md)(설계 원본).
 >
 > **범위** — 경로 A는 "중앙에서 우리가 대신 호스팅해주는 공용 서버에 접속만 하면 되는" 형태다(사용자가 직접 서버를 띄우는 경로 B와 반대).
@@ -19,7 +19,11 @@
 | 사용자 수 | 단일 사용자(자기 것 하나) | 멀티유저(주소에 실린 **개인 열쇠**로 사용자별 서랍 라우팅) |
 | 기억의 원본은 어디에 | 자기 PC의 `~/.namu` | **사용자 본인의 GitHub 저장소**(연결 시 직접 고른다). 서버가 갖는 것은 그 저장소의 사본뿐이다 |
 
-노출 도구는 개인용(경로 B)과 동일한 3종 `namu_recall`/`namu_record`/`namu_search`이고, 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68). 담을 수 있는 그릇은 교훈(learnings)·개인 사실(profile)·쪽지(memo) 셋이며 — `namu_sync_setup`과 tasks는 노출되지 않는다(경로 B와 같은 이유, [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고).
+노출 도구는 개인용(경로 B)과 동일한 **10종**이다 — 기억 3종(`namu_recall`/`namu_record`/`namu_search`)과 첨부 7종(`namu_upload_file`/`namu_list_files`/`namu_download_file`/`namu_delete_file`/`namu_create_upload_ticket`/`namu_create_download_ticket`/`namu_check_ticket`). 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68).
+
+담을 수 있는 그릇은 **다섯 전부**다 — 교훈(learnings)·개인 사실(profile)·작업일지(tasks)·쪽지(memo)·첨부 기록(attachments). 노출되지 않는 것은 `namu_sync_setup`(서버의 저장소 배선을 바꾸는 도구라 원격에 열면 remote 탈취로 이어진다)과 쪽지 떼기·책갈피 2종(그 PC의 파일을 다루는 도구)뿐이다. 경로 B와 같은 기준이다 — [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고.
+
+> **개정 이력** — 최초본은 "그릇 셋(교훈·개인 사실·쪽지), tasks는 노출되지 않는다"고 적었다. 지금은 틀린 설명이다. 작업일지는 `routing_server.namu_record`의 `bowl == "tasks"` 분기로 기록되며(기록할 때 어느 프로젝트인지 함께 적어야 한다 — 웹에는 "지금 열어 둔 폴더"가 없기 때문), 첨부 기록 그릇은 `namu-file-upload-download`(2026-08-07)로 신설됐다.
 
 포트·이미지 태그·Cloudflare ingress 같은 인프라 세부는 onnamu-project/specs 관할이라 이 문서에서는 다루지 않는다(중복 관리 금지).
 
@@ -32,7 +36,7 @@
 | **웹 AI**(claude.ai, ChatGPT 등 브라우저에서 쓰는 AI) | 이 문서대로 **접속 주소를 커넥터에 붙인다** |
 | **Claude Code · agy**(터미널에서 쓰는 AI) | 주소를 붙이는 게 아니라 **나무를 플러그인으로 설치**한다 → [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md) |
 
-왜 Claude Code·agy는 주소를 붙이면 안 되나 — 이 주소로 넘어가는 것은 **기억 도구 3개뿐**이다. 세션 시작 브리핑, `/namu-task` 작업 절차, 워커 호출, 마무리 훅처럼 나무의 나머지 절반은 플러그인에만 들어 있고 주소로는 따라오지 않는다. 게다가 기억이 쌓이는 자리도 갈라진다(플러그인은 그 PC의 `~/.namu`, 이 주소는 사용자 GitHub 저장소). 반쪽짜리 나무를 쓰면서 기억까지 두 곳으로 흩어지는 셈이라, 터미널 사용자에게는 권하지 않는다.
+왜 Claude Code·agy는 주소를 붙이면 안 되나 — 이 주소로 넘어가는 것은 **기억과 파일뿐**이다. 세션 시작 브리핑, `/namu-task` 작업 절차, 워커 호출, 마무리 훅처럼 나무의 나머지 절반은 플러그인에만 들어 있고 주소로는 따라오지 않는다. 게다가 기억이 쌓이는 자리도 갈라진다(플러그인은 그 PC의 `~/.namu`, 이 주소는 사용자 GitHub 저장소). 반쪽짜리 나무를 쓰면서 기억까지 두 곳으로 흩어지는 셈이라, 터미널 사용자에게는 권하지 않는다.
 
 ### 2-2. 접속 주소 받기 — 절차는 사이트가 안내한다
 
@@ -49,7 +53,7 @@
 |---|---|
 | [홈](https://namu-cloud.onnamu.kr/) | 한 줄 소개 · 기억이 어디 있는지 · 웹/터미널 갈림길 |
 | [시작하기](https://namu-cloud.onnamu.kr/start) | 가입부터 AI에 붙이기까지 네 걸음 |
-| [무엇을 기억하나](https://namu-cloud.onnamu.kr/memory) | 3층 기록 · 그릇 세 가지 · 담기지 않는 것 |
+| [무엇을 기억하나](https://namu-cloud.onnamu.kr/memory) | 3층 기록 · 그릇 다섯 가지 · 파일 주고받기 |
 | [안전](https://namu-cloud.onnamu.kr/safety) | 원본 위치 · 권한 범위 · 주소 관리 · 그만두는 법 |
 | [자주 묻는 질문](https://namu-cloud.onnamu.kr/faq) | 요금 · 저장소 · 여러 AI 연결 등 |
 
@@ -103,8 +107,16 @@ https://namu-cloud.onnamu.kr/mcp/<내-개인-열쇠>?client=<AI-이름>
 ## 6. 지금 안 되는 것 / 나중 계획
 
 - 접속 주소는 사람이 브라우저로 받아 손으로 붙이는 방식이다. OAuth로 AI 클라이언트가 직접 인증을 받는 형태(동적 클라이언트 등록)는 아직 아니다 — 상세는 [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md) §11 참고.
-- tasks(작업 기록)·`namu_sync_setup`은 이 경로에 노출되지 않는다. `namu_record`에 `bowl='tasks'`로 부르면 조용히 다른 그릇에 담지 않고 거절한다 — 작업 기록은 코어가 PC별 위치(홈 폴더)에 쓰는 데이터라 사용자별로 갈라지지 않기 때문이다(namu-68).
-- `namu_search`는 아직 교훈(learnings) 그릇만 찾는다. 개인용 서버의 `bowl=` 축(개인 사실·쪽지 검색)은 이 경로에 아직 없다 — 저장·조회는 되므로(`namu_recall`이 세 그릇을 다 돌려준다) 기록이 유실되지는 않는다.
+- `namu_sync_setup`과 쪽지 떼기·책갈피 2종은 이 경로에 노출되지 않는다(플러그인 전용).
+- 웹 화면(`/auth/memory`)에서 기억을 고쳐 쓰는 것은 아직 안 된다 — 쪽지 떼기만 예외다.
+
+**앞선 판에서 "안 된다"고 적혀 있었으나 지금은 되는 것** (2026-08-08 확인)
+
+| 옛 서술 | 지금 |
+|---|---|
+| tasks는 이 경로에 노출되지 않는다 — `bowl='tasks'`로 부르면 거절한다 | **된다.** `routing_server.namu_record`의 `bowl == "tasks"` 분기가 회원 저장소 사본의 `tasks/<프로젝트>/`에 쓴다. 기록할 때 어느 프로젝트인지 함께 적어야 한다 |
+| `namu_search`는 교훈 그릇만 찾는다 | **다섯 그릇 전부 찾는다.** 허용 목록을 손으로 적지 않고 코어 `cfg.BOWL_NAMES`를 그대로 본다 — 손으로 적어 두었던 탓에 코어가 그릇을 다 받은 뒤에도 이 서버만 멈춰 있던 실제 사고가 있었다 |
+| 첨부 파일은 범위 밖 | **된다.** 첨부 7종이 노출되며 파일은 회원 저장소 `attach_file/`로 간다 — 상세는 [`namu_attach_files.md`](namu_attach_files.md) |
 
 ## 관련 문서
 
