@@ -499,6 +499,9 @@ def namu_search(
       - 'learnings' (default): past lessons/notes.
       - 'tasks': the scrollback of task log lines across every task — use this
         for "what did I do yesterday", "what happened on this task", etc.
+        Each task's brief (its title, purpose and done-criteria) is in here
+        too, as one whole entry tagged '설명서' — that is what answers
+        "what was that task about?".
         `project` narrows it to one project folder; omit for all merged.
       - 'profile': facts about the user (superseded ones excluded).
       - 'memo': sticky notes currently up, oldest first.
@@ -667,6 +670,10 @@ def _task_journal_for_user(
     (그 함수는 컨테이너 홈을 훑는다). 줄을 해석하고 축으로 거르는 부분은 코어의
     `_parse_log_line`/`_display_text`/`_task_matches`/`_normalize_bound`를 그대로
     부른다 — 같은 파일을 개인용과 다르게 읽으면 안 된다.
+
+    작업 설명서(task.md)도 같은 목록에 담는다(2026-08-08). 파싱은 코어의
+    `parse_task_doc`을 부르며, 여기에 베끼지 않는 이유는 위와 같다 — 개인용이
+    `task_docs()`로 하는 일을 폴더 규칙만 바꿔 하는 것이다.
     """
     if project is None:
         targets = [(d.name, d) for d in _task_project_dirs_for_user(user_key)]
@@ -717,6 +724,32 @@ def _task_journal_for_user(
                     "text": shown,
                     "detail": rest,
                 })
+
+        # 작업 설명서 — 축은 일지 줄과 똑같이 건다. 한 그릇에 섞기로 한 이상 축이
+        # 종류마다 다르게 들으면 결과를 믿을 수 없기 때문이다.
+        try:
+            doc_files = list(tasks_root.glob("*/task.md"))
+        except OSError:
+            doc_files = []
+
+        for doc_path in doc_files:
+            task_slug = doc_path.parent.name
+            if task is not None and not task_resolve._task_matches(task_slug, task):
+                continue
+            entry = task_resolve.parse_task_doc(doc_path, project_name)
+            if entry is None:
+                continue
+            ts = entry["ts"]
+            if since_bound is not None and ts < since_bound:
+                continue
+            if until_bound is not None and ts > until_bound:
+                continue
+            if machine is not None and entry["machine"] != machine:
+                continue
+            # 설명서에는 `(via ...)` 꼬리표가 없다 — via 축을 주면 항상 빠진다.
+            if via is not None and entry["via"] != via:
+                continue
+            entries.append(entry)
 
     entries.sort(key=lambda e: (e["ts"], e["project"], e["task_slug"]), reverse=True)
     return entries

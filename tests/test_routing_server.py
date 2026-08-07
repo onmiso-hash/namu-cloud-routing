@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 
 import identity
 import routing_server as rs
+import task_resolve
 import user_repo as ur
 
 # 오토유즈 스텁(_identity_and_repo_sync_stub)이 ur.ensure_ready/ur.push를 대역으로
@@ -529,6 +530,29 @@ def test_search_tasks_bowl_uses_the_core_word_rule(_fake_home):
     assert rs.namu_search(query="문서 설계", bowl="tasks", ctx=_ctx("alice"))["count"] == 1
     # 한 낱말이라도 없으면 안 걸린다(AND이지 OR이 아니다).
     assert rs.namu_search(query="설계 첨부", bowl="tasks", ctx=_ctx("alice"))["count"] == 0
+
+
+def test_search_tasks_bowl_finds_the_task_doc(tmp_path, _fake_home):
+    """작업 설명서(task.md)도 같은 그릇에서 찾힌다 — 개인용과 같은 몫(2026-08-08).
+
+    전에는 검색이 log.md만 봐서 "그 작업이 뭐였지"(제목·목적·완료조건)가 낱말로
+    안 찾혔다. 이 분기는 회원별 폴더를 훑느라 코어 함수를 통째로는 못 부르지만,
+    **설명서를 해석하는 규칙은 코어의 `parse_task_doc`을 부른다** — 바로 위 시험이
+    적어 둔 사고(규칙을 베껴 와 두 서버가 갈라진 일)를 되풀이하지 않기 위해서다.
+    """
+    _make_task()
+    task_md = (
+        tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo" / "task.md"
+    )
+    task_md.write_text(
+        task_md.read_text(encoding="utf-8") + "- [ ] 설명서에만있는조건\n",
+        encoding="utf-8",
+    )
+
+    got = rs.namu_search(query="설명서에만있는조건", bowl="tasks", ctx=_ctx("alice"))
+    assert got["count"] == 1
+    assert got["results"][0]["tag"] == task_resolve.TASK_DOC_TAG
+    assert got["results"][0]["task_slug"] == "namu-99-demo"
 
 
 def test_closed_task_drops_out_of_open_list(_fake_home):
