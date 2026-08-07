@@ -72,6 +72,11 @@ def bare_repo(tmp_path):
     """"사용자 GitHub 저장소" 역할을 하는 로컬 bare 저장소. 커밋 하나(a.txt)를 심어 둔다."""
     bare = tmp_path / "remote.git"
     _git(["init", "-q", "--bare", "-b", "main", str(bare)], cwd=tmp_path)
+    # 부분 복제(`--filter=blob:none`)를 로컬 저장소 상대로도 실제로 겪게 한다.
+    # 이 설정이 없으면 서버가 필터를 광고하지 않아 git이 "filtering not recognized
+    # by server, ignoring"으로 조용히 통짜 전송으로 되돌아간다 — 그러면 첨부 격리
+    # 테스트가 아무것도 검증하지 못한 채 통과한다(GitHub은 이 필터를 지원한다).
+    _git(["config", "uploadpack.allowFilter", "true"], cwd=bare)
     seed = tmp_path / "_seed"
     _git(["clone", "-q", f"file://{bare}", str(seed)], cwd=tmp_path)
     _git(["config", "user.email", "seed@example.com"], cwd=seed)
@@ -88,6 +93,7 @@ def empty_bare_repo(tmp_path):
     """커밋이 0개인 진짜 빈 저장소 — GitHub에서 갓 만든 저장소의 기본값(실제 온보딩 시나리오)."""
     bare = tmp_path / "empty_remote.git"
     _git(["init", "-q", "--bare", "-b", "main", str(bare)], cwd=tmp_path)
+    _git(["config", "uploadpack.allowFilter", "true"], cwd=bare)
     return bare
 
 
@@ -150,9 +156,13 @@ def test_ensure_ready_clones_shallow_and_scrubs_origin(conn, fake_token, local_r
     assert (target / ".git" / "shallow").exists(), "clone이 얕게(depth 1) 유지되지 않았다"
 
     cfg_text = (target / ".git" / "config").read_text()
-    assert "[remote" not in cfg_text, "origin 원격이 즉시 제거되지 않았다"
+    assert '[remote "origin"]' not in cfg_text, "origin 원격이 즉시 제거되지 않았다"
     assert "FAKE_TEST_TOKEN" not in cfg_text
     assert "x-access-token" not in cfg_text
+    # 첨부 격리 표시(`[remote "namu-origin"]`)는 남아 있어도 되지만, **주소 줄은
+    # 어떤 형태로도 남으면 안 된다** — 주소가 남는다는 것은 곧 토큰이 디스크에
+    # 적혔다는 뜻이기 때문이다(주소 없는 표시만 남기는 것이 이 설계의 핵심).
+    assert "url = " not in cfg_text, f"원격 주소가 config에 남았다:\n{cfg_text}"
 
 
 def test_ensure_ready_stays_shallow_after_remote_advances(conn, fake_token, local_remote, bare_repo, tmp_path):
@@ -793,3 +803,167 @@ def test_remove_stale_refuses_dir_without_git(conn, tmp_path, monkeypatch):
     assert key not in removed
     assert partial.exists(), "관문 (c) 없이 .git 없는 폴더까지 지워졌다"
     assert (partial / "leftover.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# 첨부 격리 — `attach_file/`은 서버 사본으로 내려오지 않는다
+# (namu-file-upload-download 3단계. 이 절의 테스트는 전부 진짜 git으로 돌린다.)
+# ---------------------------------------------------------------------------
+def _seed_attachment(bare, tmp_path, work_name: str, rel_path: str, size: int) -> None:
+    """"다른 PC가 첨부 파일을 올렸다"를 흉내낸다 — bare 저장소에 실제 이진 파일을
+    커밋해 넣는다. 크기가 있어야 "안 받아왔다"를 바이트로 확인할 수 있다."""
+    work = tmp_path / work_name
+    _git(["clone", "-q", f"file://{bare}", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "up@example.com"], cwd=work)
+    _git(["config", "user.name", "Uploader"], cwd=work)
+    path = work / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x7f" * size)
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-q", "-m", f"attach {rel_path}"], cwd=work)
+    _git(["push", "-q", "origin", "main"], cwd=work)
+
+
+def _blob_present(target, rev_path: str) -> bool:
+    """그 경로의 파일 몸통이 이 사본의 손에 있는가. 없으면 git은 받아오려 시도했다가
+    실패한다(주소를 안 적어 뒀으므로) — 그 실패가 곧 "안 받아왔다"의 증거다."""
+    proc = subprocess.run(
+        ["git", "cat-file", "-e", f"HEAD:{rev_path}"],
+        cwd=target, capture_output=True, text=True,
+    )
+    return proc.returncode == 0
+
+
+def test_attach_dir_name_matches_core_config():
+    """폴더 이름 계약 — 나무 코어(vendor)와 클라우드가 같은 문자열을 써야 한다.
+    한쪽만 바뀌면 격리가 뚫린 채 첨부가 서버 사본에 쌓인다(되돌릴 수 없다)."""
+    import routing_server  # noqa: F401 — vendor/namu-plugin을 sys.path에 얹는다
+    import config as core_config
+
+    assert ur.ATTACH_DIR_NAME == core_config.ATTACH_DIR_NAME
+
+
+def test_ensure_ready_does_not_bring_attachment_bodies(conn, fake_token, local_remote, bare_repo, tmp_path):
+    _seed_attachment(bare_repo, tmp_path, "_up1", "attach_file/big.bin", 400_000)
+    key = _connect_user(conn, 40, "attach-clone")
+
+    target = ur.ensure_ready(conn, key)
+
+    assert (target / "a.txt").read_text() == "hello\n", "포함 경로는 정상적으로 있어야 한다"
+    assert not (target / "attach_file").exists(), "첨부 폴더가 서버 작업트리에 나타났다"
+    assert not _blob_present(target, "attach_file/big.bin"), "첨부 몸통이 서버로 내려왔다"
+    assert ur.dir_size(key) < 200_000, f"400KB 첨부가 사본 크기에 반영됐다({ur.dir_size(key)}바이트)"
+
+
+def test_ensure_ready_fetch_updates_memory_without_pulling_attachments(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """갱신 경로의 핵심 — 바뀐 기억 파일은 반영되고, 같은 커밋에 함께 올라온 첨부는
+    안 내려온다. (걸러진 fetch는 기억 파일 몸통조차 안 가져오므로, reset이 그 몇 개만
+    끌어오는 배선이 살아 있어야 이 테스트가 통과한다.)"""
+    key = _connect_user(conn, 41, "attach-fetch")
+    target = ur.ensure_ready(conn, key)
+
+    work = tmp_path / "_up2"
+    _git(["clone", "-q", f"file://{bare_repo}", str(work)], cwd=tmp_path)
+    _git(["config", "user.email", "up@example.com"], cwd=work)
+    _git(["config", "user.name", "Uploader"], cwd=work)
+    (work / "a.txt").write_text("updated-from-other-pc\n")
+    (work / "attach_file").mkdir()
+    (work / "attach_file" / "later.bin").write_bytes(b"\x2f" * 400_000)
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-q", "-m", "memory + attachment"], cwd=work)
+    _git(["push", "-q", "origin", "main"], cwd=work)
+
+    target = ur.ensure_ready(conn, key)
+
+    assert (target / "a.txt").read_text() == "updated-from-other-pc\n", "기억 파일 갱신이 반영되지 않았다"
+    assert not (target / "attach_file").exists()
+    assert not _blob_present(target, "attach_file/later.bin"), "갱신 때 첨부 몸통이 내려왔다"
+    assert ur.dir_size(key) < 200_000
+
+
+def test_ensure_ready_never_writes_any_remote_url_to_config(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """토큰 비노출의 최종 방어선 — clone/fetch 어느 경로를 지나도 `.git/config`에
+    주소가 남으면 안 된다. `fetch --filter`를 주소 인자로 주면 git이 그 주소를
+    `[remote "<주소>"]`로 영구히 적어 넣는다(실측) — 이 테스트가 그 회귀를 잡는다."""
+    key = _connect_user(conn, 42, "no-url")
+    target = ur.ensure_ready(conn, key)
+    _seed_attachment(bare_repo, tmp_path, "_up3", "attach_file/x.bin", 1000)
+    ur.ensure_ready(conn, key)  # 갱신(fetch) 경로까지 지난다
+
+    cfg_text = (target / ".git" / "config").read_text()
+    assert "url" not in cfg_text, f"원격 주소가 config에 남았다:\n{cfg_text}"
+    assert "FAKE_TEST_TOKEN" not in cfg_text
+    assert str(bare_repo) not in cfg_text
+
+
+def test_git_gc_survives_on_isolated_copy(conn, fake_token, local_remote, bare_repo, tmp_path):
+    """`git gc`가 죽지 않아야 한다 — 몸통이 빠진 사본에 promisor 표시가 없으면
+    `fatal: unable to read <oid>`로 실패한다(실측). 서버 사본은 오래 사는 폴더라
+    정리가 영영 안 되는 상태로 두면 안 된다."""
+    _seed_attachment(bare_repo, tmp_path, "_up4", "attach_file/g.bin", 200_000)
+    key = _connect_user(conn, 43, "gc-user")
+    target = ur.ensure_ready(conn, key)
+
+    proc = subprocess.run(["git", "gc"], cwd=target, capture_output=True, text=True)
+
+    assert proc.returncode == 0, f"gc가 실패했다: {proc.stdout}{proc.stderr}"
+    assert (target / "a.txt").read_text() == "hello\n"
+
+
+def test_ensure_ready_retrofits_isolation_onto_existing_full_copy(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """이 배선 이전에 만들어진 통짜 사본에도 격리가 소급 적용돼야 한다 —
+    안 그러면 "새로 가입한 사람만 안전한" 반쪽 격리가 된다."""
+    key = _connect_user(conn, 44, "legacy")
+    _seed_attachment(bare_repo, tmp_path, "_up5", "attach_file/old.bin", 300_000)
+
+    # 옛 코드가 만들던 그대로의 사본(통짜 얕은 복제 + origin 제거)을 손으로 만든다.
+    target = ur.user_dir(key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _git(["clone", "-q", "--depth", "1", "--no-tags", f"file://{bare_repo}", str(target)], cwd=tmp_path)
+    _git(["remote", "remove", "origin"], cwd=target)
+    assert (target / "attach_file" / "old.bin").exists(), "사전 조건: 옛 사본에는 첨부가 있다"
+
+    target = ur.ensure_ready(conn, key)
+
+    assert ur.attach_isolation_active(target), "기존 사본에 격리가 적용되지 않았다"
+    assert not (target / "attach_file").exists(), "소급 적용 후에도 첨부가 작업트리에 남아 있다"
+    assert (target / "a.txt").read_text() == "hello\n"
+
+
+def test_isolated_copy_still_pushes_and_keeps_attachments_on_user_repo(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """격리는 서버가 안 받는 것일 뿐, 사용자 저장소의 첨부를 **지우면 절대 안 된다** —
+    `git add -A`가 작업트리에 없는 제외 경로를 삭제로 스테이징하면 push 한 번에
+    사용자의 첨부가 전부 사라진다."""
+    _seed_attachment(bare_repo, tmp_path, "_up6", "attach_file/keep.bin", 50_000)
+    key = _connect_user(conn, 45, "push-safe")
+    target = ur.ensure_ready(conn, key)
+    (target / "a.txt").write_text("server wrote this\n")
+
+    assert ur.push(conn, key, message="server write") is True
+
+    listed = _git(["ls-tree", "-r", "--name-only", "main"], cwd=bare_repo).split()
+    assert "attach_file/keep.bin" in listed, "push가 사용자 저장소의 첨부를 지웠다"
+    assert "a.txt" in listed
+    assert _git(["show", "main:a.txt"], cwd=bare_repo) == "server wrote this\n"
+
+
+def test_attach_isolation_is_idempotent_across_calls(conn, fake_token, local_remote, bare_repo, tmp_path):
+    _seed_attachment(bare_repo, tmp_path, "_up7", "attach_file/i.bin", 1000)
+    key = _connect_user(conn, 46, "idem")
+    target = ur.ensure_ready(conn, key)
+    first = (target / ".git" / "config").read_text()
+
+    ur.ensure_ready(conn, key)
+    ur.ensure_ready(conn, key)
+
+    assert (target / ".git" / "config").read_text() == first, "반복 호출이 설정을 계속 바꾼다"
+    assert ur.attach_isolation_active(target)
+    assert not (target / "attach_file").exists()

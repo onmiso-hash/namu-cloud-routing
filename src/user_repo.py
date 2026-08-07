@@ -22,6 +22,14 @@ set-url`(금지된 패턴 — 인증된 URL을 다시 심는 것)이 아니라 `
 URL을 인자로 직접 넘기므로(원격 이름을 쓰지 않으므로) origin이 없어도 전혀 지장이
 없다(실측 확인 — origin 없는 저장소에서도 URL 인자 fetch/push가 정상 동작).
 
+## 왜 첨부 폴더(attach_file/)는 이 사본으로 안 내려오는가
+
+파일 첨부(namu-file-upload-download)는 사용자 저장소에 `attach_file/` 폴더로 쌓이는데,
+서버는 그 파일의 몸통을 읽을 일이 전혀 없다(파일은 GitHub API로 직접 오간다). 그런데
+서버 사본은 사용자당 50MB 상한 안에서 살아야 하므로, 첨부가 여기까지 내려오면 상한을
+곧바로 무너뜨린다. 그래서 이 사본은 **부분 복제(`--filter=blob:none`) + sparse-checkout
+제외**로 첨부를 아예 받지 않는다. 자세한 배선 근거는 아래 "5) 첨부 격리" 절 주석에 있다.
+
 ## 왜 CalledProcessError를 밖으로 내보내지 않는가 (토큰 마스킹의 실제 근거)
 
 이 git 버전은 인증 실패 시 자기 에러 메시지에서 이미 자격증명을 가려준다(실측:
@@ -250,6 +258,134 @@ def _require_connected(conn, user_key: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 0) 첨부 격리 — `attach_file/`은 이 서버 사본으로 내려오지 않는다
+#    (namu-file-upload-download 3단계. 파일 도구보다 **먼저** 깔려야 한다.)
+# ---------------------------------------------------------------------------
+# 폴더 이름은 나무 코어(vendor/namu-agent/namu-plugin/config.py의 ATTACH_DIR_NAME)와
+# 같은 문자열이어야 한다 — 한쪽만 어긋나면 격리가 뚫린 채로 첨부가 서버에 쌓인다.
+# 코어를 import하지 않고 복제해 두는 이유는 `_USER_KEY_RE`(routing_server 복제)와
+# 같다: user_repo는 vendor를 sys.path에 얹지 않는 계층이다. 두 값이 어긋나면
+# tests/test_user_repo.py의 계약 테스트가 잡는다.
+ATTACH_DIR_NAME = "attach_file"
+
+# sparse-checkout(부분 체크아웃) 패턴. `--no-cone` 형식이며 순서가 의미를 가진다 —
+# 먼저 전부 포함하고 뒤에서 첨부 폴더만 뺀다.
+_ATTACH_SPARSE_PATTERNS = ("/*", f"!/{ATTACH_DIR_NAME}/")
+
+# promisor 원격(= "몸통이 빠져 있는 건 손상이 아니라 정상"이라는 표시)의 이름.
+#
+# ## 왜 이 표시가 필요한가 (실측 근거)
+#
+# 몸통이 빠진 사본에 promisor 원격이 하나도 없으면 `git gc`와 `git repack -ad`가
+# `fatal: unable to read <oid>`로 **죽는다**(2026-08-07 실측). 서버 사본은 오래
+# 살면서 계속 커밋이 쌓이는 폴더라 정리가 영영 안 되는 상태로 두면 안 된다.
+#
+# ## 왜 이 원격에 **주소를 안 적는가** (이게 이 설계의 핵심)
+#
+# 이 모듈의 절대 규칙은 "인증된 URL(토큰 포함)을 디스크에 남기지 않는다"이다.
+# 그런데 `git fetch --filter=... -- <주소> HEAD`처럼 주소를 인자로 주면, git이
+# 그 주소를 `[remote "<주소>"] promisor = true`로 **`.git/config`에 영구히 적어
+# 넣는다**(2026-08-07 실측 — 인자 URL은 아무것도 안 남긴다는 이 모듈의 기존 전제가
+# `--filter`를 붙이는 순간 깨진다). 그래서 필터를 쓰는 fetch는 반드시 **이름 붙은**
+# 원격으로 해야 하고, 그 이름에는 주소를 적지 않는다.
+#
+# 주소는 매 호출마다 명령줄 설정(`-c remote.<이름>.url=...`)으로만 얹는다
+# (`_promisor_url_args`). 명령줄 설정은 파일에 저장되지 않으므로 토큰이 디스크에
+# 닿지 않는다. `remote.<이름>.url`은 값이 덮이는 자리가 아니라 **덧붙는 목록**이라,
+# 파일에 주소가 하나라도 적혀 있으면 그쪽이 먼저 쓰인다(실측) — 그래서 "파일에는
+# 주소를 아예 안 적는다"가 규칙이 된다.
+#
+# 부수 효과로 안전장치가 하나 더 생긴다: 주소 없이 몸통을 요청하면(예: 실수로
+# 첨부 파일을 읽으려 하면) git이 조용히 내려받는 대신 그 자리에서 실패한다
+# (`fatal: 'namu-origin' does not appear to be a git repository` — 실측). 서버가
+# 첨부 몸통을 실수로도 받아올 수 없다는 뜻이다.
+_PROMISOR_REMOTE_NAME = "namu-origin"
+
+
+def _promisor_url_args(url: str) -> list[str]:
+    """받아오는 명령(fetch/reset)에만 얹는 명령줄 설정 — 이 순간에만 존재하는 주소."""
+    return ["-c", f"remote.{_PROMISOR_REMOTE_NAME}.url={url}"]
+
+
+def attach_isolation_active(target: Path) -> bool:
+    """이 사본에 첨부 격리가 이미 걸려 있는가(멱등 판정용).
+
+    판정 근거는 promisor 표시(`remote.<이름>.partialclonefilter`) 하나다 — 이 값은
+    우리가 격리를 위해 넣은 것이고, sparse-checkout(`core.sparseCheckout`)은 다른
+    이유로도 켜질 수 있어 단독 근거가 되지 못한다.
+    """
+    if not (target / ".git").is_dir():
+        return False
+    proc = subprocess.run(
+        ["git", "config", "--get", f"remote.{_PROMISOR_REMOTE_NAME}.partialclonefilter"],
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() == "blob:none"
+
+
+def _apply_sparse_exclusion(target: Path) -> None:
+    """첨부 폴더가 작업트리에 나타나지 않게 한다(멱등).
+
+    부분 복제(`--filter=blob:none`)만으로는 부족하다 — 필터는 "몸통을 미리 안
+    받는다"일 뿐이라, 작업트리를 채우는 순간 빠진 몸통을 그때 받아온다. 작업트리에서
+    빼야 비로소 받아올 이유 자체가 사라진다.
+    """
+    _run_git(
+        ["sparse-checkout", "set", "--no-cone", *_ATTACH_SPARSE_PATTERNS], cwd=target
+    )
+
+
+def _mark_promisor_remote(target: Path) -> None:
+    """"몸통이 빠져 있어도 정상"이라는 표시를 남긴다 — **주소는 적지 않는다**
+    (이유는 `_PROMISOR_REMOTE_NAME` 주석). 이미 있으면 같은 값을 다시 쓸 뿐이다."""
+    _run_git(["config", f"remote.{_PROMISOR_REMOTE_NAME}.promisor", "true"], cwd=target)
+    _run_git(
+        ["config", f"remote.{_PROMISOR_REMOTE_NAME}.partialclonefilter", "blob:none"],
+        cwd=target,
+    )
+
+
+def _ensure_attach_isolation(target: Path) -> None:
+    """이미 만들어져 있는 사본에 격리를 소급 적용한다(멱등).
+
+    이 배선이 배포되기 전에 만들어진 서버 사본은 첨부를 걸러낼 설정이 하나도 없는
+    통짜 복제다. 그런 사본도 다음 `ensure_ready` 때 이 함수를 통해 격리 상태로
+    바뀌어야 한다 — 그러지 않으면 "새로 가입한 사람만 안전한" 반쪽 격리가 된다.
+    """
+    if attach_isolation_active(target):
+        return
+    _apply_sparse_exclusion(target)
+    _mark_promisor_remote(target)
+
+
+def _checkout_worktree(target: Path, token: "str | None") -> None:
+    """`--no-checkout`으로 받아온 사본의 작업트리를 채운다.
+
+    커밋이 하나도 없는 저장소(GitHub에서 갓 만든 기본값)에서는 건너뛴다 — 그
+    상태에서 checkout은 `fatal: You are on a branch yet to be born`으로 실패하는데
+    (실측), 이건 오류가 아니라 "채울 게 없다"는 정상 상태다.
+
+    이 시점에는 아직 clone이 심어 둔 origin(토큰이 박힌 주소)이 살아 있어야 한다 —
+    `--filter=blob:none`으로 몸통을 하나도 안 받았기 때문에, 포함 경로의 몸통은
+    바로 이 checkout이 원격에서 끌어온다. 첨부는 sparse-checkout에서 이미 빠져
+    있으므로 이때도 내려오지 않는다.
+    """
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if head.returncode != 0:
+        return
+    _run_git(["checkout"], cwd=target, token=token)
+
+
+# ---------------------------------------------------------------------------
 # 1) 사본 준비/갱신
 # ---------------------------------------------------------------------------
 def ensure_ready(conn, user_key: str) -> Path:
@@ -287,24 +423,44 @@ def ensure_ready(conn, user_key: str) -> Path:
         # 것과 같은 잣대).
         _check_declared_size_before_transfer(record, token, action="clone")
         target.parent.mkdir(parents=True, exist_ok=True)
+        # `--filter=blob:none --no-checkout`: 파일 몸통을 하나도 안 받은 채로 뼈대만
+        # 받는다. 첨부 격리를 **작업트리를 채우기 전에** 걸어야 하기 때문이다 —
+        # 순서가 반대면 첨부가 한 번 내려온 뒤에 지우는 꼴이 되고, 그 사이 디스크를
+        # 이미 다 쓴다.
         _run_git(
-            ["clone", "--depth", "1", "--no-tags", "--", url, str(target)],
+            [
+                "clone", "--depth", "1", "--no-tags",
+                "--filter=blob:none", "--no-checkout",
+                "--", url, str(target),
+            ],
             cwd=target.parent,
             token=token,
         )
+        _apply_sparse_exclusion(target)
+        _checkout_worktree(target, token=token)
         # clone은 인증된 URL을 .git/config에 origin으로 저장한다(실측 확인) — 토큰이
         # 디스크에 평문으로 남지 않도록 곧바로 지운다. 이후 fetch/push는 URL을 인자로
-        # 직접 넘기므로 origin이 없어도 동작에 지장이 없다.
+        # (또는 명령줄 설정으로) 직접 넘기므로 origin이 없어도 동작에 지장이 없다.
         _run_git(["remote", "remove", "origin"], cwd=target)
+        # origin을 지우면 promisor 표시도 함께 사라진다 — 몸통이 빠진 사본에 그 표시가
+        # 없으면 `git gc`/`repack`이 죽으므로(실측), 주소 없는 표시를 다시 남긴다.
+        _mark_promisor_remote(target)
     else:
         # 4차 재검수 §2 — clone 경로와 대칭으로 갱신(fetch) 경로에도 같은 사전
         # 관문을 건다. 예전에는 이 분기에 사전 검사가 아예 없어서, 이미 연결된
         # 사용자의 원격이 나중에 커져도(예: 다른 PC에서 큰 파일을 커밋) 두 번째
         # 이후의 `ensure_ready` 호출이 무방비로 fetch를 시작했다.
         _check_declared_size_before_transfer(record, token, action="fetch")
+        # 이 배선 이전에 만들어진 통짜 사본에도 여기서 격리를 소급 적용한다 —
+        # 받아오기 **전에** 걸어야 이번 fetch부터 첨부 몸통이 안 들어온다.
+        _ensure_attach_isolation(target)
         try:
             _run_git(
-                ["fetch", "--depth", "1", "--no-tags", "--", url, "HEAD"],
+                [
+                    *_promisor_url_args(url),
+                    "fetch", "--depth", "1", "--no-tags", "--filter=blob:none",
+                    _PROMISOR_REMOTE_NAME, "HEAD",
+                ],
                 cwd=target,
                 token=token,
             )
@@ -314,7 +470,15 @@ def ensure_ready(conn, user_key: str) -> Path:
                 # 상태(clone 시점에 만든, 커밋 없는 초기 브랜치)를 그대로 둔다.
                 return target
             raise
-        _run_git(["reset", "--hard", "FETCH_HEAD"], cwd=target)
+        # reset에도 같은 주소를 얹는다. 걸러진 fetch는 바뀐 기억 파일의 몸통까지
+        # 안 받아오기 때문에(실측), 작업트리를 갱신하는 이 순간에 그 몇 개만
+        # 원격에서 끌어와야 한다 — 주소가 없으면 여기서 실패한다. 첨부는 작업트리에
+        # 없으니 애초에 요청 대상이 아니다.
+        _run_git(
+            [*_promisor_url_args(url), "reset", "--hard", "FETCH_HEAD"],
+            cwd=target,
+            token=token,
+        )
 
     try:
         _check_quota(user_key)
