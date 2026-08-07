@@ -67,6 +67,8 @@ import memo  # noqa: E402
 import profile  # noqa: E402
 import record_input  # noqa: E402
 import task_resolve  # noqa: E402
+import ticket_web  # noqa: E402
+import tickets  # noqa: E402
 import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
@@ -82,6 +84,8 @@ EXPOSED_TOOLS = frozenset({
     "namu_recall", "namu_search", "namu_record",
     "namu_upload_file", "namu_list_files", "namu_download_file",
     "namu_delete_file",
+    "namu_create_upload_ticket", "namu_create_download_ticket",
+    "namu_check_ticket",
 })
 
 mcp = FastMCP(
@@ -1247,54 +1251,57 @@ def _record_attachment_entry(
     )
 
 
-_UPLOAD_DESCRIPTION = (
-    "Upload one file to this user's own GitHub repository (under attach_file/) "
-    "and log it in the attachments bowl. The file goes straight to GitHub — it "
-    "is never kept on this server. Send the bytes as base64 in `content_base64`.\n"
-    "- `name`: the file name, e.g. '2026-3분기-보고서.pdf'. Sub-folders are not "
-    "used; the file always lands at attach_file/<name>.\n"
-    "- Uploading the same name again replaces the file on GitHub and is logged "
-    "as a new revision ('새 판'); the earlier log entry stays.\n"
-    "- `summary` (what this file is) and `reason` (why it was kept) are "
-    "required: the file body is not synced to the user's PCs, so these two "
-    "lines are what makes the file findable later.\n"
-    "- `body` is optional here — for an attachment the file itself IS the full "
-    "story. Add it only when there is context the file does not carry."
-)
+def normalize_meta(meta: dict) -> dict:
+    """첨부 한 건에 딸린 설명 칸들을 검사하고 다듬는다.
 
-
-@mcp.tool(description=_UPLOAD_DESCRIPTION)
-def namu_upload_file(
-    name: str,
-    content_base64: str,
-    summary: str,
-    reason: str,
-    body: str | None = None,
-    topic: str | None = None,
-    project: str | None = None,
-    tags: "list[str] | None" = None,
-    ctx: Context | None = None,
-) -> dict:
-    key = _resolve_user(ctx)
-    via = _resolve_via(ctx)
-    # body는 일부러 필수가 아니다(2026-08-07 첫 실사용). 다른 기억처럼 필수로 뒀더니
-    # 붙은 AI가 그 칸을 빼고 불렀고, 거절당할 때마다 **파일 내용 전체를 처음부터 다시
-    # 써서** 재시도했다 — 회원 눈에는 몇 분째 멈춘 것으로 보였다. 첨부에서는 파일
-    # 자체가 원문이라 애초에 요구할 이유도 없었다.
-    body = (body or "").strip() or cfg.OMITTED
-    for field_name, value in (("summary", summary), ("reason", reason)):
-        if not (value or "").strip():
+    올리기 도구와 올리기 티켓이 **같은 칸을 같은 규칙으로** 받아야 하므로 판정을
+    한 곳에 둔다. 티켓은 발급 시점에 이 함수를 한 번 통과하고, 파일이 도착했을 때
+    `store_file`이 한 번 더 통과한다 — 발급과 도착 사이에 저장해 둔 값이 손대졌을
+    가능성을 거르는 자리다.
+    """
+    meta = dict(meta or {})
+    for field_name in ("summary", "reason"):
+        if not (meta.get(field_name) or "").strip():
             raise ValueError(
                 f"'{field_name}'은 첨부에도 필수입니다 — 파일 몸통은 각 PC로 "
                 "내려오지 않으므로, 나중에 이 파일을 찾는 단서는 이 설명뿐입니다."
             )
-    try:
-        content = base64.b64decode(content_base64 or "", validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise ValueError(
-            f"content_base64를 읽지 못했습니다: {exc} — 파일 내용을 base64로 "
-            "실어 보내세요."
-        ) from None
+        meta[field_name] = meta[field_name].strip()
+    # body는 일부러 필수가 아니다(2026-08-07 첫 실사용). 다른 기억처럼 필수로 뒀더니
+    # 붙은 AI가 그 칸을 빼고 불렀고, 거절당할 때마다 **파일 내용 전체를 처음부터 다시
+    # 써서** 재시도했다 — 회원 눈에는 몇 분째 멈춘 것으로 보였다. 첨부에서는 파일
+    # 자체가 원문이라 애초에 요구할 이유도 없었다.
+    meta["body"] = (meta.get("body") or "").strip() or cfg.OMITTED
+    meta["topic"] = meta.get("topic") or None
+    meta["project"] = meta.get("project") or None
+    meta["tags"] = _normalize_tags(meta.get("tags"))
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# store_file — 파일 한 개가 회원 저장소에 자리 잡기까지의 전 과정.
+#
+# 이 함수를 따로 뗀 이유(설계서 11절 1단계): 파일이 들어오는 문이 둘이 됐다.
+# 하나는 MCP 도구(`namu_upload_file`)이고 다른 하나는 티켓 주소로 들어오는
+# 웹/curl 전송(`POST /u/<티켓>`)이다. 두 문이 각자 이 순서를 베껴 쓰면 한쪽만
+# 고쳐지는 날이 반드시 오는데, 그 순서에는 이미 실사용에서 한 번 데인 함정이
+# 들어 있다 — 사본 최신화를 **기록보다 먼저** 해야 한다는 것(바로 위 절 참고).
+# ---------------------------------------------------------------------------
+def store_file(
+    conn: sqlite3.Connection,
+    user_key: str,
+    name: str,
+    content: bytes,
+    meta: dict,
+    via: str,
+) -> dict:
+    """파일 한 개를 회원 저장소에 올리고 첨부 기록까지 남긴다.
+
+    돌려주는 것: `{"id", "path", "bytes", "status", "seconds"}`, 그리고 push가
+    밀렸을 때만 `"warning"`. 회원 장부 커넥션(`conn`)은 호출부가 열고 닫는다 —
+    웹 라우트와 MCP 도구가 각자 자기 요청 수명에 맞춰 여닫아야 하기 때문이다.
+    """
+    meta = normalize_meta(meta)
 
     # 단계별 시간을 재서 함께 돌려준다(2026-08-07). 회원이 "너무 느리다"고 했는데
     # 서버 안에서 무엇이 오래 걸렸는지 볼 방법이 없어 추측만 오갔다 — 붙은 AI가
@@ -1309,31 +1316,29 @@ def namu_upload_file(
         timings[label] = round(now - since, 2)
         return now
 
-    with closing(identity.connect()) as conn:
-        _sync_or_reject(conn, key)
-        t = _mark("사본_최신화_전", t0)
-        result = attach_files.upload(
-            conn, key, name, content,
-            attach_files.commit_message("올림", name),
-        )
-        t = _mark("깃허브_올리기", t)
-        # 기록을 쓰기 **전에** 맞춘다 — reset --hard가 안 커밋된 변경을 지우므로
-        # 순서를 뒤집으면 방금 쓴 첨부 기록이 날아간다.
-        _resync_after_repo_change(conn, key)
-        t = _mark("사본_최신화_후", t)
+    _sync_or_reject(conn, user_key)
+    t = _mark("사본_최신화_전", t0)
+    result = attach_files.upload(
+        conn, user_key, name, content,
+        attach_files.commit_message("올림", name),
+    )
+    t = _mark("깃허브_올리기", t)
+    # 기록을 쓰기 **전에** 맞춘다 — reset --hard가 안 커밋된 변경을 지우므로
+    # 순서를 뒤집으면 방금 쓴 첨부 기록이 날아간다.
+    _resync_after_repo_change(conn, user_key)
+    t = _mark("사본_최신화_후", t)
 
-        paths = _paths_for_user(key)
-        _ensure_fresh(paths)
-        status = "새 판" if result["replaced"] else "올림"
-        entry_id = _record_attachment_entry(
-            paths, path=result["path"], size=result["bytes"], status=status,
-            summary=summary, reason=reason, body=body,
-            topic=topic, project=project, tags=tags, via=via,
-        )
-        t = _mark("기록_저장", t)
-        warning = _push_and_collect_warning(conn, key)
-        _mark("기록_올리기", t)
-
+    paths = _paths_for_user(user_key)
+    _ensure_fresh(paths)
+    status = "새 판" if result["replaced"] else "올림"
+    entry_id = _record_attachment_entry(
+        paths, path=result["path"], size=result["bytes"], status=status,
+        summary=meta["summary"], reason=meta["reason"], body=meta["body"],
+        topic=meta["topic"], project=meta["project"], tags=meta["tags"], via=via,
+    )
+    t = _mark("기록_저장", t)
+    warning = _push_and_collect_warning(conn, user_key)
+    _mark("기록_올리기", t)
     timings["합계"] = round(time.perf_counter() - t0, 2)
     logger.info("첨부 올리기 시간(초): %s", timings)
 
@@ -1343,14 +1348,105 @@ def namu_upload_file(
         "bytes": result["bytes"],
         "status": status,
         "seconds": timings,
-        "note": (
-            "`seconds`는 서버가 이 요청을 받은 뒤 걸린 시간(초)입니다. 회원이 화면에서 "
-            "느낀 시간이 이보다 훨씬 길면, 느린 쪽은 서버가 아니라 파일 내용을 글자로 "
-            "옮겨 보내는 과정입니다 — 회원이 물으면 이 숫자를 그대로 보여주세요."
-        ),
     }
     if warning:
         out["warning"] = warning
+    return out
+
+
+_UPLOAD_DESCRIPTION = (
+    "Upload one file to this user's own GitHub repository (under attach_file/) "
+    "and log it in the attachments bowl. The file goes straight to GitHub — it "
+    "is never kept on this server.\n"
+    "**Text files: put the text itself in `content_text`. Do NOT base64-encode "
+    "it.** Writing base64 is slow because you have to emit every character.\n"
+    "**Binary files (PPT/PDF/images/video/zip) and anything over 100KB: do not "
+    "use this tool at all — use `namu_create_upload_ticket` instead.** Sending a "
+    "big file through this tool is very slow and may look frozen to the user.\n"
+    "- `content_text` (text) and `content_base64` (small binary, legacy) are "
+    "both optional, but exactly one of them must be given.\n"
+    "- `name`: the file name, e.g. '2026-3분기-보고서.pdf'. Sub-folders are not "
+    "used; the file always lands at attach_file/<name>.\n"
+    "- Uploading the same name again replaces the file on GitHub and is logged "
+    "as a new revision ('새 판'); the earlier log entry stays.\n"
+    "- `summary` (what this file is) and `reason` (why it was kept) are "
+    "required: the file body is not synced to the user's PCs, so these two "
+    "lines are what makes the file findable later.\n"
+    "- `body` is optional here — for an attachment the file itself IS the full "
+    "story. Add it only when there is context the file does not carry."
+)
+
+
+def _content_from_args(
+    content_text: "str | None", content_base64: "str | None"
+) -> bytes:
+    """`content_text`와 `content_base64` 중 주어진 하나를 바이트로 바꾼다.
+
+    둘 다 없거나 둘 다 있으면 거절한다 — "둘 다 주면 하나를 골라 쓴다"로 두면
+    서로 다른 두 내용이 왔을 때 서버가 조용히 한쪽을 버리게 되고, 회원은 자기가
+    보낸 것과 다른 파일이 저장된 사실을 알 방법이 없다.
+    """
+    has_text = content_text is not None and content_text != ""
+    has_b64 = content_base64 is not None and content_base64 != ""
+    if has_text and has_b64:
+        raise ValueError(
+            "content_text와 content_base64 중 하나만 주세요 — 둘 다 오면 어느 쪽이 "
+            "진짜 내용인지 서버가 알 수 없습니다. Give exactly one of them."
+        )
+    if not has_text and not has_b64:
+        raise ValueError(
+            "파일 내용이 없습니다 — 글자 파일이면 content_text에 원문을 그대로 "
+            "넣고, 바이너리이거나 100KB를 넘으면 namu_create_upload_ticket을 "
+            "쓰세요. Provide content_text, or use the upload ticket."
+        )
+    if has_text:
+        content = content_text.encode("utf-8")
+        if len(content) > attach_files.MAX_INLINE_TEXT_BYTES:
+            raise ValueError(
+                f"content_text가 너무 큽니다 ({len(content):,}바이트) — 이 칸의 "
+                f"상한은 {attach_files.MAX_INLINE_TEXT_BYTES:,}바이트입니다. "
+                "이보다 큰 파일은 namu_create_upload_ticket으로 올리세요. "
+                "content_text is too large; use namu_create_upload_ticket."
+            )
+        return content
+    try:
+        return base64.b64decode(content_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(
+            f"content_base64를 읽지 못했습니다: {exc} — 파일 내용을 base64로 "
+            "실어 보내세요."
+        ) from None
+
+
+@mcp.tool(description=_UPLOAD_DESCRIPTION)
+def namu_upload_file(
+    name: str,
+    summary: str,
+    reason: str,
+    content_text: str | None = None,
+    content_base64: str | None = None,
+    body: str | None = None,
+    topic: str | None = None,
+    project: str | None = None,
+    tags: "list[str] | None" = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    content = _content_from_args(content_text, content_base64)
+
+    meta = {
+        "summary": summary, "reason": reason, "body": body,
+        "topic": topic, "project": project, "tags": tags,
+    }
+    with closing(identity.connect()) as conn:
+        out = store_file(conn, key, name, content, meta, via)
+
+    out["note"] = (
+        "`seconds`는 서버가 이 요청을 받은 뒤 걸린 시간(초)입니다. 회원이 화면에서 "
+        "느낀 시간이 이보다 훨씬 길면, 느린 쪽은 서버가 아니라 파일 내용을 글자로 "
+        "옮겨 보내는 과정입니다 — 회원이 물으면 이 숫자를 그대로 보여주세요."
+    )
     return out
 
 
@@ -1421,27 +1517,236 @@ def namu_list_files(
 
 
 _DOWNLOAD_DESCRIPTION = (
-    "Fetch one uploaded file back, as base64 in `content_base64`. It comes "
-    "straight from the user's GitHub repository, not from this server.\n"
+    "Read one uploaded file back **so that you (the model) can look at its "
+    "contents**. It comes straight from the user's GitHub repository, not from "
+    "this server.\n"
+    "**If the point is to hand the file to the user, use "
+    "`namu_create_download_ticket` instead** — that gives a link the user "
+    "clicks, and nothing has to pass through your output.\n"
+    "- Text files up to 100KB come back as plain text in `content_text`.\n"
+    "- Anything else comes back with no content at all, just a `hint` telling "
+    "you to use the download ticket. Binary files are not sent through this "
+    "tool by default.\n"
+    "- `force_base64=True` brings a binary back as base64 anyway. Only do this "
+    "when you genuinely must process the bytes yourself; it is slow.\n"
     "- `name`: the file name as shown by namu_list_files.\n"
     "- Downloads are deliberately NOT logged (the file does not change, and on "
-    "the web this server cannot tell whether the user actually saved it).\n"
-    "- On the web, decode it and offer it to the user as a download."
+    "the web this server cannot tell whether the user actually saved it)."
 )
 
 
+def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:
+    """파일 한 개를 회원 저장소에서 받아 온다 — 받기 도구와 받기 티켓의 공통 자리.
+
+    `store_file`을 뗀 것과 같은 이유다(설계서 11절 1단계). 미연결 회원 거절과
+    사본 최신화를 두 문이 각자 베끼면 한쪽만 고쳐지는 날이 온다.
+    """
+    _sync_or_reject(conn, user_key)
+    return attach_files.download(conn, user_key, name)
+
+
 @mcp.tool(description=_DOWNLOAD_DESCRIPTION)
-def namu_download_file(name: str, ctx: Context | None = None) -> dict:
+def namu_download_file(
+    name: str,
+    force_base64: bool = False,
+    ctx: Context | None = None,
+) -> dict:
     key = _resolve_user(ctx)
     _resolve_via(ctx)
     with closing(identity.connect()) as conn:
+        content = fetch_file(conn, key, name)
+
+    path = attach_files.normalize_name(name)
+    out = {"path": path, "bytes": len(content)}
+
+    text = attach_files.as_text(path, content)
+    if text is not None:
+        out["content_text"] = text
+        return out
+    if force_base64:
+        out["content_base64"] = base64.b64encode(content).decode("ascii")
+        return out
+    # 몸통을 싣지 않는다. `content_base64`를 None으로라도 두는 이유는, 이 칸이
+    # 아예 없으면 붙은 AI가 "도구가 실패했다"로 읽고 같은 호출을 되풀이하기
+    # 때문이다 — 칸은 있고 비어 있으며, 왜 비었는지가 hint에 적혀 있다.
+    out["content_base64"] = None
+    out["hint"] = (
+        "바이너리이거나 100KB를 넘어 원문으로 전달하지 않았습니다. 회원에게 이 "
+        "파일을 건네려면 namu_create_download_ticket으로 내려받기 링크를 만들어 "
+        "주세요. 내용을 직접 읽어야만 하는 경우에만 force_base64=true로 다시 "
+        "부르세요(느립니다). | Not sent inline (binary or over 100KB): use "
+        "namu_create_download_ticket, or retry with force_base64=true."
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 티켓 세 도구 — 파일 몸통이 붙은 AI의 출력을 거치지 않게 하는 우회로.
+#
+# 왜 필요한가는 tickets.py 첫머리에 있다(요약: base64 글자열을 AI가 한 자씩 써야
+# 해서, 6KB 문서 하나에 서버는 7.4초인데 AI 쪽은 몇 분이 걸렸다).
+#
+# 티켓 주소를 이 서버가 직접 지어내지 않고 요청에서 끌어내는 이유: 바깥 주소를
+# 담을 전용 환경변수를 새로 만들면 .env와 컨테이너 설정 두 곳에 같은 값을 적어야
+# 하고, 한쪽만 하면 조용히 빈 값이 되는 사고가 이 프로젝트에서 반복됐다
+# (web_auth._public_origin의 같은 판단을 그대로 재사용한다).
+# ---------------------------------------------------------------------------
+def _origin_for(ctx: "Context | None") -> str:
+    """이 서비스의 바깥 주소(`https://호스트`). 요청이 없으면 빈 문자열."""
+    req = getattr(getattr(ctx, "request_context", None), "request", None) if ctx else None
+    if req is None:
+        return ""
+    return web_auth._public_origin(req)
+
+
+_CREATE_UPLOAD_TICKET_DESCRIPTION = (
+    "Create a one-time upload link for one file, for anything you should NOT "
+    "push through `namu_upload_file`: binaries (PPT/PDF/images/video/zip) and "
+    "anything over 100KB. Nothing is written to GitHub until a file actually "
+    "arrives, so an unused link leaves no trace anywhere.\n"
+    "You get back `upload_url`. Then do ONE of these:\n"
+    "1. If the file is in your own workspace, POST it yourself:\n"
+    "   `curl -sS -X POST -F \"file=@/path/to/file\" <upload_url>`\n"
+    "   If that fails with host_not_allowed (403), the link is still alive — "
+    "just hand it to the user as in step 2. Do not create another ticket.\n"
+    "2. If the file is on the user's own machine, give them the `upload_url` "
+    "and ask them to open it and drop the file in.\n"
+    "- `name`, `summary` and `reason` mean exactly what they mean in "
+    "`namu_upload_file`; they are stored with the link and written to the "
+    "attachments log when the file lands.\n"
+    "- The link expires in 2 hours and works once."
+)
+
+
+@mcp.tool(description=_CREATE_UPLOAD_TICKET_DESCRIPTION)
+def namu_create_upload_ticket(
+    name: str,
+    summary: str,
+    reason: str,
+    body: str | None = None,
+    topic: str | None = None,
+    project: str | None = None,
+    tags: "list[str] | None" = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    # 이름과 설명을 **발급 시점에** 검사한다. 미루면 회원이 파일을 다 올린
+    # 다음에야 "이름이 잘못됐다"고 튕기게 되는데, 그때는 되돌릴 방법이 없다.
+    path = attach_files.normalize_name(name)
+    meta = normalize_meta({
+        "summary": summary, "reason": reason, "body": body,
+        "topic": topic, "project": project, "tags": tags,
+    })
+    meta["via"] = via
+
+    with closing(identity.connect()) as conn:
+        # 저장소를 연결하지 않은 회원에게 링크를 내주지 않는다 — 링크를 받아
+        # 파일까지 올린 뒤에 거절당하는 것이 가장 나쁜 순서다.
         _sync_or_reject(conn, key)
-        content = attach_files.download(conn, key, name)
+        ticket = tickets.create(
+            conn, key, tickets.KIND_UPLOAD, path, meta,
+            ttl_sec=tickets.UPLOAD_TTL_SEC,
+        )
+        tickets.purge_expired(conn)
+
+    upload_url = f"{_origin_for(ctx)}{ticket_web.UPLOAD_PREFIX}{ticket['ticket_id']}"
     return {
-        "path": attach_files.normalize_name(name),
-        "bytes": len(content),
-        "content_base64": base64.b64encode(content).decode("ascii"),
+        "ticket_id": ticket["ticket_id"],
+        "upload_url": upload_url,
+        "expires_at": ticket["expires_at"],
+        "name": path,
+        "curl": f'curl -sS -X POST -F "file=@<파일경로>" {upload_url}',
+        "if_blocked": (
+            "curl이 403 host_not_allowed로 막히면 이 링크는 **그대로 살아 있습니다** "
+            "— 새로 만들지 말고 회원에게 이렇게 안내하세요: (A) 파일을 이 링크에 "
+            "직접 올리기, 또는 (B) claude.ai 설정 → Capabilities → Code execution의 "
+            "Additional allowed domains에 이 서비스 주소를 추가한 뒤 새 대화에서 "
+            "다시 시도(한 번 해두면 이후 자동)."
+        ),
     }
+
+
+_CREATE_DOWNLOAD_TICKET_DESCRIPTION = (
+    "Create a download link for one uploaded file. **This is how you hand a "
+    "file to the user** — they click the link and the file downloads straight "
+    "from their GitHub repository. Nothing passes through your output.\n"
+    "- Use this instead of `namu_download_file` whenever the user wants the "
+    "file itself rather than you reading its contents.\n"
+    "- You can also fetch it yourself with `curl -sS -o <path> <download_url>` "
+    "if you need the bytes in your workspace.\n"
+    "- `name`: the file name as shown by namu_list_files.\n"
+    "- The link expires in 1 hour and can be opened more than once until then."
+)
+
+
+@mcp.tool(description=_CREATE_DOWNLOAD_TICKET_DESCRIPTION)
+def namu_create_download_ticket(name: str, ctx: Context | None = None) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    path = attach_files.normalize_name(name)
+
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        # 없는 파일에 링크를 내주지 않는다 — 회원이 눌렀을 때 비로소 깨지는
+        # 링크는 "받기가 고장났다"로 읽힌다. 목록으로 존재를 먼저 확인한다
+        # (목록은 이름·크기만 오므로 파일 몸통을 끌어오지 않는다).
+        listed = {f["path"]: f for f in attach_files.list_in_repo(conn, key)}
+        if path not in listed:
+            raise ValueError(
+                f"저장소에 그런 파일이 없습니다: {path} — namu_list_files로 "
+                "이름을 먼저 확인해 보세요. No such file in the repository."
+            )
+        ticket = tickets.create(
+            conn, key, tickets.KIND_DOWNLOAD, path, {"via": via},
+            ttl_sec=tickets.DOWNLOAD_TTL_SEC,
+        )
+        tickets.purge_expired(conn)
+
+    download_url = (
+        f"{_origin_for(ctx)}{ticket_web.DOWNLOAD_PREFIX}{ticket['ticket_id']}"
+    )
+    return {
+        "ticket_id": ticket["ticket_id"],
+        "download_url": download_url,
+        "name": path,
+        "bytes": listed[path].get("bytes"),
+        "expires_at": ticket["expires_at"],
+    }
+
+
+_CHECK_TICKET_DESCRIPTION = (
+    "Check whether a file has arrived through an upload link yet. Use this when "
+    "the user says 'I uploaded it'.\n"
+    "- `status` is one of 완료 (done), 대기중 (waiting), 만료됨 (expired), 없음 "
+    "(no such link).\n"
+    "- A download link stays 대기중 even after the user downloads: this server "
+    "cannot tell whether they actually saved the file, and does not log it."
+)
+
+
+@mcp.tool(description=_CHECK_TICKET_DESCRIPTION)
+def namu_check_ticket(ticket_id: str, ctx: Context | None = None) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        ticket = tickets.get(conn, ticket_id)
+    # 남의 티켓은 "없음"으로 답한다 — 있다고 알려 주면 번호를 넣어 보는 쪽에
+    # 정보를 주게 된다.
+    if ticket is None or ticket.get("user_key") != key:
+        return {"status": tickets.STATUS_MISSING}
+
+    out = {
+        "status": tickets.status_of(ticket),
+        "kind": ticket["kind"],
+        "name": ticket["name"],
+        "expires_at": ticket["expires_at"],
+    }
+    result = ticket.get("result") or {}
+    if result:
+        out["path"] = result.get("path")
+        out["bytes"] = result.get("bytes")
+    return out
 
 
 _DELETE_DESCRIPTION = (
@@ -1743,19 +2048,29 @@ class _AuthOrMcpDispatcher:
     `/faq/../mcp` 같은 조작에 문이 열릴 여지가 생기지만, `==`로 보면 목록에 적힌
     그 글자 그대로가 아닌 모든 요청은 종전대로 닫히는 방향(MCP+인증)으로 간다.
     목록은 `ui.PUBLIC_PATHS` 한 곳에서 온다(메뉴와 문이 어긋나지 않게).
+
+    티켓 주소(`/u/…`·`/d/…`)도 웹 쪽으로 보낸다. 여기서는 접두어로 가르는데,
+    위에서 공개 페이지를 `==`로만 연 것과 어긋나 보이지만 판단 근거는 같다 —
+    **잘못 분류됐을 때 어느 쪽으로 새는가**다. `/u/../mcp` 같은 조작이 티켓
+    앱으로 가면 거기엔 그 주소가 없어 404가 나올 뿐, MCP 도구에는 닿지 못한다.
+    반대 방향(MCP 쪽으로 새는 것)만이 위험한데 접두어 검사로는 그 일이 일어나지
+    않는다. 티켓은 번호가 주소 안에 있어 목록으로 열 수가 없다.
     """
 
-    def __init__(self, auth_app, mcp_app):
+    def __init__(self, auth_app, mcp_app, ticket_app):
         self.auth_app = auth_app
         self.mcp_app = mcp_app
+        self.ticket_app = ticket_app
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
-        if scope["type"] == "http" and (
-            path.startswith("/auth/") or path in _PUBLIC_PATHS
-        ):
-            await self.auth_app(scope, receive, send)
-            return
+        if scope["type"] == "http":
+            if path.startswith("/auth/") or path in _PUBLIC_PATHS:
+                await self.auth_app(scope, receive, send)
+                return
+            if ticket_web.is_ticket_path(path):
+                await self.ticket_app(scope, receive, send)
+                return
         await self.mcp_app(scope, receive, send)
 
 
@@ -1764,6 +2079,24 @@ class _AuthOrMcpDispatcher:
 # /mcp/<secret>. `/auth/`로 시작하는 요청은 인증 우회(로그인 전이라 토큰이 없는
 # 것이 정상)로 web_auth 앱에, 그 외 전부는 기존 MCP 앱 + AuthMiddleware로 간다.
 # ---------------------------------------------------------------------------
+def build_ticket_app():
+    """티켓 주소 세 개(`/u/…`·`/d/…`)를 담은 앱.
+
+    길(주소·검증·실패 처리·올리는 화면)은 코어의 `ticket_web`에 있고, 이 서버는
+    **자기와 다른 것만** 넘긴다 — 파일을 어디에 저장하는지(개인 주소는 이 PC의
+    git, 여기는 회원 GitHub 저장소), 화면 껍데기, 로그인한 사람이 누구인지.
+    베껴 두 벌로 만들면 한쪽만 고쳐지는 날이 오고, 그 한쪽은 파일이 오가는 문이다.
+    """
+    return ticket_web.build_ticket_app(
+        open_conn=identity.connect,
+        store_file=store_file,
+        fetch_file=fetch_file,
+        max_bytes=attach_files.max_bytes,
+        session_user_key=web_auth._session_user_key,
+        render_page=lambda title, body_html: ui.page(title, body_html, cta="me"),
+    )
+
+
 def build_app():
     settings = cfg.http_settings()
     validate_settings(settings)
@@ -1777,7 +2110,7 @@ def build_app():
     # 토큰 로직에 닿기 전에 404로 끊는다.
     mcp_app = _PerUserSecretDispatcher(mcp_app)
     auth_app = web_auth.build_auth_app()
-    return _AuthOrMcpDispatcher(auth_app, mcp_app)
+    return _AuthOrMcpDispatcher(auth_app, mcp_app, build_ticket_app())
 
 
 def main() -> None:

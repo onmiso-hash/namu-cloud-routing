@@ -54,6 +54,7 @@ RUN uv pip install --system \
     "python-dotenv>=1.0.0" \
     "pyjwt[crypto]>=2.8" \
     "httpx>=0.27" \
+    "python-multipart>=0.0.9" \
     "tzdata>=2024.1"
 
 # 컨테이너는 0.0.0.0으로 바인드해야 리버스 프록시가 도달할 수 있다

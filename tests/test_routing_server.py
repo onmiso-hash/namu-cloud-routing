@@ -26,9 +26,18 @@ _REAL_ENSURE_READY = ur.ensure_ready
 _REAL_PUSH = ur.push
 
 
+class _FakeUrl:
+    scheme = "https"
+    netloc = "namu-cloud.example"
+
+
 class _FakeRequest:
     def __init__(self, query_params: dict):
         self.query_params = query_params
+        # 티켓 도구는 링크를 지으려고 요청에서 바깥 주소를 끌어낸다
+        # (web_auth._public_origin) — 그 두 칸만 흉내 낸다.
+        self.headers = {"host": "namu-cloud.example"}
+        self.url = _FakeUrl()
 
 
 class _FakeRequestContext:
@@ -817,6 +826,24 @@ def test_build_app_without_path_secret_keeps_mcp(monkeypatch, tmp_path):
     assert rs.mcp.settings.streamable_http_path == "/mcp"
 
 
+def test_build_app_actually_wires_the_ticket_addresses(monkeypatch, tmp_path):
+    """대역 앱이 아니라 **진짜로 조립된 앱**에서 티켓 주소가 열리는지 본다.
+
+    갈림길 단위 시험은 대역 세 개로 분기만 보므로, build_app이 티켓 앱을 실제로
+    끼워 넣는 것을 잊어도 통과한다 — 그러면 회원이 링크를 눌렀을 때 인증에 막혀
+    404가 나고, 그 사실은 배포한 뒤에야 드러난다.
+    """
+    monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
+
+    client = TestClient(rs.build_app())
+    r = client.get("/u/그런번호없음", headers={"accept": "text/html"})
+
+    # 인증에 걸렸다면 401이었을 것이다. 404는 티켓 앱이 답했다는 뜻이다.
+    assert r.status_code == 404
+    assert "링크" in r.text
+
+
 # ---------------------------------------------------------------------------
 # _AuthOrMcpDispatcher — namu-59 2차: '/auth/'는 web_auth 앱, 그 외 전부는
 # MCP+Auth 앱. 여기서는 rs.build_app()이 조립하는 실제 web_auth/FastMCP 앱이
@@ -834,7 +861,7 @@ def _make_labelled_app(label: str):
 def test_dispatcher_routes_auth_prefix_to_auth_app():
     auth_app = _make_labelled_app("auth")
     mcp_app = _make_labelled_app("mcp")
-    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket"))
     client = TestClient(dispatcher)
     r = client.get("/auth/github/login")
     assert r.text == "auth"
@@ -843,7 +870,7 @@ def test_dispatcher_routes_auth_prefix_to_auth_app():
 def test_dispatcher_routes_everything_else_to_mcp_app():
     auth_app = _make_labelled_app("auth")
     mcp_app = _make_labelled_app("mcp")
-    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket"))
     client = TestClient(dispatcher)
     for path in ["/mcp", "/mcp/some-secret", "/authx/notreallyauth", "/auth"]:
         r = client.get(path)
@@ -857,7 +884,7 @@ def test_dispatcher_routes_everything_else_to_mcp_app():
 def test_dispatcher_opens_the_public_pages_to_the_web_app():
     auth_app = _make_labelled_app("auth")
     mcp_app = _make_labelled_app("mcp")
-    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app))
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket")))
 
     for path in ["/", "/start", "/memory", "/safety", "/faq"]:
         assert client.get(path).text == "auth", f"공개 경로 {path!r}가 안 열렸다"
@@ -868,7 +895,7 @@ def test_public_paths_are_matched_exactly_not_by_prefix():
     목록에 적힌 글자 그대로가 아니면 전부 닫히는 쪽(MCP+인증)으로 가야 한다."""
     auth_app = _make_labelled_app("auth")
     mcp_app = _make_labelled_app("mcp")
-    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app))
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket")))
 
     for path in [
         "/faq/mcp",
@@ -881,6 +908,30 @@ def test_public_paths_are_matched_exactly_not_by_prefix():
         "/faq.",
     ]:
         assert client.get(path).text == "mcp", f"{path!r}가 공개로 새어 나갔다"
+
+
+def test_dispatcher_sends_ticket_paths_to_the_ticket_app():
+    """티켓 주소는 번호가 주소 안에 있어 목록으로 열 수 없다 — 접두어로 가른다."""
+    client = TestClient(rs._AuthOrMcpDispatcher(
+        _make_labelled_app("auth"), _make_labelled_app("mcp"),
+        _make_labelled_app("ticket"),
+    ))
+
+    for path in ["/u/abc123", "/d/abc123"]:
+        assert client.get(path).text == "ticket", f"티켓 경로 {path!r}가 안 열렸다"
+
+
+def test_ticket_prefix_never_leaks_into_the_mcp_side():
+    """접두어로 가르는 쪽이 잘못 분류돼도 **인증이 걸린 쪽으로는 새지 않아야**
+    한다 — 티켓 앱에는 MCP 라우트가 애초에 없다."""
+    client = TestClient(rs._AuthOrMcpDispatcher(
+        _make_labelled_app("auth"), _make_labelled_app("mcp"),
+        _make_labelled_app("ticket"),
+    ))
+
+    # 앞자락이 아예 다른 것들은 종전대로 닫히는 쪽(MCP+인증)으로 간다.
+    for path in ["/u", "/d", "/ux/abc", "/mcp"]:
+        assert client.get(path).text == "mcp", f"{path!r}가 티켓 쪽으로 샜다"
 
 
 def test_public_paths_and_menu_never_drift_apart():
@@ -897,7 +948,7 @@ def test_dispatcher_default_is_the_authenticated_side():
     회귀 방지로 한 번 더 확인(위 테스트는 대역 앱이라 인증 자체는 검증 못 함)."""
     auth_app = _make_labelled_app("auth")
     mcp_app = rs.AuthMiddleware(_dummy_app, token="tok123")
-    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app)
+    dispatcher = rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket"))
     client = TestClient(dispatcher)
     r = client.get("/mcp")
     assert r.status_code == 401
@@ -1438,7 +1489,9 @@ def test_download_returns_the_bytes_and_logs_nothing(fake_github):
     )
     before = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"]
 
-    out = rs.namu_download_file(name="그림.bin", ctx=_ctx("alice"))
+    out = rs.namu_download_file(
+        name="그림.bin", force_base64=True, ctx=_ctx("alice")
+    )
 
     import base64 as _b
     assert _b.b64decode(out["content_base64"]) == bytes(range(256))
@@ -1446,9 +1499,296 @@ def test_download_returns_the_bytes_and_logs_nothing(fake_github):
     assert rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"] == before
 
 
+# ---------------------------------------------------------------------------
+# 글자 파일을 원문 그대로 주고받기(설계서 4절) — base64를 붙은 AI가 한 자씩
+# 써야 해서 느렸던 문제를 없애는 경로.
+# ---------------------------------------------------------------------------
+def test_upload_accepts_plain_text_without_base64(fake_github, tmp_path):
+    out = rs.namu_upload_file(
+        name="메모.md", content_text="# 제목\n한글 본문", summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+
+    assert out["path"] == "attach_file/메모.md"
+    assert fake_github["attach_file/메모.md"] == "# 제목\n한글 본문".encode("utf-8")
+    assert out["bytes"] == len("# 제목\n한글 본문".encode("utf-8"))
+
+
+def test_upload_rejects_both_content_fields_at_once(fake_github):
+    with pytest.raises(ValueError, match="하나만"):
+        rs.namu_upload_file(
+            name="메모.md", content_text="가", content_base64=_b64(b"na"),
+            summary="s", reason="r", ctx=_ctx("alice"),
+        )
+
+
+def test_upload_rejects_neither_content_field(fake_github):
+    with pytest.raises(ValueError, match="파일 내용이 없습니다"):
+        rs.namu_upload_file(
+            name="메모.md", summary="s", reason="r", ctx=_ctx("alice"),
+        )
+
+
+def test_upload_rejects_text_over_the_inline_limit(fake_github):
+    too_big = "가" * (rs.attach_files.MAX_INLINE_TEXT_BYTES // 3 + 10)
+    with pytest.raises(ValueError, match="namu_create_upload_ticket"):
+        rs.namu_upload_file(
+            name="큰글.md", content_text=too_big, summary="s", reason="r",
+            ctx=_ctx("alice"),
+        )
+    assert fake_github == {}
+
+
+def test_download_returns_text_files_as_plain_text(fake_github):
+    rs.namu_upload_file(
+        name="보고서.md", content_text="본문 한 줄", summary="s", reason="r",
+        ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_download_file(name="보고서.md", ctx=_ctx("alice"))
+
+    assert out["content_text"] == "본문 한 줄"
+    assert "content_base64" not in out
+    assert "hint" not in out
+
+
+def test_download_withholds_binary_and_points_at_the_ticket(fake_github):
+    rs.namu_upload_file(
+        name="그림.bin", content_base64=_b64(bytes(range(256))), summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_download_file(name="그림.bin", ctx=_ctx("alice"))
+
+    # 칸은 있고 비어 있다 — 칸 자체가 없으면 붙은 AI가 실패로 읽고 되부른다.
+    assert out["content_base64"] is None
+    assert out["bytes"] == 256
+    assert "namu_create_download_ticket" in out["hint"]
+
+
+def test_download_withholds_text_that_is_too_large(fake_github):
+    big = "a" * (rs.attach_files.MAX_INLINE_TEXT_BYTES + 1)
+    rs.namu_upload_file(
+        name="큰글.md", content_base64=_b64(big.encode("utf-8")), summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_download_file(name="큰글.md", ctx=_ctx("alice"))
+
+    assert out["content_base64"] is None
+    assert "hint" in out
+
+
+def test_download_withholds_binary_wearing_a_text_extension(fake_github):
+    """`.md` 이름을 단 바이너리 — 확장자만 믿으면 깨진 글자를 내주게 된다."""
+    rs.namu_upload_file(
+        name="속임수.md", content_base64=_b64(b"\xff\xfe\x00\x01"), summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_download_file(name="속임수.md", ctx=_ctx("alice"))
+
+    assert out["content_base64"] is None
+    assert "hint" in out
+
+
 def test_download_of_a_missing_file_says_so(fake_github):
     with pytest.raises(rs.attach_files.AttachError, match="없습니다"):
         rs.namu_download_file(name="없는것.pdf", ctx=_ctx("alice"))
+
+
+# ---------------------------------------------------------------------------
+# 티켓 세 도구 + 티켓 주소(설계서 5·6·7절)
+#
+# 티켓 자체의 규칙(만료·1회용·번호 굵기)과 주소의 검증은 코어에서 시험한다
+# (vendor/namu-agent의 test_tickets.py·test_ticket_web.py). 여기서 보는 것은
+# **이 서버가 붙인 부분**이다 — 링크 주소를 짓는가, 회원마다 갈리는가, 발급이
+# 저장소를 안 만지는가, 그리고 실제로 그 주소로 던진 파일이 회원 저장소와 첨부
+# 기록에 자리 잡는가.
+# ---------------------------------------------------------------------------
+def _ticket_client():
+    return TestClient(rs.build_ticket_app())
+
+
+def test_creating_an_upload_ticket_touches_nothing_in_the_repository(fake_github):
+    """안 쓰고 만료된 티켓이 저장소·기록 어디에도 흔적을 남기면 안 된다
+    (설계서 12절)."""
+    before = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"]
+
+    out = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="발표 자료", reason="보관", ctx=_ctx("alice"),
+    )
+
+    assert out["upload_url"].startswith("https://namu-cloud.example/u/")
+    assert out["name"] == "attach_file/발표.pptx"
+    assert fake_github == {}
+    assert rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"] == before
+
+
+def test_an_upload_ticket_checks_the_name_up_front(fake_github):
+    """이름 검사를 미루면 회원이 파일을 다 올린 다음에야 튕기게 된다 — 그때는
+    되돌릴 방법이 없다."""
+    with pytest.raises(rs.attach_files.AttachError):
+        rs.namu_create_upload_ticket(
+            name="../밖으로.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+        )
+
+
+def test_an_upload_ticket_needs_summary_and_reason(fake_github):
+    with pytest.raises(ValueError, match="summary"):
+        rs.namu_create_upload_ticket(
+            name="발표.pptx", summary="  ", reason="r", ctx=_ctx("alice"),
+        )
+
+
+def test_a_file_posted_to_the_ticket_lands_in_the_repo_and_the_log(fake_github):
+    """설계서 12절 — 티켓 주소로 올린 파일이 attach_file/에 들어가고
+    namu_search(bowl='attachments')로 찾아진다."""
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="발표자료마커", reason="보관",
+        topic="namu-70", project="proj-x", ctx=_ctx("alice"),
+    )
+
+    r = _ticket_client().post(
+        f"/u/{ticket['ticket_id']}",
+        files={"file": ("아무이름.pptx", b"\x00\x01\x02\x03")},
+        headers={"accept": "application/json"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert fake_github["attach_file/발표.pptx"] == b"\x00\x01\x02\x03"
+    found = rs.namu_search(
+        query="발표자료마커", bowl="attachments", ctx=_ctx("alice")
+    )
+    assert found["count"] == 1
+    entry = found["results"][0]
+    assert entry["path"] == "attach_file/발표.pptx"
+    assert entry["bytes"] == 4
+    # 발급할 때 AI가 적어 둔 작업·프로젝트가 그대로 따라와야 한다 — 회원이
+    # 브라우저로 올릴 때 그 AI는 그 자리에 없다.
+    assert entry["project"] == "proj-x"
+
+
+def test_a_second_upload_of_the_same_name_is_logged_as_a_new_revision(fake_github):
+    rs.namu_upload_file(
+        name="발표.pptx", content_base64=_b64(b"old"), summary="s", reason="r",
+        ctx=_ctx("alice"),
+    )
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s2", reason="r2", ctx=_ctx("alice"),
+    )
+
+    r = _ticket_client().post(
+        f"/u/{ticket['ticket_id']}", files={"file": ("x", b"new")},
+        headers={"accept": "application/json"},
+    )
+
+    assert r.json()["status"] == "새 판"
+    assert fake_github["attach_file/발표.pptx"] == b"new"
+
+
+def test_the_ticket_page_opens_for_a_browser(fake_github):
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="발표 자료", reason="보관", ctx=_ctx("alice"),
+    )
+
+    r = _ticket_client().get(
+        f"/u/{ticket['ticket_id']}", headers={"accept": "text/html"}
+    )
+
+    assert r.status_code == 200
+    assert "발표.pptx" in r.text
+    # 이 서버의 화면 껍데기를 쓴다(개인 주소의 민무늬 화면이 아니라).
+    assert "topbar" in r.text
+
+
+def test_a_download_ticket_serves_the_file(fake_github):
+    rs.namu_upload_file(
+        name="보고서.pdf", content_base64=_b64(b"PDFBYTES"), summary="s",
+        reason="r", ctx=_ctx("alice"),
+    )
+    ticket = rs.namu_create_download_ticket(name="보고서.pdf", ctx=_ctx("alice"))
+
+    r = _ticket_client().get(f"/d/{ticket['ticket_id']}")
+
+    assert r.status_code == 200
+    assert r.content == b"PDFBYTES"
+    assert "attachment" in r.headers["content-disposition"]
+    assert ticket["bytes"] == 8
+
+
+def test_a_download_ticket_is_refused_for_a_file_that_is_not_there(fake_github):
+    """회원이 눌렀을 때 비로소 깨지는 링크는 '받기가 고장났다'로 읽힌다."""
+    with pytest.raises(ValueError, match="없습니다"):
+        rs.namu_create_download_ticket(name="없는것.pdf", ctx=_ctx("alice"))
+
+
+def test_check_ticket_reports_waiting_then_done(fake_github):
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+    )
+
+    waiting = rs.namu_check_ticket(ticket["ticket_id"], ctx=_ctx("alice"))
+    assert waiting["status"] == "대기중"
+
+    _ticket_client().post(
+        f"/u/{ticket['ticket_id']}", files={"file": ("x", b"ab")},
+        headers={"accept": "application/json"},
+    )
+
+    done = rs.namu_check_ticket(ticket["ticket_id"], ctx=_ctx("alice"))
+    assert done["status"] == "완료"
+    assert done["path"] == "attach_file/발표.pptx"
+    assert done["bytes"] == 2
+
+
+def test_check_ticket_hides_another_members_ticket(fake_github):
+    """있다고 알려 주면 번호를 넣어 보는 쪽에 정보를 주게 된다."""
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_check_ticket(ticket["ticket_id"], ctx=_ctx("bob"))
+
+    assert out == {"status": "없음"}
+
+
+def test_check_ticket_says_none_for_an_unknown_number(fake_github):
+    assert rs.namu_check_ticket("그런것없음", ctx=_ctx("alice"))["status"] == "없음"
+
+
+def test_a_logged_in_stranger_cannot_open_someone_elses_ticket(fake_github, monkeypatch):
+    """설계서 12절 — 다른 사용자의 티켓 번호로 브라우저 접근하면 거절된다."""
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+    )
+    monkeypatch.setattr(rs.web_auth, "_session_user_key", lambda request: "bob")
+
+    r = _ticket_client().get(
+        f"/u/{ticket['ticket_id']}", headers={"accept": "text/html"}
+    )
+
+    assert r.status_code == 403
+
+
+def test_the_ticket_link_survives_a_failed_send(fake_github, monkeypatch):
+    """설계서 7절 — AI의 curl이 막혀도 링크는 살아 있어야 회원이 브라우저로
+    이어 올릴 수 있다."""
+    ticket = rs.namu_create_upload_ticket(
+        name="발표.pptx", summary="s", reason="r", ctx=_ctx("alice"),
+    )
+
+    def _boom(*a, **kw):
+        raise rs.attach_files.AttachError("저장소가 대답하지 않음")
+
+    monkeypatch.setattr(rs.attach_files, "upload", _boom)
+    client = _ticket_client()
+    failed = client.post(
+        f"/u/{ticket['ticket_id']}", files={"file": ("x", b"ab")},
+        headers={"accept": "application/json"},
+    )
+    assert failed.status_code == 502
+    assert rs.namu_check_ticket(ticket["ticket_id"], ctx=_ctx("alice"))["status"] == "대기중"
 
 
 def test_delete_removes_the_file_and_keeps_the_log(fake_github, tmp_path):

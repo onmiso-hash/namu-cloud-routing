@@ -16,6 +16,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyjwt[crypto]>=2.8",
     "httpx>=0.27",
+    # 티켓 주소로 들어오는 파일 전송(multipart/form-data)을 Starlette가 읽으려면
+    # 이 패키지가 있어야 한다. 지금은 다른 패키지에 딸려 들어와 있지만, 그쪽이
+    # 의존을 바꾸면 파일 올리기만 조용히 500으로 죽는다 — 명시해 둔다.
+    "python-multipart>=0.0.9",
     # 코어(config.now)가 기준 시간대(NAMU_TZ, 기본 Asia/Seoul)로 시각을 적는다.
     # slim 컨테이너에는 OS tz 데이터베이스가 없어 zoneinfo가 실패하고, 그러면 코어가
     # 조용히 컨테이너 현지시각(UTC)으로 폴백해 기록 시각이 9시간 어긋난다.

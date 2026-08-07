@@ -23,6 +23,7 @@ import os
 import posixpath
 import re
 
+import attach_text
 import github_app
 import user_repo
 
@@ -42,6 +43,15 @@ _MAX_BYTES_ENV = "NAMU_ATTACH_MAX_BYTES"
 # 환경변수로 바꿀 수 있게 둔 이유가 그것이다(코드를 고치지 않고 재측정 결과를
 # 반영하기 위해서).
 _DEFAULT_MAX_BYTES = 20 * 1024 * 1024
+
+# 글자 파일 판정은 **코어의 `attach_text`가 원본이다**(개인 주소와 이 서버가 같은
+# 파일을 같게 판정해야 한다 — 한쪽이 원문으로, 다른 쪽이 base64로 다루면 같은
+# 파일이 경로에 따라 달라진다). 여기서는 이름만 다시 내걸어 이 모듈을 쓰는 쪽이
+# 두 군데를 뒤지지 않게 한다.
+MAX_INLINE_TEXT_BYTES = attach_text.MAX_INLINE_TEXT_BYTES
+TEXT_EXTENSIONS = attach_text.TEXT_EXTENSIONS
+has_text_extension = attach_text.has_text_extension
+as_text = attach_text.as_text
 
 
 class AttachError(ValueError):
