@@ -36,6 +36,8 @@ _paths_for_user()와 같은 폴더를 가리킨다 — 계약은 tests/test_user
 (`_sync_or_reject`/`_push_and_collect_warning`, TTL 관련 함수들) 이후에는
 읽기 전에 TTL 기반으로 최신화하고, 쓰기 후에 항상 push를 시도한다.
 """
+import base64
+import binascii
 import hmac
 import json
 import logging
@@ -56,6 +58,7 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_VENDOR_PLUGIN_DIR))
 
 import access_log  # noqa: E402
+import attach_files  # noqa: E402
 import attachments  # noqa: E402
 import config as cfg  # noqa: E402
 import db  # noqa: E402
@@ -75,7 +78,11 @@ from mcp.server.transport_security import TransportSecuritySettings  # noqa: E40
 # 클라우드는 반대로 소개문이 통째로 없어 붙은 AI가 그릇들이 무엇인지 안내받지
 # 못했다(2026-08-05 두 서버를 띄워 실측). 코어(vendor/namu-agent)의 같은 함수를
 # 쓰므로 두 경로의 소개문이 한 원본에서 나온다.
-EXPOSED_TOOLS = frozenset({"namu_recall", "namu_search", "namu_record"})
+EXPOSED_TOOLS = frozenset({
+    "namu_recall", "namu_search", "namu_record",
+    "namu_upload_file", "namu_list_files", "namu_download_file",
+    "namu_delete_file",
+})
 
 mcp = FastMCP(
     "namu-cloud-routing",
@@ -1179,6 +1186,261 @@ def namu_record(
             result["warning"] = warning
         return result
     return entry_id
+
+
+# ---------------------------------------------------------------------------
+# 첨부 파일 네 도구 (namu-file-upload-download 5·6단계)
+#
+# 파일은 회원 GitHub 저장소와 **직접** 오간다(attach_files 모듈) — 이 서버 사본을
+# 거치지 않는다. 사본에 놓았다 지우면 그 삭제가 다음 push에 실려 GitHub에서도
+# 파일이 사라지는 것이 실측으로 확인됐기 때문이다.
+#
+# 파일을 올리거나 지우면 GitHub에 이 서버가 모르는 커밋이 하나 생긴다. 그대로 두면
+# 다음 기억 저장이 뒤처진 사본 위에서 push를 시도해 거부된다. 새 장치를 만들지 않고
+# **최신화 표시만 지워** 다음 호출이 TTL과 무관하게 반드시 최신화하게 한다.
+# ---------------------------------------------------------------------------
+def _invalidate_sync_marker(user_key: str) -> None:
+    """다음 호출이 반드시 저장소를 다시 읽게 만든다(위 절 참고)."""
+    try:
+        _sync_marker_path(user_key).unlink(missing_ok=True)
+    except OSError as exc:
+        # 표시를 못 지워도 파일 자체는 이미 GitHub에 올라갔다 — 도구를 실패로
+        # 돌리면 회원이 같은 파일을 또 올린다. 대신 반드시 남긴다.
+        logger.warning("사용자(%s) 최신화 표시를 지우지 못했습니다: %s", user_key, exc)
+
+
+def _record_attachment_entry(
+    paths, *, path: str, size: int, status: str, summary: str, reason: str,
+    body: str, topic, project, tags, via,
+) -> str:
+    """첨부 기록 한 건을 남긴다 — 올리기·지우기 도구가 공통으로 쓴다.
+
+    기억 도구(namu_record)로 아무나 쓰게 두지 않고 도구가 직접 남기는 이유:
+    실제 파일 없이 기록만 있는 유령 항목이 생기면 목록이 거짓말을 한다.
+    """
+    return attachments.record_attachment(
+        path=path, bytes_=size, status=status,
+        summary=summary, reason=reason, body=body,
+        topic=topic, project=project, tags=_normalize_tags(tags), via=via,
+        paths=paths,
+    )
+
+
+_UPLOAD_DESCRIPTION = (
+    "Upload one file to this user's own GitHub repository (under attach_file/) "
+    "and log it in the attachments bowl. The file goes straight to GitHub — it "
+    "is never kept on this server. Send the bytes as base64 in `content_base64`.\n"
+    "- `name`: the file name, e.g. '2026-3분기-보고서.pdf'. Sub-folders are not "
+    "used; the file always lands at attach_file/<name>.\n"
+    "- Uploading the same name again replaces the file on GitHub and is logged "
+    "as a new revision ('새 판'); the earlier log entry stays.\n"
+    "- summary/reason/body are required, same as any memory: what this file is, "
+    "why it was kept, and the full story. They are what makes the file findable "
+    "later, because the file body itself is not synced to the user's PCs."
+)
+
+
+@mcp.tool(description=_UPLOAD_DESCRIPTION)
+def namu_upload_file(
+    name: str,
+    content_base64: str,
+    summary: str,
+    reason: str,
+    body: str,
+    topic: str | None = None,
+    project: str | None = None,
+    tags: "list[str] | None" = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    for field_name, value in (
+        ("summary", summary), ("reason", reason), ("body", body),
+    ):
+        if not (value or "").strip():
+            raise ValueError(
+                f"'{field_name}'은 첨부에도 필수입니다 — 파일 몸통은 각 PC로 "
+                "내려오지 않으므로, 나중에 이 파일을 찾는 단서는 이 설명뿐입니다."
+            )
+    try:
+        content = base64.b64decode(content_base64 or "", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(
+            f"content_base64를 읽지 못했습니다: {exc} — 파일 내용을 base64로 "
+            "실어 보내세요."
+        ) from None
+
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        result = attach_files.upload(
+            conn, key, name, content,
+            attach_files.commit_message("올림", name),
+        )
+        _invalidate_sync_marker(key)
+
+        paths = _paths_for_user(key)
+        _ensure_fresh(paths)
+        status = "새 판" if result["replaced"] else "올림"
+        entry_id = _record_attachment_entry(
+            paths, path=result["path"], size=result["bytes"], status=status,
+            summary=summary, reason=reason, body=body,
+            topic=topic, project=project, tags=tags, via=via,
+        )
+        warning = _push_and_collect_warning(conn, key)
+
+    out = {
+        "id": entry_id,
+        "path": result["path"],
+        "bytes": result["bytes"],
+        "status": status,
+    }
+    if warning:
+        out["warning"] = warning
+    return out
+
+
+_LIST_DESCRIPTION = (
+    "List the files this user has uploaded (attach_file/ in their own GitHub "
+    "repository), each with its size and the note recorded when it was "
+    "uploaded.\n"
+    "- Names and sizes come from GitHub; why/when/which-task come from the "
+    "attachments bowl.\n"
+    "- `include_removed=True` also lists files that were deleted, so you can "
+    "answer 'where did that file go' — a deleted file keeps its log entry with "
+    "the reason it was removed."
+)
+
+
+@mcp.tool(description=_LIST_DESCRIPTION)
+def namu_list_files(
+    include_removed: bool = False,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        in_repo = attach_files.list_in_repo(conn, key)
+        paths = _paths_for_user(key)
+        _ensure_fresh(paths)
+        logged = attachments.load_all(paths)
+
+    # 경로마다 마지막 기록 — 설명·작업·시각은 여기서 온다.
+    latest: dict = {}
+    for entry in logged:
+        if entry.get("path"):
+            latest[entry["path"]] = entry
+
+    rows = []
+    for f in in_repo:
+        note = latest.get(f["path"], {})
+        rows.append({
+            "path": f["path"],
+            "bytes": f.get("bytes") if f.get("bytes") is not None else note.get("bytes"),
+            "status": note.get("status") or "올림",
+            "summary": note.get("summary"),
+            "reason": note.get("reason"),
+            "task": note.get("task"),
+            "project": note.get("project"),
+            "timestamp": note.get("timestamp"),
+        })
+
+    if include_removed:
+        present = {f["path"] for f in in_repo}
+        for path, note in latest.items():
+            if path in present:
+                continue
+            rows.append({
+                "path": path,
+                "bytes": note.get("bytes"),
+                "status": note.get("status") or "지움",
+                "summary": note.get("summary"),
+                "reason": note.get("reason"),
+                "task": note.get("task"),
+                "project": note.get("project"),
+                "timestamp": note.get("timestamp"),
+            })
+
+    rows.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
+    return {"files": rows, "count": len(rows)}
+
+
+_DOWNLOAD_DESCRIPTION = (
+    "Fetch one uploaded file back, as base64 in `content_base64`. It comes "
+    "straight from the user's GitHub repository, not from this server.\n"
+    "- `name`: the file name as shown by namu_list_files.\n"
+    "- Downloads are deliberately NOT logged (the file does not change, and on "
+    "the web this server cannot tell whether the user actually saved it).\n"
+    "- On the web, decode it and offer it to the user as a download."
+)
+
+
+@mcp.tool(description=_DOWNLOAD_DESCRIPTION)
+def namu_download_file(name: str, ctx: Context | None = None) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        content = attach_files.download(conn, key, name)
+    return {
+        "path": attach_files.normalize_name(name),
+        "bytes": len(content),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
+_DELETE_DESCRIPTION = (
+    "Remove one uploaded file from the user's GitHub repository and log why.\n"
+    "- `reason` is required: the log keeps the entry after the file is gone, so "
+    "'where did that file go' can be answered with when and why.\n"
+    "- ⚠ This is not an erase. Git keeps history, so anyone who walks back to a "
+    "commit before the deletion still finds the file. Say so plainly if the "
+    "user asks for the file to be wiped — truly erasing it means rewriting the "
+    "repository history, which this tool does not do."
+)
+
+
+@mcp.tool(description=_DELETE_DESCRIPTION)
+def namu_delete_file(
+    name: str,
+    reason: str,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    if not (reason or "").strip():
+        raise ValueError(
+            "'reason'(왜 빼는지)은 필수입니다 — 파일은 사라져도 기록은 남으므로, "
+            "나중에 '그 자료 어디 갔지'에 답할 수 있는 것은 이 한 줄뿐입니다."
+        )
+
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        paths = _paths_for_user(key)
+        _ensure_fresh(paths)
+        # 마지막 기록에서 크기를 물려받는다 — 파일이 사라진 뒤에는 크기를 물어볼
+        # 곳이 없고, 첨부 기록의 bytes는 비워 둘 수 없는 칸이다.
+        previous = [e for e in attachments.load_all(paths) if e.get("path")]
+        path = attach_files.normalize_name(name)
+        last = next(
+            (e for e in reversed(previous) if e.get("path") == path), {}
+        )
+        attach_files.delete(conn, key, name, attach_files.commit_message("지움", name))
+        _invalidate_sync_marker(key)
+
+        entry_id = _record_attachment_entry(
+            paths, path=path, size=last.get("bytes") or 0, status="지움",
+            summary=last.get("summary") or f"{path} 를 저장소에서 뺐다",
+            reason=reason,
+            body=last.get("body") or "생략",
+            topic=last.get("task"), project=last.get("project"), tags=None, via=via,
+        )
+        warning = _push_and_collect_warning(conn, key)
+
+    out = {"id": entry_id, "path": path, "status": "지움"}
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 # ---------------------------------------------------------------------------

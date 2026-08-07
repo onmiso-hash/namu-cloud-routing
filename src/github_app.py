@@ -50,6 +50,11 @@ _TOKEN_FALLBACK_LIFETIME_SEC = 3000
 
 _HTTP_TIMEOUT_SEC = 15.0
 
+# 첨부 파일 주고받기는 메타데이터 호출과 달리 실제 파일이 오간다 — 15초로는
+# 몇 MB짜리에서 쉽게 모자란다. 별도 상수로 둬서 이 값을 늘려도 토큰 발급 같은
+# 짧아야 하는 호출의 타임아웃은 그대로 유지된다.
+_ATTACH_HTTP_TIMEOUT_SEC = 120.0
+
 
 # ---------------------------------------------------------------------------
 # 환경변수 읽기 (전부 지연 평가) — 값 자체는 어떤 오류 메시지에도 넣지 않는다.
@@ -212,6 +217,122 @@ def _get_json(url: str, token: str) -> dict:
             f"GitHub API request failed with status {resp.status_code}."
         )
     return resp.json()
+
+
+def _put_json(url: str, token: str, body: dict) -> dict:
+    """`_post_json`의 PUT 버전 — 파일 하나 올리기(Contents API)에 쓴다.
+
+    파일 첨부(namu-file-upload-download)는 서버 복제본을 거치지 않고 GitHub과
+    직접 주고받는다. 복제본에 파일을 놓았다가 지우면 그 삭제가 push에 실려
+    **GitHub에서도 파일이 사라지는** 것이 실측으로 확인됐기 때문이다.
+    """
+    import httpx
+
+    resp = httpx.put(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json=body,
+        timeout=_ATTACH_HTTP_TIMEOUT_SEC,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub API 호출이 실패했습니다 (status={resp.status_code}, url={url}) — "
+            f"GitHub API request failed with status {resp.status_code}."
+        )
+    return resp.json()
+
+
+def _delete_json(url: str, token: str, body: dict) -> dict:
+    """`_put_json`의 DELETE 버전 — 파일 하나 지우기(Contents API).
+
+    httpx는 DELETE에 body를 실으려면 `request()`를 써야 한다(`delete()`는 json
+    인자를 받지 않는다). GitHub Contents API의 삭제는 sha와 커밋 메시지를 body로
+    요구하므로 이 형태가 강제된다.
+    """
+    import httpx
+
+    resp = httpx.request(
+        "DELETE",
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json=body,
+        timeout=_ATTACH_HTTP_TIMEOUT_SEC,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub API 호출이 실패했습니다 (status={resp.status_code}, url={url}) — "
+            f"GitHub API request failed with status {resp.status_code}."
+        )
+    return resp.json()
+
+
+def _get_raw(url: str, token: str) -> bytes:
+    """파일 몸통을 **raw 형식으로** 받는다 — 첨부 받기 전용.
+
+    기본 JSON 응답을 쓰면 안 되는 이유(2026-08-07 실측): Contents API는 파일이
+    1 MiB(1,048,576바이트)를 넘으면 오류가 아니라 `encoding: "none"` + 빈 content를
+    조용히 돌려준다. 그 상태를 "빈 파일"로 읽으면 큰 파일이 말없이 0바이트가 된다.
+    `Accept: application/vnd.github.raw`로 요청하면 그 크기를 넘어도 전부 받아진다.
+    """
+    import httpx
+
+    resp = httpx.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=_ATTACH_HTTP_TIMEOUT_SEC,
+        follow_redirects=True,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub API 호출이 실패했습니다 (status={resp.status_code}, url={url}) — "
+            f"GitHub API request failed with status {resp.status_code}."
+        )
+    return resp.content
+
+
+def _get_json_list(url: str, token: str) -> list:
+    """폴더 안 목록(Contents API가 배열을 주는 경우)을 돌려준다.
+
+    **크기를 물어도 파일 몸통은 안 내려온다**(2026-08-07 실측: 항목마다 name·size가
+    오고 content는 비어 있다). 위험한 것은 서버 복제본에 `git ls-tree -l`로 묻는
+    쪽이었다 — 그쪽은 크기를 알아내려고 빠진 몸통을 전부 내려받아 첨부 격리가
+    뚫린다. 그래서 목록은 복제본이 아니라 이 API로 만든다.
+
+    폴더가 아직 없으면 GitHub이 404를 준다 — 그건 오류가 아니라 "아직 아무것도
+    안 올렸다"이므로 호출부가 빈 목록으로 다룰 수 있게 그대로 알린다.
+    """
+    import httpx
+
+    resp = httpx.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=_ATTACH_HTTP_TIMEOUT_SEC,
+    )
+    if resp.status_code == 404:
+        return []
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"GitHub API 호출이 실패했습니다 (status={resp.status_code}, url={url}) — "
+            f"GitHub API request failed with status {resp.status_code}."
+        )
+    payload = resp.json()
+    return payload if isinstance(payload, list) else []
 
 
 def repo_size_kb(repo_full_name: str, token: str) -> int:

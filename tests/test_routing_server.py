@@ -1267,3 +1267,203 @@ def test_dispatcher_routes_each_secret_to_its_own_owner(ledger):
 
     _dispatcher_get(dispatcher, f"/mcp/{ledger['secret_b']}")
     assert f"user={ledger['key_b']}" in seen["scope"]["query_string"].decode()
+
+
+# ---------------------------------------------------------------------------
+# 첨부 파일 네 도구 (namu-file-upload-download 5·6단계)
+#
+# 파일이 실제로 GitHub과 오가는 부분은 tests/test_attach_files.py가 다룬다. 여기서
+# 보는 것은 그 위층 배선이다: 첨부 기록이 함께 남는가 · 최신화 표시를 지우는가 ·
+# 회원마다 갈리는가 · 받은 일은 기록하지 않는가.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def fake_github(monkeypatch):
+    """GitHub 대신 쓰는 저장소 한 칸 — 경로 → 내용."""
+    store: dict = {}
+
+    def _upload(conn, key, name, content, message):
+        path = rs.attach_files.normalize_name(name)
+        replaced = path in store
+        store[path] = content
+        return {"path": path, "bytes": len(content), "replaced": replaced}
+
+    def _download(conn, key, name):
+        path = rs.attach_files.normalize_name(name)
+        if path not in store:
+            raise rs.attach_files.AttachError(f"저장소에 그런 파일이 없습니다: {path}")
+        return store[path]
+
+    def _delete(conn, key, name, message):
+        path = rs.attach_files.normalize_name(name)
+        if path not in store:
+            raise rs.attach_files.AttachError(f"저장소에 그런 파일이 없습니다: {path}")
+        del store[path]
+        return path
+
+    def _list(conn, key):
+        return [{"path": p, "bytes": len(c)} for p, c in sorted(store.items())]
+
+    monkeypatch.setattr(rs.attach_files, "upload", _upload)
+    monkeypatch.setattr(rs.attach_files, "download", _download)
+    monkeypatch.setattr(rs.attach_files, "delete", _delete)
+    monkeypatch.setattr(rs.attach_files, "list_in_repo", _list)
+    return store
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
+def test_upload_stores_the_file_and_logs_it(fake_github, tmp_path):
+    out = rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"\x01\x02\x03"),
+        summary="설계 문서", reason="파일째 남긴다", body="원문",
+        topic="namu-70", project="proj-x", ctx=_ctx("alice"),
+    )
+
+    assert out["path"] == "attach_file/설계.pdf"
+    assert out["bytes"] == 3
+    assert out["status"] == "올림"
+    assert fake_github["attach_file/설계.pdf"] == b"\x01\x02\x03"
+
+    text = _yaml_text(tmp_path, "alice", "attachments.yaml")
+    assert "attach_file/설계.pdf" in text
+    assert "설계 문서" in text
+
+
+def test_uploading_the_same_name_is_logged_as_a_revision(fake_github, tmp_path):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"1"), summary="1판",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+    second = rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"22"), summary="2판",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    assert second["status"] == "새 판"
+    # 옛 기록이 남아야 "이 문서를 언제부터 몇 번 고쳤나"를 볼 수 있다.
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert [e["status"] for e in found["results"]] == ["새 판", "올림"]
+
+
+def test_upload_requires_the_three_layers(fake_github):
+    """파일 몸통은 각 PC로 안 내려오므로, 나중에 그 파일을 찾는 단서는 이 설명뿐이다."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_upload_file(
+            name="설계.pdf", content_base64=_b64(b"x"), summary="  ",
+            reason="r", body="b", ctx=_ctx("alice"),
+        )
+    assert "summary" in str(exc.value)
+    assert fake_github == {}
+
+
+def test_upload_rejects_content_that_is_not_base64(fake_github):
+    with pytest.raises(ValueError, match="content_base64"):
+        rs.namu_upload_file(
+            name="설계.pdf", content_base64="이건 base64가 아니다!",
+            summary="s", reason="r", body="b", ctx=_ctx("alice"),
+        )
+
+
+def test_upload_forces_the_next_call_to_resync(fake_github, tmp_path):
+    """파일을 올리면 GitHub에 이 서버가 모르는 커밋이 생긴다 — 최신화 표시를 지워
+    다음 호출이 TTL과 무관하게 반드시 다시 읽게 해야 밀린 사본 위에서 push하지 않는다."""
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    assert not rs._sync_marker_path("alice").exists()
+
+
+def test_list_merges_repo_names_with_the_log(fake_github):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"12345"), summary="설계요약마커",
+        reason="r", body="b", topic="namu-70", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_list_files(ctx=_ctx("alice"))
+
+    assert out["count"] == 1
+    row = out["files"][0]
+    assert row["path"] == "attach_file/설계.pdf"
+    assert row["bytes"] == 5
+    assert row["summary"] == "설계요약마커"
+    assert row["task"] == "namu-70"
+
+
+def test_list_hides_removed_files_unless_asked(fake_github):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+    rs.namu_delete_file(name="설계.pdf", reason="왜뺐는지마커", ctx=_ctx("alice"))
+
+    assert rs.namu_list_files(ctx=_ctx("alice"))["count"] == 0
+
+    with_removed = rs.namu_list_files(include_removed=True, ctx=_ctx("alice"))
+    assert with_removed["count"] == 1
+    assert with_removed["files"][0]["status"] == "지움"
+    assert with_removed["files"][0]["reason"] == "왜뺐는지마커"
+
+
+def test_download_returns_the_bytes_and_logs_nothing(fake_github):
+    rs.namu_upload_file(
+        name="그림.bin", content_base64=_b64(bytes(range(256))), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+    before = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"]
+
+    out = rs.namu_download_file(name="그림.bin", ctx=_ctx("alice"))
+
+    import base64 as _b
+    assert _b.b64decode(out["content_base64"]) == bytes(range(256))
+    # 받은 일은 일부러 기록하지 않는다(2026-08-07 사용자 결정).
+    assert rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"] == before
+
+
+def test_download_of_a_missing_file_says_so(fake_github):
+    with pytest.raises(rs.attach_files.AttachError, match="없습니다"):
+        rs.namu_download_file(name="없는것.pdf", ctx=_ctx("alice"))
+
+
+def test_delete_removes_the_file_and_keeps_the_log(fake_github, tmp_path):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"12345"), summary="설계요약마커",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    out = rs.namu_delete_file(name="설계.pdf", reason="발표가 끝났다", ctx=_ctx("alice"))
+
+    assert out["status"] == "지움"
+    assert fake_github == {}
+    text = _yaml_text(tmp_path, "alice", "attachments.yaml")
+    assert "발표가 끝났다" in text
+    # 크기는 마지막 기록에서 물려받는다 — 파일이 사라진 뒤에는 물어볼 곳이 없다.
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert found["results"][0]["bytes"] == 5
+
+
+def test_delete_requires_a_reason(fake_github):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+    with pytest.raises(ValueError, match="reason"):
+        rs.namu_delete_file(name="설계.pdf", reason="   ", ctx=_ctx("alice"))
+    # 거절했으면 파일은 그대로 있어야 한다.
+    assert "attach_file/설계.pdf" in fake_github
+
+
+def test_attachments_of_one_user_are_invisible_to_another(fake_github):
+    rs.namu_upload_file(
+        name="내파일.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    assert rs.namu_search(bowl="attachments", ctx=_ctx("bob"))["count"] == 0
