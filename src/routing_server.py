@@ -1195,17 +1195,38 @@ def namu_record(
 # 거치지 않는다. 사본에 놓았다 지우면 그 삭제가 다음 push에 실려 GitHub에서도
 # 파일이 사라지는 것이 실측으로 확인됐기 때문이다.
 #
-# 파일을 올리거나 지우면 GitHub에 이 서버가 모르는 커밋이 하나 생긴다. 그대로 두면
-# 다음 기억 저장이 뒤처진 사본 위에서 push를 시도해 거부된다. 새 장치를 만들지 않고
-# **최신화 표시만 지워** 다음 호출이 TTL과 무관하게 반드시 최신화하게 한다.
+# 파일을 올리거나 지우면 GitHub에 이 서버가 모르는 커밋이 하나 생긴다. 그 상태로
+# 첨부 기록을 push하면 **반드시 거부된다** — 사본이 한 커밋 뒤처져 있기 때문이다.
+#
+# 설계서 6절은 "최신화 표시만 지워 다음 호출이 맞추게 한다"였고 처음엔 그대로
+# 구현했는데, 2026-08-07 첫 실사용에서 그게 틀린 것이 드러났다: 파일은 올라갔지만
+# 올린 기록이 저장소에 안 들어가고, 붙은 AI가 "push가 거부됐다"는 경고를 회원에게
+# 그대로 전했다. 미룬 최신화는 **이번 호출의 push를 반드시 실패시킨다** — 다음
+# 호출이 아니라 지금 맞춰야 한다.
+#
+# 순서도 중요하다: 최신화(`reset --hard`)는 사본의 안 커밋된 변경을 지우므로,
+# **기록을 쓰기 전에** 맞춰야 한다. 뒤집으면 방금 쓴 첨부 기록이 날아간다.
 # ---------------------------------------------------------------------------
-def _invalidate_sync_marker(user_key: str) -> None:
-    """다음 호출이 반드시 저장소를 다시 읽게 만든다(위 절 참고)."""
+def _resync_after_repo_change(conn: sqlite3.Connection, user_key: str) -> None:
+    """GitHub에 우리가 만든 커밋을 사본에 즉시 반영한다(첨부 올리기·지우기 직후).
+
+    실패해도 도구를 실패로 돌리지 않는다 — 파일은 이미 GitHub에 올라갔고, 여기서
+    예외를 던지면 회원이 같은 파일을 또 올린다. 대신 최신화 표시를 지워 다음
+    호출이 반드시 다시 맞추게 하고, 경위를 로그에 남긴다.
+    """
+    try:
+        user_repo.ensure_ready(conn, user_key)
+        _mark_synced(user_key)
+        return
+    except Exception as exc:
+        logger.warning(
+            "사용자(%s) 첨부 변경 뒤 사본 최신화에 실패했습니다: %s — "
+            "최신화 표시를 지워 다음 호출이 다시 맞추게 합니다.",
+            user_key, exc,
+        )
     try:
         _sync_marker_path(user_key).unlink(missing_ok=True)
     except OSError as exc:
-        # 표시를 못 지워도 파일 자체는 이미 GitHub에 올라갔다 — 도구를 실패로
-        # 돌리면 회원이 같은 파일을 또 올린다. 대신 반드시 남긴다.
         logger.warning("사용자(%s) 최신화 표시를 지우지 못했습니다: %s", user_key, exc)
 
 
@@ -1276,7 +1297,9 @@ def namu_upload_file(
             conn, key, name, content,
             attach_files.commit_message("올림", name),
         )
-        _invalidate_sync_marker(key)
+        # 기록을 쓰기 **전에** 맞춘다 — reset --hard가 안 커밋된 변경을 지우므로
+        # 순서를 뒤집으면 방금 쓴 첨부 기록이 날아간다.
+        _resync_after_repo_change(conn, key)
 
         paths = _paths_for_user(key)
         _ensure_fresh(paths)
@@ -1426,7 +1449,8 @@ def namu_delete_file(
             (e for e in reversed(previous) if e.get("path") == path), {}
         )
         attach_files.delete(conn, key, name, attach_files.commit_message("지움", name))
-        _invalidate_sync_marker(key)
+        # 올리기와 같은 이유로 기록을 쓰기 전에 맞춘다(위 절 참고).
+        _resync_after_repo_change(conn, key)
 
         entry_id = _record_attachment_entry(
             paths, path=path, size=last.get("bytes") or 0, status="지움",

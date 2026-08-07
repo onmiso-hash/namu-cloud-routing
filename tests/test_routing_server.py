@@ -1370,15 +1370,34 @@ def test_upload_rejects_content_that_is_not_base64(fake_github):
         )
 
 
-def test_upload_forces_the_next_call_to_resync(fake_github, tmp_path):
-    """파일을 올리면 GitHub에 이 서버가 모르는 커밋이 생긴다 — 최신화 표시를 지워
-    다음 호출이 TTL과 무관하게 반드시 다시 읽게 해야 밀린 사본 위에서 push하지 않는다."""
-    rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
-        reason="r", body="b", ctx=_ctx("alice"),
-    )
+def test_upload_syncs_the_copy_in_the_same_call(fake_github, tmp_path):
+    """파일을 올리면 GitHub에 이 서버가 모르는 커밋이 생긴다 — **이번 호출 안에서**
+    맞춰야 한다.
 
-    assert not rs._sync_marker_path("alice").exists()
+    처음에는 설계서 6절대로 표시만 지워 다음 호출에 미뤘는데, 그러면 이번 호출의
+    push가 반드시 거부된다(2026-08-07 첫 실사용에서 파일은 올라갔는데 올린 기록이
+    저장소에 안 들어갔다). 맞췄다는 표시가 남아 있으면 미루지 않았다는 뜻이다.
+    """
+    seen = []
+    real_ensure = rs.user_repo.ensure_ready
+
+    def _counting_ensure(conn, key):
+        seen.append(key)
+        return real_ensure(conn, key)
+
+    original = rs.user_repo.ensure_ready
+    rs.user_repo.ensure_ready = _counting_ensure
+    try:
+        rs.namu_upload_file(
+            name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+            reason="r", body="b", ctx=_ctx("alice"),
+        )
+    finally:
+        rs.user_repo.ensure_ready = original
+
+    # 올리기 뒤 최신화가 실제로 한 번 더 일어났다(첫 호출은 _sync_or_reject).
+    assert len(seen) >= 2
+    assert rs._sync_marker_path("alice").exists()
 
 
 def test_list_merges_repo_names_with_the_log(fake_github):
@@ -1467,3 +1486,96 @@ def test_attachments_of_one_user_are_invisible_to_another(fake_github):
     )
 
     assert rs.namu_search(bowl="attachments", ctx=_ctx("bob"))["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 첨부 변경 뒤 사본 최신화 순서 (2026-08-07 첫 실사용에서 드러난 결함)
+#
+# 파일을 GitHub에 올리면 저장소에 이 서버가 모르는 커밋이 하나 생긴다. 처음 구현은
+# 설계서 6절대로 "최신화 표시만 지워 다음 호출이 맞추게" 했는데, 그러면 **이번
+# 호출의 push가 반드시 거부된다** — 실제로 파일은 올라갔는데 올린 기록이 저장소에
+# 안 들어갔고, 붙은 AI가 그 실패를 회원에게 그대로 전했다.
+# ---------------------------------------------------------------------------
+
+
+def test_upload_resyncs_the_copy_before_writing_the_log(fake_github, monkeypatch):
+    """최신화(reset --hard)는 사본의 안 커밋된 변경을 지운다 — 기록을 먼저 쓰면
+    그 기록이 날아간다. 그래서 최신화가 **기록보다 먼저** 와야 한다.
+
+    최신화 대역이 첨부 기록 파일을 지우게 해 두고, 호출이 끝난 뒤에도 기록이 남아
+    있는지로 순서를 확인한다(남아 있으면 기록이 최신화 뒤에 쓰인 것이다).
+    """
+    real_ensure = rs.user_repo.ensure_ready
+
+    def _wiping_ensure(conn, key):
+        target = rs._paths_for_user(key).attachments_yaml
+        if target.exists():
+            target.unlink()
+        return real_ensure(conn, key)
+
+    monkeypatch.setattr(rs.user_repo, "ensure_ready", _wiping_ensure)
+
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="설계요약마커",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert found["count"] == 1
+    assert found["results"][0]["summary"] == "설계요약마커"
+
+
+def test_upload_marks_the_copy_fresh_instead_of_leaving_it_stale(fake_github):
+    """맞췄으면 '맞췄다'고 표시해야 한다 — 표시를 지워만 두면 다음 호출이 TTL과
+    무관하게 또 통째로 최신화한다."""
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    assert rs._sync_marker_path("alice").exists()
+
+
+def test_upload_still_succeeds_when_the_resync_fails(fake_github, monkeypatch):
+    """최신화가 실패해도 파일은 이미 GitHub에 올라갔다 — 여기서 도구를 실패로
+    돌리면 회원이 같은 파일을 또 올린다. 대신 표시를 지워 다음 호출이 맞추게 한다."""
+    calls = {"n": 0}
+
+    def _failing_ensure(conn, key):
+        calls["n"] += 1
+        if calls["n"] > 1:  # 첫 호출(_sync_or_reject)은 통과시키고 그 뒤만 실패
+            raise RuntimeError("최신화 실패(시험)")
+        return rs.user_repo.user_dir(key)
+
+    monkeypatch.setattr(rs.user_repo, "ensure_ready", _failing_ensure)
+    # 사본이 없으면 _needs_sync가 항상 True라 첫 호출이 반드시 일어난다.
+    rs.user_repo.user_dir("alice").mkdir(parents=True, exist_ok=True)
+
+    out = rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+
+    assert out["path"] == "attach_file/설계.pdf"
+    assert not rs._sync_marker_path("alice").exists()
+
+
+def test_delete_also_resyncs_before_writing_the_log(fake_github, monkeypatch):
+    rs.namu_upload_file(
+        name="설계.pdf", content_base64=_b64(b"12345"), summary="s",
+        reason="r", body="b", ctx=_ctx("alice"),
+    )
+    real_ensure = rs.user_repo.ensure_ready
+    seen = []
+
+    def _watching_ensure(conn, key):
+        seen.append(rs._paths_for_user(key).attachments_yaml.exists())
+        return real_ensure(conn, key)
+
+    monkeypatch.setattr(rs.user_repo, "ensure_ready", _watching_ensure)
+
+    rs.namu_delete_file(name="설계.pdf", reason="끝났다", ctx=_ctx("alice"))
+
+    found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
+    assert [e["status"] for e in found["results"]] == ["지움", "올림"]
+    assert rs._sync_marker_path("alice").exists()
