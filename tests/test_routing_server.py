@@ -508,6 +508,29 @@ def test_search_tasks_bowl_finds_log_line(_fake_home):
     assert result["results"][0]["task_slug"] == "namu-99-demo"
 
 
+def test_search_tasks_bowl_uses_the_core_word_rule(_fake_home):
+    """작업일지 검색도 개인용과 같은 낱말 규칙을 쓴다 — 낱말별 AND, 순서 무관.
+
+    이 시험이 있는 이유: 이 분기는 회원별 폴더를 훑느라 코어의 search_bowl을 못
+    부르고 함수를 복사해 왔는데, 그때 **거르는 규칙까지 함께 복사돼** 코어가 낱말
+    AND로 개선됐을 때(fts5-memo-tasks-index) 다섯 그릇 중 작업일지 하나만 옛
+    방식(검색어를 통째로 부분일치)으로 남았다 — 나머지 넷은 코어를 부르므로
+    자동으로 따라갔다. "셀프호스팅에서 되는 것이 여기서 안 되면 안 된다"가 이
+    서버의 규약이고, 그 규약이 실제로 깨졌던 자리다.
+    """
+    _make_task()
+    rs.namu_record(
+        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        summary="검색 인덱스 설계 문서", status="기록", reason="생략", body="생략",
+        ctx=_ctx("alice"),
+    )
+    # 낱말 순서가 달라도 걸린다(옛 방식이면 아래 둘째가 0건이 된다).
+    assert rs.namu_search(query="설계 문서", bowl="tasks", ctx=_ctx("alice"))["count"] == 1
+    assert rs.namu_search(query="문서 설계", bowl="tasks", ctx=_ctx("alice"))["count"] == 1
+    # 한 낱말이라도 없으면 안 걸린다(AND이지 OR이 아니다).
+    assert rs.namu_search(query="설계 첨부", bowl="tasks", ctx=_ctx("alice"))["count"] == 0
+
+
 def test_closed_task_drops_out_of_open_list(_fake_home):
     _make_task()
     rs.namu_record(

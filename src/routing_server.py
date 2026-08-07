@@ -553,14 +553,19 @@ def namu_search(
             machine=machine, task=task, via=via,
         )
         if query:
-            q = query.lower()
+            # 거르는 규칙은 코어의 `matches_all_tokens`를 부른다 — 낱말별로 나눠
+            # 모두 포함(AND), 순서 무관. **여기에 규칙을 베끼지 않는 것이 요점이다**:
+            # 예전에는 "검색어를 통째로 부분일치"를 이 자리에 적어 두었고, 코어가
+            # 낱말 AND로 개선됐을 때(fts5-memo-tasks-index) 다섯 그릇 중 작업일지
+            # 하나만 옛 방식으로 남았다 — 나머지 넷은 코어를 부르므로 자동으로
+            # 따라갔다. 폴더를 정하는 부분만 회원별로 다를 뿐, 무엇을 걸러낼지는
+            # 개인용과 같아야 한다.
             # 거른 **뒤에** 자른다 — 먼저 자르면 걸러질 결과가 사라진다.
             entries = [
                 e for e in entries
-                if q in (e["text"] or "").lower()
-                or q in (e["detail"] or "").lower()
-                or q in (e["tag"] or "").lower()
-                or q in e["task_slug"].lower()
+                if db.matches_all_tokens(
+                    query, e["text"], e["detail"], e["tag"], e["task_slug"]
+                )
             ]
         entries = entries[:limit]
         return {"bowl": "tasks", "results": entries, "count": len(entries)}
