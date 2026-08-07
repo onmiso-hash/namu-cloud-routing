@@ -368,12 +368,12 @@ def test_attachments_bowl_is_stored_in_its_own_file(tmp_path):
     """첨부 기록은 쪽지로 새면 안 된다 — 예전 이 자리의 분기가 `else: # memo`라,
     그릇이 하나 늘면 새 그릇이 말없이 쪽지로 저장되는 구조였다."""
     entry_id = rs.namu_record(
-        bowl="attachments", path="attach_file/설계.pdf", bytes=284915,
+        bowl="attachments", path="attach_file/설계.md", bytes=284915,
         status="올림", summary="설계 문서", reason="파일째 남긴다",
         body="원문", topic="namu-70", project="proj-x", ctx=_ctx("alice"),
     )
     text = _yaml_text(tmp_path, "alice", "attachments.yaml")
-    assert "attach_file/설계.pdf" in text
+    assert "attach_file/설계.md" in text
     assert "284915" in text
     # 쪽지 파일은 생기지도 않는다.
     assert not (tmp_path / "users" / "alice" / "memory" / "memo.yaml").exists()
@@ -1363,36 +1363,30 @@ def fake_github(monkeypatch):
     return store
 
 
-def _b64(data: bytes) -> str:
-    import base64
-
-    return base64.b64encode(data).decode("ascii")
-
-
 def test_upload_stores_the_file_and_logs_it(fake_github, tmp_path):
     out = rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"\x01\x02\x03"),
+        name="설계.md", content_text="설계 원문 세 줄",
         summary="설계 문서", reason="파일째 남긴다", body="원문",
         topic="namu-70", project="proj-x", ctx=_ctx("alice"),
     )
 
-    assert out["path"] == "attach_file/설계.pdf"
-    assert out["bytes"] == 3
+    assert out["path"] == "attach_file/설계.md"
+    assert out["bytes"] == len("설계 원문 세 줄".encode("utf-8"))
     assert out["status"] == "올림"
-    assert fake_github["attach_file/설계.pdf"] == b"\x01\x02\x03"
+    assert fake_github["attach_file/설계.md"] == "설계 원문 세 줄".encode("utf-8")
 
     text = _yaml_text(tmp_path, "alice", "attachments.yaml")
-    assert "attach_file/설계.pdf" in text
+    assert "attach_file/설계.md" in text
     assert "설계 문서" in text
 
 
 def test_uploading_the_same_name_is_logged_as_a_revision(fake_github, tmp_path):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"1"), summary="1판",
+        name="설계.md", content_text="1", summary="1판",
         reason="r", body="b", ctx=_ctx("alice"),
     )
     second = rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"22"), summary="2판",
+        name="설계.md", content_text="22", summary="2판",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
@@ -1406,19 +1400,27 @@ def test_upload_requires_the_three_layers(fake_github):
     """파일 몸통은 각 PC로 안 내려오므로, 나중에 그 파일을 찾는 단서는 이 설명뿐이다."""
     with pytest.raises(ValueError) as exc:
         rs.namu_upload_file(
-            name="설계.pdf", content_base64=_b64(b"x"), summary="  ",
+            name="설계.md", content_text="x", summary="  ",
             reason="r", body="b", ctx=_ctx("alice"),
         )
     assert "summary" in str(exc.value)
     assert fake_github == {}
 
 
-def test_upload_rejects_content_that_is_not_base64(fake_github):
-    with pytest.raises(ValueError, match="content_base64"):
-        rs.namu_upload_file(
-            name="설계.pdf", content_base64="이건 base64가 아니다!",
-            summary="s", reason="r", body="b", ctx=_ctx("alice"),
-        )
+def test_the_upload_tool_has_no_base64_field_at_all(fake_github):
+    """칸이 있으면 붙은 AI가 그것을 쓴다(2026-08-07 실사용) — 그래서 없앴다.
+
+    필수에서 선택으로 낮추고 설명에 "base64로 바꾸지 마세요"라고 굵게 적어 뒀는데도
+    `.md` 파일 하나에 AI가 base64로 바꾸기 시작했고, 회원은 몇 분을 기다리다 응답을
+    멈췄다. 다음에 "하위 호환을 위해 하나쯤"으로 되살아나는 것을 여기서 막는다.
+    """
+    import inspect
+
+    params = inspect.signature(rs.namu_upload_file).parameters
+
+    assert "content_base64" not in params
+    # 글자 원문은 이제 선택이 아니라 필수다 — 내용 칸이 이것 하나뿐이다.
+    assert params["content_text"].default is inspect.Parameter.empty
 
 
 def test_upload_syncs_the_copy_in_the_same_call(fake_github, tmp_path):
@@ -1440,7 +1442,7 @@ def test_upload_syncs_the_copy_in_the_same_call(fake_github, tmp_path):
     rs.user_repo.ensure_ready = _counting_ensure
     try:
         rs.namu_upload_file(
-            name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+            name="설계.md", content_text="x", summary="s",
             reason="r", body="b", ctx=_ctx("alice"),
         )
     finally:
@@ -1453,7 +1455,7 @@ def test_upload_syncs_the_copy_in_the_same_call(fake_github, tmp_path):
 
 def test_list_merges_repo_names_with_the_log(fake_github):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"12345"), summary="설계요약마커",
+        name="설계.md", content_text="12345", summary="설계요약마커",
         reason="r", body="b", topic="namu-70", ctx=_ctx("alice"),
     )
 
@@ -1461,7 +1463,7 @@ def test_list_merges_repo_names_with_the_log(fake_github):
 
     assert out["count"] == 1
     row = out["files"][0]
-    assert row["path"] == "attach_file/설계.pdf"
+    assert row["path"] == "attach_file/설계.md"
     assert row["bytes"] == 5
     assert row["summary"] == "설계요약마커"
     assert row["task"] == "namu-70"
@@ -1469,10 +1471,10 @@ def test_list_merges_repo_names_with_the_log(fake_github):
 
 def test_list_hides_removed_files_unless_asked(fake_github):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        name="설계.md", content_text="x", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
-    rs.namu_delete_file(name="설계.pdf", reason="왜뺐는지마커", ctx=_ctx("alice"))
+    rs.namu_delete_file(name="설계.md", reason="왜뺐는지마커", ctx=_ctx("alice"))
 
     assert rs.namu_list_files(ctx=_ctx("alice"))["count"] == 0
 
@@ -1483,10 +1485,7 @@ def test_list_hides_removed_files_unless_asked(fake_github):
 
 
 def test_download_returns_the_bytes_and_logs_nothing(fake_github):
-    rs.namu_upload_file(
-        name="그림.bin", content_base64=_b64(bytes(range(256))), summary="s",
-        reason="r", body="b", ctx=_ctx("alice"),
-    )
+    fake_github["attach_file/그림.bin"] = bytes(range(256))
     before = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))["count"]
 
     out = rs.namu_download_file(
@@ -1514,19 +1513,13 @@ def test_upload_accepts_plain_text_without_base64(fake_github, tmp_path):
     assert out["bytes"] == len("# 제목\n한글 본문".encode("utf-8"))
 
 
-def test_upload_rejects_both_content_fields_at_once(fake_github):
-    with pytest.raises(ValueError, match="하나만"):
+def test_upload_rejects_empty_text(fake_github):
+    with pytest.raises(ValueError, match="namu_create_upload_ticket"):
         rs.namu_upload_file(
-            name="메모.md", content_text="가", content_base64=_b64(b"na"),
-            summary="s", reason="r", ctx=_ctx("alice"),
+            name="메모.md", content_text="   ", summary="s", reason="r",
+            ctx=_ctx("alice"),
         )
-
-
-def test_upload_rejects_neither_content_field(fake_github):
-    with pytest.raises(ValueError, match="파일 내용이 없습니다"):
-        rs.namu_upload_file(
-            name="메모.md", summary="s", reason="r", ctx=_ctx("alice"),
-        )
+    assert fake_github == {}
 
 
 def test_upload_rejects_text_over_the_inline_limit(fake_github):
@@ -1553,10 +1546,7 @@ def test_download_returns_text_files_as_plain_text(fake_github):
 
 
 def test_download_withholds_binary_and_points_at_the_ticket(fake_github):
-    rs.namu_upload_file(
-        name="그림.bin", content_base64=_b64(bytes(range(256))), summary="s",
-        reason="r", ctx=_ctx("alice"),
-    )
+    fake_github["attach_file/그림.bin"] = bytes(range(256))
 
     out = rs.namu_download_file(name="그림.bin", ctx=_ctx("alice"))
 
@@ -1568,10 +1558,7 @@ def test_download_withholds_binary_and_points_at_the_ticket(fake_github):
 
 def test_download_withholds_text_that_is_too_large(fake_github):
     big = "a" * (rs.attach_files.MAX_INLINE_TEXT_BYTES + 1)
-    rs.namu_upload_file(
-        name="큰글.md", content_base64=_b64(big.encode("utf-8")), summary="s",
-        reason="r", ctx=_ctx("alice"),
-    )
+    fake_github["attach_file/큰글.md"] = big.encode("utf-8")
 
     out = rs.namu_download_file(name="큰글.md", ctx=_ctx("alice"))
 
@@ -1581,10 +1568,7 @@ def test_download_withholds_text_that_is_too_large(fake_github):
 
 def test_download_withholds_binary_wearing_a_text_extension(fake_github):
     """`.md` 이름을 단 바이너리 — 확장자만 믿으면 깨진 글자를 내주게 된다."""
-    rs.namu_upload_file(
-        name="속임수.md", content_base64=_b64(b"\xff\xfe\x00\x01"), summary="s",
-        reason="r", ctx=_ctx("alice"),
-    )
+    fake_github["attach_file/속임수.md"] = b"\xff\xfe\x00\x01"
 
     out = rs.namu_download_file(name="속임수.md", ctx=_ctx("alice"))
 
@@ -1671,7 +1655,7 @@ def test_a_file_posted_to_the_ticket_lands_in_the_repo_and_the_log(fake_github):
 
 def test_a_second_upload_of_the_same_name_is_logged_as_a_new_revision(fake_github):
     rs.namu_upload_file(
-        name="발표.pptx", content_base64=_b64(b"old"), summary="s", reason="r",
+        name="발표.pptx", content_text="old", summary="s", reason="r",
         ctx=_ctx("alice"),
     )
     ticket = rs.namu_create_upload_ticket(
@@ -1703,10 +1687,7 @@ def test_the_ticket_page_opens_for_a_browser(fake_github):
 
 
 def test_a_download_ticket_serves_the_file(fake_github):
-    rs.namu_upload_file(
-        name="보고서.pdf", content_base64=_b64(b"PDFBYTES"), summary="s",
-        reason="r", ctx=_ctx("alice"),
-    )
+    fake_github["attach_file/보고서.pdf"] = b"PDFBYTES"
     ticket = rs.namu_create_download_ticket(name="보고서.pdf", ctx=_ctx("alice"))
 
     r = _ticket_client().get(f"/d/{ticket['ticket_id']}")
@@ -1793,11 +1774,11 @@ def test_the_ticket_link_survives_a_failed_send(fake_github, monkeypatch):
 
 def test_delete_removes_the_file_and_keeps_the_log(fake_github, tmp_path):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"12345"), summary="설계요약마커",
+        name="설계.md", content_text="12345", summary="설계요약마커",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
-    out = rs.namu_delete_file(name="설계.pdf", reason="발표가 끝났다", ctx=_ctx("alice"))
+    out = rs.namu_delete_file(name="설계.md", reason="발표가 끝났다", ctx=_ctx("alice"))
 
     assert out["status"] == "지움"
     assert fake_github == {}
@@ -1810,18 +1791,18 @@ def test_delete_removes_the_file_and_keeps_the_log(fake_github, tmp_path):
 
 def test_delete_requires_a_reason(fake_github):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        name="설계.md", content_text="x", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
     with pytest.raises(ValueError, match="reason"):
-        rs.namu_delete_file(name="설계.pdf", reason="   ", ctx=_ctx("alice"))
+        rs.namu_delete_file(name="설계.md", reason="   ", ctx=_ctx("alice"))
     # 거절했으면 파일은 그대로 있어야 한다.
-    assert "attach_file/설계.pdf" in fake_github
+    assert "attach_file/설계.md" in fake_github
 
 
 def test_attachments_of_one_user_are_invisible_to_another(fake_github):
     rs.namu_upload_file(
-        name="내파일.pdf", content_base64=_b64(b"x"), summary="s",
+        name="내파일.md", content_text="x", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
@@ -1856,7 +1837,7 @@ def test_upload_resyncs_the_copy_before_writing_the_log(fake_github, monkeypatch
     monkeypatch.setattr(rs.user_repo, "ensure_ready", _wiping_ensure)
 
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="설계요약마커",
+        name="설계.md", content_text="x", summary="설계요약마커",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
@@ -1869,7 +1850,7 @@ def test_upload_marks_the_copy_fresh_instead_of_leaving_it_stale(fake_github):
     """맞췄으면 '맞췄다'고 표시해야 한다 — 표시를 지워만 두면 다음 호출이 TTL과
     무관하게 또 통째로 최신화한다."""
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        name="설계.md", content_text="x", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
@@ -1892,17 +1873,17 @@ def test_upload_still_succeeds_when_the_resync_fails(fake_github, monkeypatch):
     rs.user_repo.user_dir("alice").mkdir(parents=True, exist_ok=True)
 
     out = rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        name="설계.md", content_text="x", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
 
-    assert out["path"] == "attach_file/설계.pdf"
+    assert out["path"] == "attach_file/설계.md"
     assert not rs._sync_marker_path("alice").exists()
 
 
 def test_delete_also_resyncs_before_writing_the_log(fake_github, monkeypatch):
     rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"12345"), summary="s",
+        name="설계.md", content_text="12345", summary="s",
         reason="r", body="b", ctx=_ctx("alice"),
     )
     real_ensure = rs.user_repo.ensure_ready
@@ -1914,7 +1895,7 @@ def test_delete_also_resyncs_before_writing_the_log(fake_github, monkeypatch):
 
     monkeypatch.setattr(rs.user_repo, "ensure_ready", _watching_ensure)
 
-    rs.namu_delete_file(name="설계.pdf", reason="끝났다", ctx=_ctx("alice"))
+    rs.namu_delete_file(name="설계.md", reason="끝났다", ctx=_ctx("alice"))
 
     found = rs.namu_search(bowl="attachments", ctx=_ctx("alice"))
     assert [e["status"] for e in found["results"]] == ["지움", "올림"]
@@ -1929,7 +1910,7 @@ def test_upload_does_not_require_body(fake_github, tmp_path):
     것으로 보였다. 첨부에서는 파일 자체가 원문이라 애초에 요구할 이유도 없다.
     """
     out = rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="설계요약마커",
+        name="설계.md", content_text="x", summary="설계요약마커",
         reason="파일째 남긴다", ctx=_ctx("alice"),
     )
 
@@ -1943,7 +1924,7 @@ def test_upload_still_requires_summary_and_reason(fake_github):
     단서가 이 두 줄뿐이다."""
     for missing in ("summary", "reason"):
         kwargs = {
-            "name": "설계.pdf", "content_base64": _b64(b"x"),
+            "name": "설계.md", "content_text": "x",
             "summary": "s", "reason": "r", "ctx": _ctx("alice"),
         }
         kwargs[missing] = "   "
@@ -1955,7 +1936,7 @@ def test_upload_reports_how_long_each_step_took(fake_github):
     """서버 안에서 무엇이 오래 걸렸는지 밖에서 볼 방법이 없어 추측만 오갔다
     (2026-08-07) — 붙은 AI가 화면에 보여줄 수 있게 반환값에 싣는다."""
     out = rs.namu_upload_file(
-        name="설계.pdf", content_base64=_b64(b"x"), summary="s",
+        name="설계.md", content_text="x", summary="s",
         reason="r", ctx=_ctx("alice"),
     )
 

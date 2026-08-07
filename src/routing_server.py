@@ -37,7 +37,6 @@ _paths_for_user()와 같은 폴더를 가리킨다 — 계약은 tests/test_user
 읽기 전에 TTL 기반으로 최신화하고, 쓰기 후에 항상 push를 시도한다.
 """
 import base64
-import binascii
 import hmac
 import json
 import logging
@@ -1354,18 +1353,34 @@ def store_file(
     return out
 
 
+# ---------------------------------------------------------------------------
+# 왜 이 도구에 base64 칸이 없나 (2026-08-07, 사용자 지시)
+#
+# 처음에는 `content_base64`를 남겨 뒀다 — 필수에서 선택으로만 낮추고, 설명에
+# "글자 파일은 원문을 넣고 base64로 바꾸지 마세요"라고 굵게 적었다. 그런데 웹에서
+# `.md` 파일 하나를 올리자 붙은 AI가 **그래도 base64로 바꾸기 시작했고** 회원은
+# 몇 분을 기다리다 응답을 멈췄다.
+#
+# 같은 결함을 이 도구에서 이미 한 번 겪었다(`body`를 필수로 뒀다가 재시도 폭주).
+# 그때 얻은 것이 **"설명이 아니라 칸의 모양이 결정한다"**였는데, 첫 수정은 그것을
+# 거꾸로 적용해 설명만 세게 썼다. 칸이 있으면 쓰인다.
+#
+# 그래서 칸을 없앤다. 글자 파일은 `content_text`, 나머지는 전부 티켓이다. 작은
+# 바이너리를 AI가 직접 밀어 넣던 길이 사라지지만, 그 길은 애초에 쓸 수 없었다 —
+# 50KB짜리도 base64로는 6만 8천 자라 몇 분이 걸린다.
+# ---------------------------------------------------------------------------
 _UPLOAD_DESCRIPTION = (
-    "Upload one file to this user's own GitHub repository (under attach_file/) "
-    "and log it in the attachments bowl. The file goes straight to GitHub — it "
-    "is never kept on this server.\n"
-    "**Text files: put the text itself in `content_text`. Do NOT base64-encode "
-    "it.** Writing base64 is slow because you have to emit every character.\n"
-    "**Binary files (PPT/PDF/images/video/zip) and anything over 100KB: do not "
-    "use this tool at all — use `namu_create_upload_ticket` instead.** Sending a "
-    "big file through this tool is very slow and may look frozen to the user.\n"
-    "- `content_text` (text) and `content_base64` (small binary, legacy) are "
-    "both optional, but exactly one of them must be given.\n"
-    "- `name`: the file name, e.g. '2026-3분기-보고서.pdf'. Sub-folders are not "
+    "Upload one **text** file to this user's own GitHub repository (under "
+    "attach_file/) and log it in the attachments bowl. The file goes straight "
+    "to GitHub — it is never kept on this server.\n"
+    "Put the text itself in `content_text`, exactly as it is. There is no "
+    "base64 field on this tool and you must not create one: encoding a file "
+    "into text is what used to make this take minutes.\n"
+    "**Anything that is not plain text — PPT/PDF/images/video/zip — and any "
+    "text over 100KB goes through `namu_create_upload_ticket` instead.** That "
+    "gives a link the file is sent to directly, so its contents never pass "
+    "through your output and size stops mattering.\n"
+    "- `name`: the file name, e.g. '2026-3분기-보고서.md'. Sub-folders are not "
     "used; the file always lands at attach_file/<name>.\n"
     "- Uploading the same name again replaces the file on GitHub and is logged "
     "as a new revision ('새 판'); the earlier log entry stays.\n"
@@ -1377,54 +1392,31 @@ _UPLOAD_DESCRIPTION = (
 )
 
 
-def _content_from_args(
-    content_text: "str | None", content_base64: "str | None"
-) -> bytes:
-    """`content_text`와 `content_base64` 중 주어진 하나를 바이트로 바꾼다.
-
-    둘 다 없거나 둘 다 있으면 거절한다 — "둘 다 주면 하나를 골라 쓴다"로 두면
-    서로 다른 두 내용이 왔을 때 서버가 조용히 한쪽을 버리게 되고, 회원은 자기가
-    보낸 것과 다른 파일이 저장된 사실을 알 방법이 없다.
-    """
-    has_text = content_text is not None and content_text != ""
-    has_b64 = content_base64 is not None and content_base64 != ""
-    if has_text and has_b64:
+def _text_to_bytes(content_text: str) -> bytes:
+    """글자 원문을 저장할 바이트로 바꾼다. 상한을 넘으면 티켓으로 안내한다."""
+    if not (content_text or "").strip():
         raise ValueError(
-            "content_text와 content_base64 중 하나만 주세요 — 둘 다 오면 어느 쪽이 "
-            "진짜 내용인지 서버가 알 수 없습니다. Give exactly one of them."
+            "content_text가 비어 있습니다 — 글자 파일의 원문을 그대로 넣어 주세요. "
+            "글자가 아니거나 100KB를 넘으면 namu_create_upload_ticket을 쓰세요. "
+            "Provide the text itself, or use the upload ticket."
         )
-    if not has_text and not has_b64:
+    content = content_text.encode("utf-8")
+    if len(content) > attach_files.MAX_INLINE_TEXT_BYTES:
         raise ValueError(
-            "파일 내용이 없습니다 — 글자 파일이면 content_text에 원문을 그대로 "
-            "넣고, 바이너리이거나 100KB를 넘으면 namu_create_upload_ticket을 "
-            "쓰세요. Provide content_text, or use the upload ticket."
+            f"content_text가 너무 큽니다 ({len(content):,}바이트) — 이 칸의 "
+            f"상한은 {attach_files.MAX_INLINE_TEXT_BYTES:,}바이트입니다. "
+            "이보다 큰 파일은 namu_create_upload_ticket으로 올리세요. "
+            "content_text is too large; use namu_create_upload_ticket."
         )
-    if has_text:
-        content = content_text.encode("utf-8")
-        if len(content) > attach_files.MAX_INLINE_TEXT_BYTES:
-            raise ValueError(
-                f"content_text가 너무 큽니다 ({len(content):,}바이트) — 이 칸의 "
-                f"상한은 {attach_files.MAX_INLINE_TEXT_BYTES:,}바이트입니다. "
-                "이보다 큰 파일은 namu_create_upload_ticket으로 올리세요. "
-                "content_text is too large; use namu_create_upload_ticket."
-            )
-        return content
-    try:
-        return base64.b64decode(content_base64, validate=True)
-    except (ValueError, binascii.Error) as exc:
-        raise ValueError(
-            f"content_base64를 읽지 못했습니다: {exc} — 파일 내용을 base64로 "
-            "실어 보내세요."
-        ) from None
+    return content
 
 
 @mcp.tool(description=_UPLOAD_DESCRIPTION)
 def namu_upload_file(
     name: str,
+    content_text: str,
     summary: str,
     reason: str,
-    content_text: str | None = None,
-    content_base64: str | None = None,
     body: str | None = None,
     topic: str | None = None,
     project: str | None = None,
@@ -1433,7 +1425,7 @@ def namu_upload_file(
 ) -> dict:
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)
-    content = _content_from_args(content_text, content_base64)
+    content = _text_to_bytes(content_text)
 
     meta = {
         "summary": summary, "reason": reason, "body": body,
