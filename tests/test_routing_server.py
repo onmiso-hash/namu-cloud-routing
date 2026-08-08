@@ -914,6 +914,21 @@ def test_dispatcher_routes_auth_prefix_to_auth_app():
     assert r.text == "auth"
 
 
+def test_dispatcher_sends_the_ai_guide_to_the_web_app():
+    """AI 안내원(namu-ai-guide 5단계)의 주소가 MCP 쪽으로 새지 않는가.
+
+    `/auth/ask`라는 이름을 고른 이유가 바로 이 검사에 있다 — 여기서 `/auth/`는
+    *로그인이 필요하다*가 아니라 *웹 화면 쪽으로 보낸다*는 뜻이라, 이 이름을
+    쓰면 디스패처와 공개 경로 목록을 한 글자도 안 고친다(설계서 3절). 그 전제가
+    깨지면 말풍선이 인증을 요구하는 MCP 쪽으로 넘어가 조용히 죽는다.
+    """
+    dispatcher = rs._AuthOrMcpDispatcher(
+        _make_labelled_app("auth"), _make_labelled_app("mcp"), _make_labelled_app("ticket")
+    )
+
+    assert TestClient(dispatcher).post("/auth/ask").text == "auth"
+
+
 def test_dispatcher_routes_everything_else_to_mcp_app():
     auth_app = _make_labelled_app("auth")
     mcp_app = _make_labelled_app("mcp")

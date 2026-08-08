@@ -63,6 +63,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
+import ask
 import github_app as ga
 import identity
 import pages
@@ -2489,6 +2490,146 @@ async def mcp_revoke(request: Request) -> Response:
         return _me_page_response(request, conn, user_key, _NOTICE_REVOKED)
 
 
+# ---------------------------------------------------------------------------
+# AI 안내원 — `/auth/ask` (POST 전용)
+#
+# 설계서: `docs/namu_ai_guide_design.md` 3·7·12절(5단계).
+#
+# **로그인이 필요 없는 유일한 POST다.** 이 파일의 다른 POST는 전부 세션을
+# 요구하지만, 안내원은 처음 온 사람이 쓰는 창구라 로그인 앞에 둘 수 없다
+# (사용자 결정, 설계서 2절).
+#
+# **주소를 `/auth/` 아래 둔 이유** — `routing_server._AuthOrMcpDispatcher`는
+# "`/auth/`로 시작하면 웹, 아니면 MCP"로 가른다. 여기서 `/auth/`는 *로그인이
+# 필요하다*가 아니라 *웹 화면 쪽으로 보낸다*는 뜻이다(`/auth/github/login`도
+# 로그인 안 한 사람이 들어오는 문이다). 그래서 이 이름을 쓰면 보안 경계를
+# 정하는 코드를 한 글자도 안 고친다(설계서 3절).
+# ---------------------------------------------------------------------------
+_ASK_COOKIE_NAME = "namu_ask_id"
+_ASK_COOKIE_TTL_SEC = 30 * 24 * 3600
+_ASK_MAX_BODY_BYTES = 20 * 1024
+"""받아 줄 본문의 최대 크기.
+
+질문 글자 수(500자)는 `ask.py`가 보지만, 그 검사에 닿기 전에 본문을 통째로
+읽어야 한다. 상한이 없으면 누가 100MB를 보내는 것만으로 서버 메모리를 먹는다 —
+질문 500자 + 직전 대화 3턴에 20KB면 넉넉하다.
+"""
+
+
+def _ask_visitor_id(request: Request) -> "tuple[str, bool]":
+    """이 브라우저를 가리키는 값과, 쿠키를 새로 심어야 하는지.
+
+    로그인 세션 쿠키를 쓰지 않는다 — 로그인한 사람만 셀 수 있게 되고, 무엇보다
+    안내원의 세기와 로그인 신원을 묶을 이유가 없다(묶으면 "누가 무엇을 물었나"가
+    만들어진다). 서명은 로그인 쿠키와 같은 `_sign_with_expiry`를 그대로 쓴다.
+    """
+    existing = _unsign_with_expiry(request.cookies.get(_ASK_COOKIE_NAME))
+    if existing:
+        return existing, False
+    return secrets.token_urlsafe(12), True
+
+
+def _ask_client_ip(request: Request) -> str:
+    """방문자의 접속 주소. 없으면 빈 값(그러면 쿠키로만 센다).
+
+    이 서버는 터널 뒤에 있어(`onnamu-project/namu-cloud/docker-compose.yml`의
+    `NAMU_HTTP_ALLOWED_HOSTS` 주석) 연결이 직접 오지 않는다. 그래서
+    `request.client.host`는 방문자가 아니라 **터널의 주소**이고, 그대로 세면
+    방문자 전원이 한 사람으로 뭉쳐 사람별 한도가 사이트 전체 한도처럼 굳는다.
+
+    그래서 `X-Forwarded-For`의 **맨 앞** 값(원 방문자)을 쓴다. 이 값은 방문자가
+    지어낼 수 있다 — 지어내면 주소로 세는 것을 피할 수 있지만, 쿠키로 세는 겹과
+    사이트 전체 한도는 그대로 남는다. 주소를 바꿔 가며 부르는 것을 못 막는다는
+    것은 설계서 7-3절이 이미 적어 둔 한계이고, 이것은 그 한계와 같은 자리다.
+    """
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    client = request.client
+    return client.host if client else ""
+
+
+def _ask_history(raw: object) -> "list[tuple[str, str]]":
+    """브라우저가 보낸 직전 대화를 (질문, 답) 목록으로.
+
+    **대화는 서버에 저장하지 않는다**(설계서 14절). 브라우저가 들고 있다가 매
+    질문에 함께 보내고 창을 닫으면 사라진다. 그러니 여기 오는 값은 전부 방문자가
+    고쳐 보낼 수 있는 글이라고 보고 다룬다 — 길이는 `ask.build_prompt`가 자르고,
+    모양이 아니면 조용히 버린다(오류로 만들면 화면이 대화 하나 때문에 멈춘다).
+    """
+    out: "list[tuple[str, str]]" = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw[-ask.HISTORY_TURNS :]:
+        if isinstance(item, dict):
+            q, a = item.get("q"), item.get("a")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            q, a = item
+        else:
+            continue
+        if isinstance(q, str) and isinstance(a, str) and q.strip() and a.strip():
+            out.append((q, a))
+    return out
+
+
+async def ask_endpoint(request: Request) -> Response:
+    """방문자의 질문 하나를 받아 안내원의 답을 JSON으로 돌려준다.
+
+    **어떤 경우에도 500을 내지 않는다.** 안내원이 못 답하는 것과 홈페이지가
+    고장 난 것은 다른 일이고, 말풍선 하나 때문에 방문자가 오류 화면을 보면 안
+    된다(설계서 10-2절). 그래서 사연이 무엇이든 200에 사유를 담아 보낸다 —
+    본문이 깨졌을 때만 400이다.
+
+    답을 만드는 일(`ask.guide().answer`)은 네트워크를 기다리므로 스레드풀로
+    보낸다. 여기서 그냥 부르면 그 1~2초 동안 서버 전체가 다른 요청을 못 받는다.
+    """
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > _ASK_MAX_BODY_BYTES:
+        return JSONResponse({"ok": False, "reason": "too_long", "text": ask._MSG_TOO_LONG})
+
+    try:
+        body = json.loads((await request.body())[:_ASK_MAX_BODY_BYTES] or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse({"ok": False, "reason": "bad_request", "text": ""}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "reason": "bad_request", "text": ""}, status_code=400)
+
+    question = body.get("question")
+    question = question if isinstance(question, str) else ""
+    visitor_id, is_new = _ask_visitor_id(request)
+
+    answer = await run_in_threadpool(
+        ask.guide().answer,
+        question,
+        cookie_id=visitor_id,
+        client_ip=_ask_client_ip(request),
+        history=_ask_history(body.get("history")),
+    )
+
+    resp = JSONResponse(
+        {
+            "ok": answer.ok,
+            "text": answer.text,
+            "reason": answer.reason,
+            "remaining": answer.remaining,
+            "sources": [{"label": s.label, "url": s.url} for s in answer.sources],
+        }
+    )
+    if is_new:
+        # 쿠키는 안내원의 세기에만 쓰인다. 로그인 쿠키와 이름·경로가 겹치지
+        # 않아야 한쪽을 지울 때 다른 쪽이 함께 사라지지 않는다.
+        resp.set_cookie(
+            _ASK_COOKIE_NAME,
+            _sign_with_expiry(visitor_id, _ASK_COOKIE_TTL_SEC),
+            max_age=_ASK_COOKIE_TTL_SEC,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+        )
+    return resp
+
+
 async def logout(request: Request) -> Response:
     """세션 쿠키를 지운다. path가 set_cookie와 어긋나면 지워지지 않으므로
     login/callback과 반드시 같은 `path="/auth"`를 쓴다."""
@@ -2532,6 +2673,10 @@ def build_auth_app() -> Starlette:
             Route("/auth/mcp/test", mcp_test, methods=["POST"]),
             Route("/auth/mcp/rotate", mcp_rotate, methods=["POST"]),
             Route("/auth/mcp/revoke", mcp_revoke, methods=["POST"]),
+            # AI 안내원 — 이 앱에서 **로그인 없이 받는 유일한 POST**다.
+            # GET으로 두지 않는 이유는 파괴적이어서가 아니라, 링크 프리페치나
+            # 미리보기 크롤러가 눌러 하루 요청 수를 대신 써 버리기 때문이다.
+            Route("/auth/ask", ask_endpoint, methods=["POST"]),
             Route("/auth/logout", logout, methods=["GET"]),
         ]
     )
