@@ -38,7 +38,7 @@ class FakeProvider:
 @pytest.fixture(autouse=True)
 def _keys(monkeypatch):
     """모든 검사는 열쇠가 있는 상태에서 시작한다(없는 경우는 따로 검사한다)."""
-    monkeypatch.setenv("GEMINI_API_KEY", "테스트열쇠")
+    monkeypatch.setenv("NAMU_ASK_API_KEY", "테스트열쇠")
     monkeypatch.setenv("NAMU_ASK_PROVIDER", "gemini")
     monkeypatch.setenv("NAMU_ASK_MODEL", "테스트모델")
 
@@ -67,7 +67,7 @@ def make_guide(tmp_path, corpus, monkeypatch):
 # 열쇠가 없을 때 — 배포 순서가 어긋나도 사고가 나지 않아야 한다
 # ---------------------------------------------------------------------------
 def test_disabled_without_a_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NAMU_ASK_API_KEY", raising=False)
 
     assert ask.is_enabled() is False
 
@@ -81,7 +81,7 @@ def test_enabled_only_for_a_provider_we_actually_have(monkeypatch):
 
 def test_no_key_means_no_call(make_guide, monkeypatch):
     guide, fake = make_guide()
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NAMU_ASK_API_KEY", raising=False)
 
     result = guide.answer("무료인가요")
 

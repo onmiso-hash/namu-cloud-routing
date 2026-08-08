@@ -21,7 +21,7 @@ from starlette.testclient import TestClient
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """열쇠가 있고 AI는 가짜인 서버 한 대."""
-    monkeypatch.setenv("GEMINI_API_KEY", "테스트열쇠")
+    monkeypatch.setenv("NAMU_ASK_API_KEY", "테스트열쇠")
     monkeypatch.setenv("NAMU_ASK_PROVIDER", "gemini")
     monkeypatch.setenv("NAMU_SESSION_SECRET", "테스트서명키")
     monkeypatch.setenv("NAMU_ASK_DATA_DIR", str(tmp_path))
@@ -195,7 +195,7 @@ def test_ai_failure_is_still_a_200(client, monkeypatch):
 
 
 def test_no_key_is_still_a_200(client, monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NAMU_ASK_API_KEY", raising=False)
 
     resp = ask_post(client)
 

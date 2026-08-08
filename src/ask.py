@@ -89,8 +89,14 @@ def model_name() -> str:
 
 
 def api_key() -> str:
-    """AI 회사에 낼 열쇠. 이미지에 굽지 않고 배포 환경변수로만 들어온다."""
-    return os.environ.get("GEMINI_API_KEY", "").strip()
+    """AI 회사에 낼 열쇠. 이미지에 굽지 않고 배포 환경변수로만 들어온다.
+
+    **이름에 회사가 들어가지 않는다.** 회사와 모델을 갈아 끼울 수 있게 빼 놓고
+    (`NAMU_ASK_PROVIDER`·`NAMU_ASK_MODEL`) 열쇠 칸에만 회사 이름을 박아 두면,
+    회사를 바꾸는 날 배포 설정에서 이름 하나를 더 바꿔야 하고 옛 이름이 남아
+    있어도 아무 신호가 안 뜬다. 세 줄이 같은 결이어야 한 벌로 읽힌다.
+    """
+    return os.environ.get("NAMU_ASK_API_KEY", "").strip()
 
 
 def is_enabled() -> bool:
@@ -516,7 +522,7 @@ def guide() -> Guide:
 # ---------------------------------------------------------------------------
 # 터미널에서 한 바퀴 — 설계서 12절 4단계의 "사용자가 볼 수 있는 것"
 #
-#     GEMINI_API_KEY=... NAMU_ASK_DATA_DIR=/tmp/ask python src/ask.py "무료인가요"
+#     NAMU_ASK_API_KEY=... NAMU_ASK_DATA_DIR=/tmp/ask python src/ask.py "무료인가요"
 # ---------------------------------------------------------------------------
 def _main(argv: "list[str]") -> int:
     question = " ".join(argv).strip()

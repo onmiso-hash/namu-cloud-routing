@@ -147,14 +147,14 @@ def test_stepper_escapes_the_label():
 @pytest.fixture()
 def ai_key_on(monkeypatch):
     """열쇠가 들어와 있는 상태(배포에서 환경변수 세 줄이 채워진 자리)."""
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("NAMU_ASK_API_KEY", "test-key")
     monkeypatch.setenv("NAMU_ASK_PROVIDER", "gemini")
 
 
 def test_ask_button_is_not_drawn_without_a_key(monkeypatch):
     """열쇠가 없으면 눌러도 답이 안 오는 단추가 된다 — 그러느니 없는 편이 낫고,
     배포 순서가 어긋나도(코드가 먼저 나가도) 홈페이지가 지금과 똑같다."""
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("NAMU_ASK_API_KEY", raising=False)
 
     assert ui.ask_widget() == ""
     assert "namu-ask" not in ui.page("제목", "<p>본문</p>")
