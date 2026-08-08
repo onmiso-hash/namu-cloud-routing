@@ -221,6 +221,25 @@ def test_ask_bubble_disappears_when_scripts_are_off(ai_key_on):
 def test_ask_bubble_borrows_the_site_colours_instead_of_painting_its_own(ai_key_on):
     """색을 새로 박으면 어두운 화면에서 그 자리만 하얗게 남는다."""
     assert ".ask-panel{" in ui.SITE_CSS
-    ask_css = ui.SITE_CSS[ui.SITE_CSS.index(".ask-sr{") :]
+    ask_css = ui.SITE_CSS[ui.SITE_CSS.index(".ask{position:fixed") :]
 
     assert "#" not in ask_css, "말풍선이 색을 직접 박았다 — var(--…)만 쓴다"
+
+
+def test_ask_button_says_what_it_is_instead_of_leaving_a_lone_icon(ai_key_on):
+    """**그림 하나만 두면 "이게 무슨 아이콘이지?"에서 멈춘다.**
+
+    2026-08-08 사용자 실측 — 앞 판은 그림글자 💬 하나였는데, 그림글자는 기기의
+    글꼴이 그리므로 휴대폰에서는 말풍선 안에 점 세 개가 보이고 웹에서는 안
+    보였다. 같은 글자인데 한쪽에서만 "대화창"으로 읽힌 것이다.
+
+    그래서 둘을 지킨다 — 그림은 우리가 직접 그리고(기기마다 달라지지 않는다),
+    넓은 화면에는 글자도 함께 낸다.
+    """
+    out = ui.ask_widget()
+
+    assert "💬" not in out, "그림글자에 맡기면 기기마다 다르게 그려진다"
+    assert "<svg" in out and "circle" in out, "말풍선 그림을 직접 그려야 한다"
+    assert ">물어보기<" in out, "넓은 화면에서 읽을 글자가 단추에 없다"
+    # 좁은 화면에서는 글자를 접으므로, 그때도 이름이 읽히도록 남겨 둔다.
+    assert 'aria-label="나무에게 물어보기"' in out

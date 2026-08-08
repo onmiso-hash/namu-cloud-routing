@@ -322,16 +322,21 @@ _PUBLIC_CSS = (
 # 쓰고(그래서 어두운 화면을 따로 손보지 않는다), 좁은 화면에서는 폭을 채운다.
 # ---------------------------------------------------------------------------
 _ASK_CSS = (
-    # 눈으로는 안 보이고 화면 낭독기에는 읽히는 글자(동그란 단추의 이름).
-    ".ask-sr{position:absolute;width:1px;height:1px;overflow:hidden;"
-    "clip:rect(0 0 0 0);white-space:nowrap;}"
     ".ask{position:fixed;right:18px;bottom:18px;z-index:60;display:flex;"
     "flex-direction:column;align-items:flex-end;gap:10px;}"
-    ".ask-fab{width:54px;height:54px;border-radius:50%;cursor:pointer;"
+    # 넓은 화면에서는 글자를 단 알약 모양이다. 그림 하나만 두면 "이게 무슨
+    # 아이콘이지?"에서 멈춘다(2026-08-08 사용자 실측 — 웹에서 실제로 그랬다).
+    ".ask-fab{display:inline-flex;align-items:center;gap:9px;height:52px;"
+    "padding:0 20px 0 17px;border-radius:26px;cursor:pointer;"
     "border:1px solid var(--accent);background:var(--accent);"
-    "color:var(--on-accent);font-size:1.35rem;box-shadow:var(--shadow-lg);"
-    "display:flex;align-items:center;justify-content:center;}"
-    ".ask-fab:hover{background:var(--accent-deep);}"
+    "color:var(--on-accent);font-size:.95rem;font-weight:700;"
+    "font-family:inherit;box-shadow:var(--shadow-lg);}"
+    ".ask-fab:hover{background:var(--accent-deep);border-color:var(--accent-deep);}"
+    ".ask-fab .ask-ico{width:23px;height:23px;flex:none;}"
+    # 좁은 화면에서는 글자를 접고 동그란 단추만 남긴다 — 자리가 없다.
+    "@media (max-width:520px){.ask-fab{width:56px;height:56px;padding:0;"
+    "border-radius:50%;justify-content:center;}"
+    ".ask-fab .ask-label{display:none;}}"
     ".ask.on .ask-fab{display:none;}"
     ".ask-panel{display:flex;flex-direction:column;width:360px;"
     "max-width:calc(100vw - 36px);height:min(560px,calc(100vh - 110px));"
@@ -518,6 +523,24 @@ ASK_NOTICE_STRONG = "개인정보나 접속 열쇠는 적지 마세요."
 # 그냥 닫는다(설계서 8-1절).
 _ASK_TIPS = ("나무가 뭔가요?", "무료인가요?", "어떻게 시작하나요?")
 
+# 단추의 말풍선 그림 — **그림글자(💬)를 쓰지 않고 직접 그린다.**
+#
+# 앞 판은 💬 하나였는데, 그림글자는 기기의 글꼴이 그리므로 모양이 갈린다.
+# 2026-08-08 사용자 실측: 휴대폰에서는 말풍선 안에 점 세 개가 있어 "대화창"으로
+# 바로 읽혔지만, 웹에서는 점이 없고 크기도 작아 "이게 무슨 아이콘이지?"에서
+# 멈췄다. 직접 그리면 어디서나 같고 크기·색도 우리가 정한다(색은 글자색을
+# 따라가므로 어두운 화면에서 따로 손볼 것이 없다).
+_ASK_ICON = (
+    '<svg class="ask-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
+    '<path d="M7 4h10a4 4 0 0 1 4 4v5a4 4 0 0 1-4 4h-7l-4.8 3.8L7 17'
+    'a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4Z" fill="none" stroke="currentColor"'
+    ' stroke-width="1.7" stroke-linejoin="round"/>'
+    '<circle cx="8.5" cy="10.5" r="1.25" fill="currentColor"/>'
+    '<circle cx="12" cy="10.5" r="1.25" fill="currentColor"/>'
+    '<circle cx="15.5" cy="10.5" r="1.25" fill="currentColor"/>'
+    "</svg>"
+)
+
 _ASK_SCRIPT = (
     "<script>"
     "(function(){"
@@ -618,9 +641,9 @@ def ask_widget() -> str:
         "<noscript><style>#namu-ask{display:none;}</style></noscript>"
         '<div class="ask" id="namu-ask">'
         '<button type="button" class="ask-fab" aria-expanded="false"'
-        ' aria-controls="namu-ask-panel">'
-        '<span aria-hidden="true">💬</span>'
-        '<span class="ask-sr">나무에게 물어보기</span></button>'
+        ' aria-controls="namu-ask-panel" aria-label="나무에게 물어보기">'
+        + _ASK_ICON
+        + '<span class="ask-label">물어보기</span></button>'
         '<section class="ask-panel" id="namu-ask-panel" hidden'
         ' aria-label="나무에게 물어보기">'
         '<div class="ask-head"><b>🌳 나무에게 물어보기</b>'
