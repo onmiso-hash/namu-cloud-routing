@@ -41,6 +41,15 @@ RUN sed -i 's/\r$//' /app/deploy/entrypoint.sh && chmod +x /app/deploy/entrypoin
 # 복사한다(수정 금지 대상이므로 원본 그대로).
 COPY vendor/namu-agent/namu-plugin/ ./vendor/namu-agent/namu-plugin/
 
+# AI 안내원이 읽는 안내 문서(설계서 `docs/namu_ai_guide_design.md` 4·9절).
+# `src/ask_corpus.py`의 `_SOURCES`가 저장소 루트 기준 상대 경로로 이 일곱 개를
+# 읽는다. **없어도 서버는 멀쩡히 뜬다** — 대신 말뭉치가 0조각이 되어 안내원이
+# 모든 질문에 "모른다"고 답한다. 조용히 나빠지는 종류라 여기 명시한다.
+# 문서가 이미지 안에 고정되므로 서버가 뜰 때 한 번 읽고 도중에 다시 안 본다.
+COPY docs/namu_cloud_guide.md ./docs/namu_cloud_guide.md
+COPY vendor/namu-agent/README.ko.md ./vendor/namu-agent/README.ko.md
+COPY vendor/namu-agent/docs/*.html ./vendor/namu-agent/docs/
+
 # 런타임 의존성만 system python에 설치한다(pyproject.toml의 dependencies와 같은 집합 —
 # 한쪽만 고치면 개발 환경은 통과하고 배포만 조용히 깨진다). pyproject.toml에 [build-system]이 없어
 # `uv pip install .`는 실패할 수 있으므로 프로젝트 패키지 자체는 설치하지 않는다).

@@ -206,3 +206,35 @@ def test_empty_and_stopword_only_queries_return_nothing(corpus):
     assert corpus.search("") == []
     assert corpus.search("   ") == []
     assert corpus.search("그 이 저 것") == []
+
+
+def test_every_document_the_guide_reads_is_carried_into_the_deploy_image():
+    """**서버가 뜨는 것과 안내원이 답하는 것은 다른 일이다.**
+
+    안내 문서가 배포 이미지에 안 담겨도 서버는 멀쩡히 뜬다. 대신 말뭉치가
+    0조각이 되어 안내원이 모든 질문에 "모른다"고 답한다 — 화면은 정상이고
+    오류도 안 나므로 아무도 눈치채지 못한다. 실제로 6단계까지 만드는 동안
+    `deploy/Dockerfile`에 이 줄들이 빠져 있었고, 배포 직전에야 발견했다.
+
+    그래서 "`_SOURCES`에 문서를 하나 더하면 Dockerfile도 함께 고쳐야 한다"를
+    사람의 기억이 아니라 이 검사가 지킨다.
+    """
+    import fnmatch
+    from pathlib import Path
+
+    dockerfile = (
+        Path(ask_corpus.__file__).resolve().parent.parent / "deploy" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    copied = []
+    for line in dockerfile.splitlines():
+        if not line.startswith("COPY ") or "--from=" in line:
+            continue
+        # `COPY <출처...> <목적지>` — 마지막 칸은 목적지라 뺀다.
+        copied.extend(line.split()[1:-1])
+
+    for src in ask_corpus._SOURCES:
+        assert any(
+            fnmatch.fnmatch(src.path, pat) or src.path.startswith(pat.rstrip("/") + "/")
+            for pat in copied
+        ), f"배포 이미지에 안 담기는 안내 문서: {src.path} (deploy/Dockerfile에 COPY를 더할 것)"
