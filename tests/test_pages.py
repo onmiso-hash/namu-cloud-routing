@@ -140,6 +140,24 @@ def test_safety_page_states_the_three_verdicts_of_the_connection_test():
         assert verdict in out
 
 
+def test_safety_page_tells_where_the_ai_guide_sends_what_you_type():
+    """말풍선의 고지 한 줄이 '자세히'로 데려오는 곳이다(설계서 10-1절).
+
+    말풍선을 켜 둔 채 이 문단이 빠지면, 한 줄에 다 못 담은 것을 읽을 곳이
+    사라진다 — 그러면 우리는 알린 척만 한 것이 된다. 문장을 다시 써도 좋지만
+    **어디로 가는지 · 누가 볼 수 있는지 · 무엇을 적지 말아야 하는지** 셋은
+    남아 있어야 한다.
+    """
+    out = pages.safety_page(False)
+
+    assert "Google" in out
+    assert "무료 등급" in out
+    assert "사람이 직접 읽고" in out
+    assert "열쇠를 적지 마세요" in out
+    # 회원 기억은 안내원이 볼 길 자체가 없다는 것도 같은 자리에서 말한다.
+    assert "볼 길 자체가 없습니다" in out
+
+
 def test_faq_does_not_promise_prices_or_dates():
     """확인하지 않은 것을 적으면 그 순간 서비스의 약속이 된다."""
     out = pages.faq_page(False)

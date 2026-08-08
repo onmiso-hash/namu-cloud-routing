@@ -7,6 +7,8 @@
 """
 import re
 
+import pytest
+
 import ui
 
 
@@ -134,3 +136,91 @@ def test_stepper_is_also_readable_without_seeing_it():
 
 def test_stepper_escapes_the_label():
     assert "<b>" not in ui.stepper(1, label="<b>기억</b>")
+
+
+# ---------------------------------------------------------------------------
+# AI 안내원 말풍선 (namu-ai-guide 6단계)
+#
+# 여기서 지키는 것은 모양이 아니라 약속이다 — 열쇠가 없으면 아예 안 나타난다는
+# 것과, 나타났다면 고지가 반드시 함께 있다는 것.
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def ai_key_on(monkeypatch):
+    """열쇠가 들어와 있는 상태(배포에서 환경변수 세 줄이 채워진 자리)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("NAMU_ASK_PROVIDER", "gemini")
+
+
+def test_ask_button_is_not_drawn_without_a_key(monkeypatch):
+    """열쇠가 없으면 눌러도 답이 안 오는 단추가 된다 — 그러느니 없는 편이 낫고,
+    배포 순서가 어긋나도(코드가 먼저 나가도) 홈페이지가 지금과 똑같다."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    assert ui.ask_widget() == ""
+    assert "namu-ask" not in ui.page("제목", "<p>본문</p>")
+
+
+def test_ask_bubble_never_appears_without_the_notice(ai_key_on):
+    """**이 설계에서 가장 지키고 싶은 한 줄이다.** 말풍선이 살아 있는데 고지가
+    빠지면, 우리는 방문자에게 알리지 않고 그 글을 AI 회사로 넘기는 셈이 된다.
+    문구를 손보는 것은 자유지만 '어디로 가는지·누가 볼 수 있는지·무엇을 적지
+    말아야 하는지' 셋은 남아 있어야 한다."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert "namu-ask" in out
+    assert ui.ASK_NOTICE in out
+    assert "Google" in ui.ASK_NOTICE and "학습" in ui.ASK_NOTICE
+    assert "열쇠" in ui.ASK_NOTICE_STRONG
+    # 더 자세한 설명으로 가는 문이 있어야 한 줄에 다 못 담은 것을 읽을 수 있다.
+    assert 'href="/safety"' in out
+
+
+def test_ask_bubble_can_be_left_off_a_screen(ai_key_on):
+    assert "namu-ask" not in ui.page("제목", "<p>본문</p>", ask=False)
+
+
+def test_ask_answer_goes_in_as_text_not_as_html(ai_key_on):
+    """답은 우리가 만든 글이 아니라 AI가 만든 글이다. 그것을 HTML로 심으면
+    답 한 줄로 화면을 갈아 끼울 수 있게 된다(설계서 10-2절)."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert "textContent" in out
+    assert "innerHTML" not in out
+    assert "document.write" not in out
+
+
+def test_ask_bubble_stops_key_like_text_before_it_leaves_the_browser(ai_key_on):
+    """서버로 넘어간 뒤에 거르면 이미 늦다 — 그때는 벌써 AI 회사로 갈 길에 올라
+    있다. 그래서 보내기 전에 화면에서 한 번 본다(설계서 10-2절 마지막 줄)."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert "KEYLIKE" in out
+    for prefix in ("gh", "github_pat_", "sk-", "AIza"):
+        assert prefix in out
+
+
+def test_ask_bubble_is_reachable_without_a_mouse_or_a_screen(ai_key_on):
+    """동그란 단추에는 글자가 없다(그림 하나뿐이다) — 이름을 붙이지 않으면
+    화면 낭독기에 아무것도 읽히지 않는다."""
+    out = ui.ask_widget()
+
+    assert "나무에게 물어보기" in out
+    assert 'aria-expanded="false"' in out
+    assert 'aria-live="polite"' in out
+    assert 'aria-label="닫기"' in out
+
+
+def test_ask_bubble_disappears_when_scripts_are_off(ai_key_on):
+    """스크립트가 없으면 눌러도 아무 일이 안 일어난다 — 그런 단추는 안 보이는
+    편이 낫다."""
+    out = ui.ask_widget()
+
+    assert "<noscript>" in out and "#namu-ask{display:none;}" in out
+
+
+def test_ask_bubble_borrows_the_site_colours_instead_of_painting_its_own(ai_key_on):
+    """색을 새로 박으면 어두운 화면에서 그 자리만 하얗게 남는다."""
+    assert ".ask-panel{" in ui.SITE_CSS
+    ask_css = ui.SITE_CSS[ui.SITE_CSS.index(".ask-sr{") :]
+
+    assert "#" not in ask_css, "말풍선이 색을 직접 박았다 — var(--…)만 쓴다"

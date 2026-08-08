@@ -315,7 +315,71 @@ _PUBLIC_CSS = (
     "transform:none;transition:none;}}"
 )
 
-SITE_CSS = _TOKENS_CSS + _BASE_CSS + _CHROME_CSS + _COMPONENT_CSS + _PUBLIC_CSS
+# ---------------------------------------------------------------------------
+# 5b. AI 안내원 말풍선 (namu-ai-guide 6단계)
+#
+# 설계서 8-2절이 정한 규칙 그대로다 — 바깥 파일을 쓰지 않고, 색은 위 변수만
+# 쓰고(그래서 어두운 화면을 따로 손보지 않는다), 좁은 화면에서는 폭을 채운다.
+# ---------------------------------------------------------------------------
+_ASK_CSS = (
+    # 눈으로는 안 보이고 화면 낭독기에는 읽히는 글자(동그란 단추의 이름).
+    ".ask-sr{position:absolute;width:1px;height:1px;overflow:hidden;"
+    "clip:rect(0 0 0 0);white-space:nowrap;}"
+    ".ask{position:fixed;right:18px;bottom:18px;z-index:60;display:flex;"
+    "flex-direction:column;align-items:flex-end;gap:10px;}"
+    ".ask-fab{width:54px;height:54px;border-radius:50%;cursor:pointer;"
+    "border:1px solid var(--accent);background:var(--accent);"
+    "color:var(--on-accent);font-size:1.35rem;box-shadow:var(--shadow-lg);"
+    "display:flex;align-items:center;justify-content:center;}"
+    ".ask-fab:hover{background:var(--accent-deep);}"
+    ".ask.on .ask-fab{display:none;}"
+    ".ask-panel{display:flex;flex-direction:column;width:360px;"
+    "max-width:calc(100vw - 36px);height:min(560px,calc(100vh - 110px));"
+    "background:var(--bg-card);border:1px solid var(--border-strong);"
+    "border-radius:var(--radius);box-shadow:var(--shadow-lg);overflow:hidden;}"
+    ".ask-panel[hidden]{display:none;}"
+    ".ask-head{display:flex;align-items:center;gap:8px;padding:10px 8px 10px 15px;"
+    "border-bottom:1px solid var(--border);background:var(--bg-elev);}"
+    ".ask-head b{flex:1;font-size:.95rem;}"
+    ".ask-x{border:0;background:none;color:var(--fg-soft);font-size:.95rem;"
+    "cursor:pointer;padding:6px 10px;border-radius:8px;}"
+    ".ask-x:hover{background:var(--bg-soft);color:var(--fg);}"
+    ".ask-log{flex:1;overflow-y:auto;padding:14px 15px;display:flex;"
+    "flex-direction:column;gap:10px;}"
+    ".ask-msg{max-width:92%;padding:10px 13px;border-radius:13px;"
+    "font-size:.93rem;line-height:1.65;}"
+    # 답에는 줄바꿈이 들어온다. HTML로 해석하지 않고 글자로만 넣으므로(설계서
+    # 10-2절) 줄바꿈을 살리는 일은 <br>이 아니라 이 한 줄이 한다.
+    ".ask-msg p{margin:0;white-space:pre-wrap;overflow-wrap:break-word;}"
+    ".ask-bot{background:var(--bg-soft);border:1px solid var(--border);"
+    "border-bottom-left-radius:4px;align-self:flex-start;}"
+    ".ask-me{background:var(--accent);color:var(--on-accent);"
+    "border-bottom-right-radius:4px;align-self:flex-end;}"
+    ".ask-warn{background:var(--bg-soft);border:1px solid var(--warn);"
+    "border-left-width:4px;align-self:flex-start;}"
+    ".ask-wait{color:var(--fg-faint);}"
+    ".ask-src{margin-top:7px;font-size:.83rem;color:var(--fg-soft);}"
+    ".ask-src a{color:var(--accent-deep);}"
+    ".ask-tips{display:flex;flex-wrap:wrap;gap:7px;}"
+    ".ask-tip{border:1px solid var(--border-strong);background:var(--bg-card);"
+    "color:var(--accent-deep);border-radius:999px;padding:6px 12px;"
+    "font-size:.86rem;font-weight:600;cursor:pointer;}"
+    ".ask-tip:hover{border-color:var(--accent);background:var(--accent-soft);}"
+    ".ask-form{display:flex;gap:8px;padding:10px 12px 0;}"
+    ".ask-form input{flex:1;min-width:0;}"
+    ".ask-form .btn{padding:9px 15px;font-size:.92rem;}"
+    # 고지 줄. 접히지 않고 늘 여기 있다(설계서 10-1절).
+    ".ask-note{margin:9px 13px 12px;font-size:.76rem;line-height:1.6;"
+    "color:var(--fg-soft);}"
+    ".ask-note a{color:var(--accent-deep);white-space:nowrap;}"
+    # 좁은 화면에서는 거의 꽉 채운다(설계서 8-2절).
+    "@media (max-width:520px){.ask{right:12px;left:12px;bottom:12px;}"
+    ".ask-panel{width:100%;max-width:100%;height:min(80vh,calc(100vh - 84px));}}"
+)
+
+SITE_CSS = (
+    _TOKENS_CSS + _BASE_CSS + _CHROME_CSS + _COMPONENT_CSS + _PUBLIC_CSS + _ASK_CSS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +497,152 @@ _FAVICON = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 6b. AI 안내원 말풍선 — 화면 오른쪽 아래 (설계서 8절)
+# ---------------------------------------------------------------------------
+ASK_NOTICE = (
+    "이 창의 질문은 Google AI로 보내집니다. 무료 등급이라 Google이 학습에 쓸 수 "
+    "있고 사람이 읽을 수도 있습니다."
+)
+"""말풍선에 늘 보이는 고지(설계서 10-1절).
+
+**이 문구를 떼는 것은 코드 수정이 아니라 약관 변경이다.** 안전 화면에
+"원본은 회원님 것"이라고 써 둔 사이트가, 여기 친 글이 남의 학습에 쓰이는 것을
+말하지 않으면 그 약속이 거짓이 된다. 안전 화면(`pages.safety_page`)에도 같은
+내용이 문단으로 있고, `tests/test_ui.py`·`tests/test_pages.py`가 둘 다 지킨다.
+"""
+
+ASK_NOTICE_STRONG = "개인정보나 접속 열쇠는 적지 마세요."
+
+# 처음 펼쳤을 때 눌러 볼 수 있는 질문. 빈 칸만 있으면 무엇을 물어야 할지 몰라
+# 그냥 닫는다(설계서 8-1절).
+_ASK_TIPS = ("나무가 뭔가요?", "무료인가요?", "어떻게 시작하나요?")
+
+_ASK_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "var root=document.getElementById('namu-ask');"
+    # fetch가 없는 옛 브라우저에서는 눌러도 답이 안 오므로 단추를 아예 치운다.
+    "if(!root||!window.fetch){if(root)root.parentNode.removeChild(root);return;}"
+    "var fab=root.querySelector('.ask-fab');"
+    "var panel=root.querySelector('.ask-panel');"
+    "var closeBtn=root.querySelector('.ask-x');"
+    "var log=root.querySelector('.ask-log');"
+    "var form=root.querySelector('.ask-form');"
+    "var input=form.querySelector('input');"
+    # 대화는 서버에 저장하지 않는다(설계서 14절). 이 배열이 전부이고, 창을
+    # 닫거나 화면을 옮기면 그대로 사라진다.
+    "var hist=[];var busy=false;"
+    # 보내기 전에 화면에서 거르는 열쇠 모양(설계서 10-2절). 서버로 넘어간
+    # 뒤에는 이미 늦다 — 그때는 이미 AI 회사로 갈 길에 올라 있다.
+    "var KEYLIKE=/(gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}"
+    "|sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})/;"
+    "function open(){panel.hidden=false;root.className='ask on';"
+    "fab.setAttribute('aria-expanded','true');input.focus();}"
+    "function shut(){panel.hidden=true;root.className='ask';"
+    "fab.setAttribute('aria-expanded','false');fab.focus();}"
+    "function bubble(cls,text,sources){"
+    "var d=document.createElement('div');d.className='ask-msg '+cls;"
+    # 답은 글자로만 넣는다 — textContent라서 태그가 와도 태그로 해석되지 않는다.
+    "var p=document.createElement('p');p.textContent=text;d.appendChild(p);"
+    "if(sources&&sources.length){"
+    "var s=document.createElement('p');s.className='ask-src';"
+    "s.appendChild(document.createTextNode('근거 '));"
+    "sources.forEach(function(x,i){"
+    # 주소는 우리 화면이거나 https만 건다. 서버가 우리 목록에서만 고르지만,
+    # 화면에서도 한 번 더 본다.
+    "var u=String(x.url||'');"
+    "if(u.charAt(0)!=='/'&&u.indexOf('https://')!==0)return;"
+    "if(i)s.appendChild(document.createTextNode(' · '));"
+    "var a=document.createElement('a');a.href=u;"
+    "a.textContent=String(x.label||u);"
+    "if(u.charAt(0)!=='/'){a.target='_blank';a.rel='noopener';}"
+    "s.appendChild(a);});"
+    "if(s.querySelector('a'))d.appendChild(s);}"
+    "log.appendChild(d);log.scrollTop=log.scrollHeight;return d;}"
+    "function send(q){"
+    "if(!q||busy)return;"
+    "if(KEYLIKE.test(q)){bubble('ask-warn','열쇠나 비밀번호처럼 보이는 글자가 "
+    "있어 보내지 않았습니다. 그 부분을 지우고 다시 물어봐 주세요.');return;}"
+    "input.value='';bubble('ask-me',q);"
+    "busy=true;var wait=bubble('ask-bot ask-wait','…');"
+    "fetch('/auth/ask',{method:'POST',credentials:'same-origin',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({question:q,history:hist})})"
+    ".then(function(r){return r.json();})"
+    ".then(function(d){"
+    "if(wait.parentNode)wait.parentNode.removeChild(wait);"
+    "bubble('ask-bot',d.text||'지금은 답할 수 없습니다.',d.sources);"
+    "if(d.ok&&d.text){hist.push({q:q,a:d.text});if(hist.length>3)hist.shift();}})"
+    ".catch(function(){"
+    "if(wait.parentNode)wait.parentNode.removeChild(wait);"
+    "bubble('ask-bot','지금은 답할 수 없습니다. 잠시 뒤 다시 물어봐 주시고, "
+    "급하시면 나무 안내서를 보세요.');})"
+    ".then(function(){busy=false;input.focus();});}"
+    "fab.addEventListener('click',open);"
+    "closeBtn.addEventListener('click',shut);"
+    "form.addEventListener('submit',function(e){e.preventDefault();"
+    "send(input.value.trim());});"
+    "root.addEventListener('keydown',function(e){"
+    "if(e.key==='Escape'&&!panel.hidden)shut();});"
+    "log.addEventListener('click',function(e){"
+    "if(e.target.classList.contains('ask-tip'))send(e.target.textContent);});"
+    "})();"
+    "</script>"
+)
+
+
+def ask_widget() -> str:
+    """오른쪽 아래 말풍선 한 벌. 열쇠가 없으면 빈 글자를 돌려준다.
+
+    **`ask` 모듈을 함수 안에서 부르는 이유** — 이 파일은 표준 모듈 하나 말고는
+    아무 것도 불러오지 않는 자리에 있다(파일 첫머리). 위에서 `import ask`를 하면
+    `ask → ask_corpus → pages → ui`로 도는 길이 생긴다. `ask_corpus`가 `pages`를
+    함수 안에서 부르는 것과 같은 방식으로 여기서도 미룬다.
+
+    **열쇠가 없으면 단추를 아예 안 그린다**(설계서 11절). 눌러도 답이 안 오는
+    단추를 보여 주느니 없는 편이 낫고, 배포 순서가 어긋나도 사고가 나지 않는다.
+    """
+    import ask
+
+    if not ask.is_enabled():
+        return ""
+
+    tips = "".join(
+        f'<button type="button" class="ask-tip">{html.escape(t)}</button>'
+        for t in _ASK_TIPS
+    )
+    return (
+        # 자바스크립트가 꺼져 있으면 단추를 그리지 않는다(설계서 8-2절) —
+        # 스크립트가 없으면 눌러도 아무 일이 일어나지 않기 때문이다.
+        "<noscript><style>#namu-ask{display:none;}</style></noscript>"
+        '<div class="ask" id="namu-ask">'
+        '<button type="button" class="ask-fab" aria-expanded="false"'
+        ' aria-controls="namu-ask-panel">'
+        '<span aria-hidden="true">💬</span>'
+        '<span class="ask-sr">나무에게 물어보기</span></button>'
+        '<section class="ask-panel" id="namu-ask-panel" hidden'
+        ' aria-label="나무에게 물어보기">'
+        '<div class="ask-head"><b>🌳 나무에게 물어보기</b>'
+        '<button type="button" class="ask-x" aria-label="닫기">✕</button></div>'
+        # role="log" + aria-live: 답이 도착하면 화면을 보지 않는 사용자에게도
+        # 읽힌다(설계서 8-2절).
+        '<div class="ask-log" role="log" aria-live="polite">'
+        '<div class="ask-msg ask-bot"><p>안녕하세요. 나무 클라우드에 대해 '
+        "궁금한 것을 물어보세요.</p></div>"
+        f'<div class="ask-tips">{tips}</div>'
+        "</div>"
+        '<form class="ask-form">'
+        '<input type="text" maxlength="500" autocomplete="off"'
+        ' aria-label="질문" placeholder="궁금한 것을 물어보세요">'
+        '<button type="submit" class="btn btn-primary">보내기</button>'
+        "</form>"
+        f'<p class="ask-note">ⓘ {ASK_NOTICE} <b>{ASK_NOTICE_STRONG}</b> '
+        '<a href="/safety">자세히</a></p>'
+        "</section></div>" + _ASK_SCRIPT
+    )
+
+
 def page(
     title: str,
     body_html: str,
@@ -442,11 +652,16 @@ def page(
     description: str = "",
     reveal: bool = False,
     raw_body: bool = False,
+    ask: bool = True,
 ) -> str:
     """모든 화면의 공통 껍데기. 외부 CSS/웹폰트/CDN 없이 인라인 <style> 하나다.
 
     `raw_body=True`는 첫인상 칸처럼 **화면 폭을 꽉 채우는** 공개 페이지용이다 —
     기본값은 읽기 좋은 폭(760px)으로 감싼다.
+
+    `ask=False`면 AI 안내원 말풍선을 그 화면에만 빼 준다. 기본값이 참인 것은
+    사용자 결정이다 — "모든 화면 구석에 말풍선"(설계서 2절). 화면 5장을 각각
+    손대지 않고 여기 한 곳에서 붙는다.
     """
     meta = (
         f'<meta name="description" content="{html.escape(description)}">'
@@ -460,7 +675,8 @@ def page(
         f"<title>{html.escape(title)}</title>{meta}{_FAVICON}"
         f"<style>{SITE_CSS}</style></head>"
         f"<body>{topbar(current, cta)}{inner}{footer()}"
-        f"{_REVEAL_SCRIPT if reveal else ''}</body></html>"
+        f"{_REVEAL_SCRIPT if reveal else ''}"
+        f"{ask_widget() if ask else ''}</body></html>"
     )
 
 
