@@ -518,12 +518,12 @@ def _html_onboarding_section(mcp_url: str) -> str:
         "<code>namu_record</code>(기억 남기기)·<code>namu_search</code>"
         "(기억 찾기) 세 가지를 쓸 수 있습니다.</p></div>"
         "<details>"
-        "<summary>직접 서버를 띄우고 싶다면</summary>"
-        "<p>나무는 회원님이 <b>직접 서버를 올려 쓰는 길</b>도 있습니다. 차이는 "
-        "하나입니다 — 서버를 회원님이 직접 올리고 관리하느냐(직접 운영), 나무가 "
+        "<summary>직접 서버를 운영하고 싶다면</summary>"
+        "<p>나무는 회원님이 <b>직접 서버를 운영하는 길</b>도 있습니다. 차이는 "
+        "하나입니다 — 서버를 회원님이 직접 올리고 관리하느냐, 나무가 "
         "대신 맡느냐(지금 이 화면).</p>"
         f'<p><a href="{_REMOTE_MCP_GUIDE_URL}" target="_blank" rel="noopener">'
-        "직접 서버 띄우기 안내서 열기</a></p>"
+        "직접 서버 운영하기 안내서 열기</a></p>"
         "</details>"
         "<details>"
         "<summary>Claude Code·agy를 쓰신다면</summary>"
@@ -1669,6 +1669,22 @@ _BOWL_LABEL = {
     "attachments": "첨부 기록",
 }
 
+
+def _eun_neun_i_ga(word: str) -> str:
+    """앞말 받침을 보고 주격 조사('이' 또는 '가')를 고른다.
+
+    "교훈이(가) 없습니다"처럼 두 형태를 나란히 적으면 그 괄호가 화면에 그대로
+    나가 기계가 쓴 문장이 된다. 그릇 이름은 다섯 개로 고정이지만 이름이 바뀌어도
+    따라오도록, 목록을 두지 않고 끝 글자에서 판정한다.
+    """
+    last = word.strip()[-1:]
+    if not last:
+        return "이"
+    code = ord(last) - 0xAC00
+    if 0 <= code <= 11171:  # 한글 음절이면 받침 유무로 가른다
+        return "이" if code % 28 else "가"
+    return "이"
+
 # 한 화면에 올리는 최대 건수. 페이지 넘기기는 이번 범위가 아니라, 넘치면 "더
 # 있습니다"라고 알리고 검색으로 좁히게 안내한다(조용히 자르지 않는다).
 _MEMORY_PAGE_LIMIT = 30
@@ -2127,7 +2143,8 @@ def _html_memory_page(
     elif query:
         body_html = (
             f"<p><b>'{html.escape(query)}'</b>에 해당하는 "
-            f"{html.escape(_BOWL_LABEL[bowl])}이(가) 없습니다.</p>"
+            f"{html.escape(_BOWL_LABEL[bowl])}"
+            f"{_eun_neun_i_ga(_BOWL_LABEL[bowl])} 없습니다.</p>"
         )
     elif bowl == "tasks":
         # 작업일지는 웹에서 만들 수 없는 그릇이라, 다른 그릇의 "AI와 대화하며
@@ -2143,7 +2160,8 @@ def _html_memory_page(
         )
     else:
         body_html = (
-            f"<p>아직 {html.escape(_BOWL_LABEL[bowl])}이(가) 없습니다 — AI와 "
+            f"<p>아직 {html.escape(_BOWL_LABEL[bowl])}"
+            f"{_eun_neun_i_ga(_BOWL_LABEL[bowl])} 없습니다 — AI와 "
             "대화하며 기억을 남기시면 여기에 쌓입니다.</p>"
         )
 

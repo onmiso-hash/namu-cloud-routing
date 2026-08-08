@@ -692,6 +692,12 @@ _MAX_USER_REPO_BYTES = 50 * 1024 * 1024  # 50MB — 나무 전체 예산 2GB의 
 # 상한선의 근거도 함께 무너진다는 뜻이다.
 _PRECLONE_MAX_DECLARED_SIZE_BYTES = _MAX_USER_REPO_BYTES * 10  # 500MB — 근거는 위 주석
 
+# 회원이 읽는 우리말 문장에 쓰는 이름. 코드 안의 action("clone"/"fetch")을 문장에
+# 그대로 끼우면 "clone을(를) 시작하지 않았습니다"가 되어 영어 낱말과 기계식 조사가
+# 함께 노출된다. 둘 다 받침 없이 "기"로 끝나므로 뒤에 "를"을 붙이면 맞는다 —
+# 새 이름을 넣을 때도 이 조건을 지킬 것(받침이 있으면 "을"로 바꿔야 한다).
+_ACTION_LABEL = {"clone": "내려받기", "fetch": "갱신하기"}
+
 
 def _check_declared_size_before_transfer(record: dict, token: str, action: str) -> None:
     """clone/fetch(둘 다 원격에서 받아오는 전송)를 시작하기 전에 GitHub 저장소
@@ -702,17 +708,20 @@ def _check_declared_size_before_transfer(record: dict, token: str, action: str) 
     에만 있었다 — 이미 연결된 사용자의 원격이 나중에 부풀어도 갱신(fetch)
     경로는 무방비였다. 이제 두 경로가 이 함수 하나를 대칭으로 부른다.
     `action`("clone" 또는 "fetch")은 오류 메시지에만 쓰인다 — 판정 로직 자체는
-    두 경로에서 동일하다.
+    두 경로에서 동일하다. 우리말 문장에는 `action`을 그대로 끼우지 않고
+    `_ACTION_LABEL`로 옮긴다(회원이 읽는 문장에 영어 낱말과 "을(를)"이 함께
+    박히던 자리다). 영어 문장에는 종전대로 `action`을 쓴다.
 
     크기 조회(GitHub API) 자체가 실패하면 **fail-closed**로 막는다
     (`SizeCheckFailed` 참고 — 그 예외의 docstring에 근거를 자세히 적었다).
     """
+    label = _ACTION_LABEL.get(action, action)
     try:
         size_kb = github_app.repo_size_kb(record["repo_full_name"], token)
     except Exception as exc:
         raise SizeCheckFailed(
-            f"저장소({record.get('repo_full_name')}) 크기를 {action} 전에 확인하지 "
-            f"못했습니다 — 디스크 고갈 방지를 위해 {action}을(를) 시작하지 않고 "
+            f"저장소({record.get('repo_full_name')}) 크기를 {label} 전에 확인하지 "
+            f"못했습니다 — 디스크 고갈 방지를 위해 {label}를 시작하지 않고 "
             "거부합니다. 잠시 후 다시 시도하세요. "
             "Could not verify repository size before syncing; refusing to proceed."
         ) from exc
@@ -721,7 +730,7 @@ def _check_declared_size_before_transfer(record: dict, token: str, action: str) 
     if size_bytes > _PRECLONE_MAX_DECLARED_SIZE_BYTES:
         raise QuotaExceeded(
             f"저장소({record.get('repo_full_name')}) 선언 크기가 사전 상한을 초과해 "
-            f"{action}을(를) 시작하지 않았습니다({size_kb}KB > "
+            f"{label}를 시작하지 않았습니다({size_kb}KB > "
             f"{_PRECLONE_MAX_DECLARED_SIZE_BYTES // (1024 * 1024)}MB). "
             f"Repository declared size exceeds the pre-transfer limit; refusing to {action}."
         )

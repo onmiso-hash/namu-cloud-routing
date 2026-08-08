@@ -394,7 +394,7 @@ def footer() -> str:
         f'<li><a href="{INSTALL_GUIDE_URL}" target="_blank" rel="noopener">'
         "플러그인 설치 안내서 ↗</a></li>"
         f'<li><a href="{SELFHOST_GUIDE_URL}" target="_blank" rel="noopener">'
-        "직접 서버 띄우기 ↗</a></li>"
+        "직접 서버 운영하기 ↗</a></li>"
         f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">'
         "나무 안내서 ↗</a></li>"
         f'<li><a href="{GITHUB_URL}" target="_blank" rel="noopener">'
