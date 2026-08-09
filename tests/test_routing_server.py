@@ -451,6 +451,10 @@ def _make_task(user="alice", project="namu-agent", slug="namu-99-demo", **kw):
         bowl="tasks", create=True, project=project, topic=slug,
         summary="시험용 작업", reason="시험을 위해 만든 작업",
         body="다음에 시작할 지점", ctx=_ctx(user),
+        new_project=True,  # 이 헬퍼를 쓰는 시험은 대부분 매 tmp_path마다 빈 회원
+        # 폴더에서 시작해 project가 항상 "처음 보는 이름"이다 — 새 프로젝트 게이트
+        # (아래 test_task_create_unknown_project_* 참고)를 확인하는 시험이 아닌 한
+        # 여기서 기본으로 확인해 둔다.
     )
     params.update(kw)
     return rs.namu_record(**params)
@@ -654,6 +658,53 @@ def test_task_create_refuses_to_overwrite(_fake_home):
     with pytest.raises(ValueError) as exc:
         _make_task()
     assert "이미 있습니다" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 새 프로젝트 게이트 — 개인용 mcp_server._create_task_entry 미러(namu-agent
+# web-new-project-gate). 이 주소는 project를 매번 자유 텍스트로 받다 보니(cwd가
+# 없어서) AI가 회원에게 묻지 않고 그 자리에서 새 프로젝트 이름을 지어낼 수 있었다
+# — 실사고: 회원이 아이디어를 기록해 달라고만 했는데 'blog-summary-bot'이라는
+# 프로젝트가 확인 없이 생겼다. 이 파일은 코어를 import하지 않는 손 옮김 사본이라
+# 코어의 게이트가 자동으로 따라오지 않았다.
+# ---------------------------------------------------------------------------
+
+
+def test_task_create_unknown_project_without_flag_rejected(tmp_path, _fake_home):
+    _make_task(project="namu-agent")  # 기존 프로젝트 하나를 만들어 둔다
+
+    with pytest.raises(ValueError) as exc:
+        rs.namu_record(
+            bowl="tasks", create=True, project="blog-summary-bot", topic="idea-1",
+            summary="시험용", reason="새 프로젝트 게이트 확인", body="생략",
+            ctx=_ctx("alice"),
+        )
+    msg = str(exc.value)
+    assert "new_project=True" in msg
+    assert "namu-agent" in msg  # 기존 프로젝트 목록이 함께 돌아온다
+    assert not (tmp_path / "users" / "alice" / "tasks" / "blog-summary-bot").exists()
+
+
+def test_task_create_unknown_project_with_flag_succeeds(_fake_home):
+    result = rs.namu_record(
+        bowl="tasks", create=True, project="blog-summary-bot", topic="idea-1",
+        summary="시험용", reason="새 프로젝트 게이트 확인", body="생략",
+        new_project=True, ctx=_ctx("alice"),
+    )
+    assert "idea-1" in result
+
+
+def test_task_create_known_project_needs_no_flag(_fake_home):
+    """이미 다른 작업이 있는 프로젝트에 새 작업을 더할 때는 new_project 없이도
+    통과한다 — 게이트는 '처음 보는 프로젝트 이름'에만 걸려야 기존 사용이 안 깨진다."""
+    _make_task(project="namu-agent", slug="namu-99-demo")
+
+    result = rs.namu_record(
+        bowl="tasks", create=True, project="namu-agent", topic="namu-100-demo",
+        summary="시험용", reason="기존 프로젝트에 추가", body="생략",
+        ctx=_ctx("alice"),
+    )
+    assert "namu-100-demo" in result
 
 
 def test_task_record_pushes_to_user_repo(monkeypatch, _fake_home):
