@@ -63,8 +63,8 @@ import config as cfg  # noqa: E402
 import db  # noqa: E402
 import identity  # noqa: E402
 import memo  # noqa: E402
-import new_project_gate  # noqa: E402
 import profile  # noqa: E402
+import project_policy  # noqa: E402
 import record_input  # noqa: E402
 import task_resolve  # noqa: E402
 import ticket_web  # noqa: E402
@@ -954,34 +954,33 @@ def _create_task_entry(
     text: "str | None",
     tag: "str | None",
     via: "str | None",
-    new_project: bool = False,
 ) -> str:
     """새 작업 폴더(task.md + log.md)를 만들고 `[시작]` 줄을 append한다.
 
-    새 프로젝트 게이트는 이 파일이 아니라 코어(`new_project_gate`)에 있고, 개인용
-    mcp_server도 같은 함수를 부른다. 이 주소는 project를 매번 자유 텍스트로 받으므로
-    (cwd가 없어서) AI가 회원에게 묻지 않고 새 프로젝트 이름을 지어낼 수 있다 —
-    실사고: 회원이 "블로그 자동 요약 봇" 아이디어를 기록해 달라고만 했는데
-    'blog-summary-bot'이라는 프로젝트가 확인 없이 그 자리에서 생겼다. 1차 판에서는
-    게이트를 개인용 mcp_server.py에만 넣고 이 파일에는 손으로 옮겨 적었는데, 옮겨
-    적기 전에 배포해 웹이 그대로 뚫렸다 — 그래서 갈라질 이유가 없는 이 정책만은
-    "쓰기 (개인용 mcp_server.py 미러)" 규약의 예외로 두고 코어를 그대로 import한다.
+    **자리는 넘어온 이름이 아니라 규칙이 정한다** — 이미 있는 방 이름이나
+    `web-project`를 주면 그대로 만들고, 그 밖의 경우에는 만들지 않고 **회원에게
+    보여줄 방 목록**을 돌려준다(ValueError). 이 주소에서는 **새 프로젝트가 생기지
+    않는다.** 판정과 문안은 코어 `project_policy`에 있고 개인용 mcp_server도 같은
+    모듈을 쓴다.
 
-    회원 격리: 거절 기억을 회원 키(scope)로 갈라, 다른 회원의 질문·답이 서로
-    영향을 주지 않게 한다.
+    이 주소는 project를 매번 자유 텍스트로 받았고(cwd가 없어서다), 그 글자를 AI가
+    회원에게 묻지 않고 지어낼 수 있었다 — 실사고: 회원이 "블로그 자동 요약 봇"
+    아이디어를 기록해 달라고만 했는데 'blog-summary-bot'이라는 프로젝트가 확인
+    없이 생겼다. 그 값을 검사하는 게이트를 두 판 만들었고 두 판 다 뚫렸다(AI가
+    채우는 값을 보는 검사는 AI가 그 값을 채우면 열린다). 지금은 검사하지 않고,
+    그 글자가 **새 폴더를 만들 수 없게** 했다 — 남은 쓰임은 이미 있는 방을 고르는
+    것뿐이라 일지를 덧붙이는 일과 같은 무게가 된다.
+
+    회원 격리는 그대로다 — `web-project`는 회원 폴더 **안**의 이름이라 회원마다
+    제 방이고, 이름이 같아도 섞이지 않는다. 고를 수 있는 방 목록도 그 회원 것뿐이다.
     """
-    if project is None:
-        raise ValueError(_TASKS_PROJECT_REQUIRED)
-    tasks_root = _tasks_root_for(user_key, project)
-
-    existing_projects = sorted(d.name for d in _task_project_dirs_for_user(user_key))
-    new_project_gate.check(
-        tasks_root.name,
-        existing_projects,
-        new_project=new_project,
-        scope=user_key,
+    resolved_project = project_policy.resolve_create_project(
+        project,
+        is_web=True,
+        existing=sorted(d.name for d in _task_project_dirs_for_user(user_key)),
         person="회원",
     )
+    tasks_root = _tasks_root_for(user_key, resolved_project)
 
     slug = _validate_new_task_slug(task)
 
@@ -1110,7 +1109,6 @@ def namu_record(
     supersedes: str | None = None,
     create: bool = False,
     done_when: "list[str] | None" = None,
-    new_project: bool = False,
     # ── 첨부 기록 전용 2칸 (namu-file-upload-download 4단계)
     path: str | None = None,
     bytes: int | None = None,
@@ -1170,7 +1168,7 @@ def namu_record(
         "bowl": bowl, "summary": summary, "reason": reason, "body": body,
         "topic": topic, "status": status, "category": category, "tags": tags,
         "project": project, "confidence": confidence, "supersedes": supersedes,
-        "create": create, "done_when": done_when, "new_project": new_project,
+        "create": create, "done_when": done_when,
         "path": path, "bytes": bytes,
         "task": task, "outcome": outcome, "task_type": task_type,
         "verified_by": verified_by, "kind": kind, "subject": subject,
@@ -1200,7 +1198,6 @@ def namu_record(
                     key, v.get("project"), v_topic, v_summary, v_reason,
                     v.get("done_when"), start_point,
                     (v.get("status") or "다음") if start_point else None, via,
-                    new_project=bool(v.get("new_project")),
                 )
             else:
                 entry_id = _record_task_entry(

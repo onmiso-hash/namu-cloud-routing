@@ -16,7 +16,6 @@ import pytest
 from starlette.testclient import TestClient
 
 import identity
-import new_project_gate
 import routing_server as rs
 import task_resolve
 import user_repo as ur
@@ -67,15 +66,6 @@ def _ctx(user: str | None = None, client: str | None = "claude") -> _FakeCtx:
 def _store_root(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     return tmp_path
-
-
-@pytest.fixture(autouse=True)
-def _fresh_new_project_gate():
-    """새 프로젝트 게이트는 "물어본 프로젝트"를 프로세스 안에 기억한다 — 시험은 한
-    프로세스에서 줄줄이 도므로 앞 시험의 질문이 뒤 시험에 새면 안 된다."""
-    new_project_gate._reset_for_tests()
-    yield
-    new_project_gate._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -456,29 +446,46 @@ def _fake_home(monkeypatch, tmp_path):
     return home
 
 
-def _make_task(user="alice", project="namu-agent", slug="namu-99-demo", **kw):
+# 웹에서 만든 작업이 모이는 기본 방(project_policy.WEB_PROJECT).
+_WEB = "web-project"
+
+
+def _make_task(user="alice", slug="namu-99-demo", **kw):
+    """작업 하나를 만든다 — 방은 `web-project`를 골라 준 것으로 친다.
+
+    이 주소에서 새 작업을 만들 때, 방이 안 정해졌으면 서버는 만들지 않고 방 목록을
+    돌려준다(project_policy). 그 목록에서 회원이 고르는 걸음을 시험마다 흉내내지
+    않도록, 방이 관심사가 아닌 시험은 여기서 기본 자리를 골라 준다.
+    """
     params = dict(
-        bowl="tasks", create=True, project=project, topic=slug,
+        bowl="tasks", create=True, project=_WEB, topic=slug,
         summary="시험용 작업", reason="시험을 위해 만든 작업",
         body="다음에 시작할 지점", ctx=_ctx(user),
-        new_project=True,  # 이 헬퍼를 쓰는 시험은 대부분 매 tmp_path마다 빈 회원
-        # 폴더에서 시작해 project가 항상 "처음 보는 이름"이다 — 새 프로젝트 게이트
-        # (아래 test_task_create_unknown_project_* 참고)를 확인하는 시험이 아닌 한
-        # 여기서 기본으로 확인해 둔다.
     )
     params.update(kw)
-    # 게이트는 첫 호출을 확인 칸과 무관하게 거절하고 질문을 돌려준다 — 게이트가
-    # 관심사가 아닌 시험까지 "거절→대기→재호출" 두 걸음을 흉내내지 않도록, 여기서
-    # "이미 묻고 답을 받아 왔다"로 심어 둔다. 게이트 자체를 보는 시험은 이 헬퍼를
-    # 거치지 않고 rs.namu_record를 직접 부른다.
-    new_project_gate._prime_for_tests(params["project"], scope=user)
     return rs.namu_record(**params)
+
+
+def _seed_task_folder(store_root: Path, user: str, project: str, slug: str) -> Path:
+    """다른 프로젝트의 작업을 회원 폴더에 직접 심는다.
+
+    회원 저장소에는 내 PC에서 만들어져 동기화돼 온 방들도 함께 있다 — 이 주소에서는
+    그런 방을 새로 만들 수 없으므로 파일로 심는다.
+    """
+    task_dir = store_root / "users" / user / "tasks" / project / slug
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.md").write_text(f"# {slug} — 심어 둔 작업\n", encoding="utf-8")
+    (task_dir / "log.md").write_text(
+        f"# log — {slug}\n\n[시작] 2026-08-01 09:00:00 hp · 심어 둔 작업\n",
+        encoding="utf-8",
+    )
+    return task_dir
 
 
 def test_task_create_writes_into_user_folder_not_container_home(tmp_path, _fake_home):
     result = _make_task()
 
-    task_dir = tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo"
+    task_dir = tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo"
     assert (task_dir / "task.md").exists()
     assert (task_dir / "log.md").exists()
     assert "시험을 위해 만든 작업" in (task_dir / "task.md").read_text(encoding="utf-8")
@@ -493,12 +500,12 @@ def test_task_create_writes_into_user_folder_not_container_home(tmp_path, _fake_
 def test_task_log_line_is_appended(tmp_path, _fake_home):
     _make_task()
     written = rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
         summary="1단계를 끝냈다", status="단계", reason="시험이 통과했다",
         body="생략", ctx=_ctx("alice"),
     )
     log = (
-        tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo" / "log.md"
+        tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo" / "log.md"
     ).read_text(encoding="utf-8")
     assert "[단계]" in log and "1단계를 끝냈다" in log
     assert "    왜: 시험이 통과했다" in log, "3층(왜) 줄이 들여쓰기로 붙지 않았다"
@@ -512,13 +519,13 @@ def test_recall_returns_open_tasks(_fake_home):
     slugs = [t["slug"] for t in result["tasks"]]
     assert slugs == ["namu-99-demo"]
     assert result["tasks"][0]["next"] == "다음에 시작할 지점"
-    assert result["tasks"][0]["project"] == "namu-agent"
+    assert result["tasks"][0]["project"] == _WEB
 
 
 def test_search_tasks_bowl_finds_log_line(_fake_home):
     _make_task()
     rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
         summary="검색으로 찾을 줄", status="기록", reason="생략", body="생략",
         ctx=_ctx("alice"),
     )
@@ -540,7 +547,7 @@ def test_search_tasks_bowl_uses_the_core_word_rule(_fake_home):
     """
     _make_task()
     rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
         summary="검색 인덱스 설계 문서", status="기록", reason="생략", body="생략",
         ctx=_ctx("alice"),
     )
@@ -561,7 +568,7 @@ def test_search_tasks_bowl_finds_the_task_doc(tmp_path, _fake_home):
     """
     _make_task()
     task_md = (
-        tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "namu-99-demo" / "task.md"
+        tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo" / "task.md"
     )
     task_md.write_text(
         task_md.read_text(encoding="utf-8") + "- [ ] 설명서에만있는조건\n",
@@ -577,7 +584,7 @@ def test_search_tasks_bowl_finds_the_task_doc(tmp_path, _fake_home):
 def test_closed_task_drops_out_of_open_list(_fake_home):
     _make_task()
     rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
         summary="다 끝냈다", status="완료", reason="생략", body="생략",
         ctx=_ctx("alice"),
     )
@@ -594,12 +601,15 @@ def test_tasks_are_isolated_between_users(tmp_path, _fake_home):
     assert not (tmp_path / "users" / "bob" / "tasks").exists()
 
 
-def test_search_tasks_project_filter(_fake_home):
-    _make_task(project="namu-agent", slug="alpha-one")
-    _make_task(project="onnamu-project", slug="beta-one")
+def test_search_tasks_project_filter(tmp_path, _fake_home):
+    """조회는 방을 가려 볼 수 있다 — 회원 저장소에는 내 PC에서 동기화돼 온 방들이
+    web-project와 나란히 있기 때문이다(만들기만 web-project로 모인다)."""
+    _make_task(slug="alpha-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "beta-one")
+
     merged = rs.namu_search(bowl="tasks", ctx=_ctx("alice"))
     only = rs.namu_search(bowl="tasks", project="onnamu-project", ctx=_ctx("alice"))
-    assert {r["project"] for r in merged["results"]} == {"namu-agent", "onnamu-project"}
+    assert {r["project"] for r in merged["results"]} == {_WEB, "onnamu-project"}
     assert {r["project"] for r in only["results"]} == {"onnamu-project"}
 
 
@@ -614,9 +624,17 @@ def test_task_record_requires_project(_fake_home):
 
 
 def test_project_name_cannot_escape_user_folder(tmp_path, _fake_home):
-    """프로젝트 이름은 회원이 보내는 값이 곧 폴더 이름이 된다 — 경로 이탈 차단."""
+    """덧붙이기는 여전히 보내온 이름이 곧 폴더 이름이 된다 — 경로 이탈 차단.
+
+    만들기 쪽은 이름을 아예 안 쓰므로(언제나 web-project) 이 길이 남은 유일한
+    입구다.
+    """
     with pytest.raises(ValueError) as exc:
-        _make_task(project="../../bob")
+        rs.namu_record(
+            bowl="tasks", project="../../bob", topic="namu-99-demo",
+            summary="한 줄", status="기록", reason="생략", body="생략",
+            ctx=_ctx("alice"),
+        )
     assert "project" in str(exc.value)
     assert not (tmp_path / "users" / "bob").exists()
     assert not (tmp_path / "bob").exists()
@@ -627,7 +645,7 @@ def test_closing_synonym_is_rejected(_fake_home):
     _make_task()
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
-            bowl="tasks", project="namu-agent", topic="namu-99-demo",
+            bowl="tasks", project=_WEB, topic="namu-99-demo",
             summary="끝냈다", status="종료", reason="생략", body="생략",
             ctx=_ctx("alice"),
         )
@@ -637,7 +655,7 @@ def test_closing_synonym_is_rejected(_fake_home):
 def test_closing_with_unmet_done_when_warns(_fake_home):
     _make_task(done_when=["실측 한 바퀴", "배포"])
     written = rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99-demo",
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
         summary="여기서 접는다", status="중단", reason="생략", body="생략",
         ctx=_ctx("alice"),
     )
@@ -649,7 +667,7 @@ def test_task_name_prefix_match(_fake_home):
     """작업 이름 앞부분만 줘도 찾는다(개인용과 같은 규칙)."""
     _make_task()
     written = rs.namu_record(
-        bowl="tasks", project="namu-agent", topic="namu-99",
+        bowl="tasks", project=_WEB, topic="namu-99",
         summary="앞부분만 줬다", status="기록", reason="생략", body="생략",
         ctx=_ctx("alice"),
     )
@@ -660,12 +678,12 @@ def test_unknown_task_is_not_created_silently(tmp_path, _fake_home):
     """없는 이름으로 부르면 폴더를 새로 만들지 않는다 — 목적 없는 유령 작업 방지."""
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
-            bowl="tasks", project="namu-agent", topic="없는작업",
+            bowl="tasks", project=_WEB, topic="없는작업",
             summary="한 줄", status="기록", reason="생략", body="생략",
             ctx=_ctx("alice"),
         )
     assert "찾을 수 없습니다" in str(exc.value)
-    assert not (tmp_path / "users" / "alice" / "tasks" / "namu-agent" / "없는작업").exists()
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB / "없는작업").exists()
 
 
 def test_task_create_refuses_to_overwrite(_fake_home):
@@ -676,138 +694,116 @@ def test_task_create_refuses_to_overwrite(_fake_home):
 
 
 # ---------------------------------------------------------------------------
-# 새 프로젝트 게이트 — 개인용 mcp_server._create_task_entry 미러(namu-agent
-# web-new-project-gate). 이 주소는 project를 매번 자유 텍스트로 받다 보니(cwd가
-# 없어서) AI가 회원에게 묻지 않고 그 자리에서 새 프로젝트 이름을 지어낼 수 있었다
-# — 실사고: 회원이 아이디어를 기록해 달라고만 했는데 'blog-summary-bot'이라는
-# 프로젝트가 확인 없이 생겼다. 이 파일은 코어를 import하지 않는 손 옮김 사본이라
-# 코어의 게이트가 자동으로 따라오지 않았다.
+# 새 작업이 들어갈 자리 — 회원이 방 목록에서 고른다
+#
+# 이 주소는 project를 매번 자유 텍스트로 받았고(cwd가 없어서다), 그 글자를 AI가
+# 회원에게 묻지 않고 지어낼 수 있었다 — 실사고: 회원이 아이디어를 기록해 달라고만
+# 했는데 'blog-summary-bot'이라는 프로젝트가 확인 없이 생겼다. 그 값을 검사하는
+# 게이트(확인 칸·질문 문안·15초 문턱)를 두 판 만들었고 두 판 다 뚫렸다. 지금은
+# 검사하지 않고, 그 글자가 **새 폴더를 만들 수 없게** 했다(코어 project_policy) —
+# 방이 안 정해졌으면 목록을 돌려주고, 목록에는 이미 있는 방과 web-project뿐이다.
 # ---------------------------------------------------------------------------
 
 
-def test_task_create_unknown_project_without_flag_rejected(tmp_path, _fake_home):
-    _make_task(project="namu-agent")  # 기존 프로젝트 하나를 만들어 둔다
+def test_task_create_can_pick_an_existing_room(tmp_path, _fake_home):
+    """이미 있는 방 이름을 주면 그 방에 만든다 — 새 폴더가 생기지 않으므로 그 이름으로
+    할 수 있는 일은 방을 고르는 것뿐이고, 일지를 덧붙이는 일과 같은 무게다."""
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "beta-one")
+
+    result = rs.namu_record(
+        bowl="tasks", create=True, project="onnamu-project", topic="idea-0",
+        summary="시험용", reason="이미 있는 방 고르기", body="생략", ctx=_ctx("alice"),
+    )
+    assert (
+        tmp_path / "users" / "alice" / "tasks" / "onnamu-project" / "idea-0" / "task.md"
+    ).exists()
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB).exists()
+    assert "idea-0" in result
+
+
+def test_task_create_unknown_name_asks_with_a_room_list(tmp_path, _fake_home):
+    """처음 보는 이름을 넘기면 아무것도 만들지 않고 방 목록을 돌려준다 — 실사고
+    'blog-summary-bot'이 정확히 이 경로였다."""
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "beta-one")
 
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
             bowl="tasks", create=True, project="blog-summary-bot", topic="idea-1",
-            summary="시험용", reason="새 프로젝트 게이트 확인", body="생략",
-            ctx=_ctx("alice"),
+            summary="시험용", reason="목록 확인", body="생략", ctx=_ctx("alice"),
         )
     msg = str(exc.value)
-    # 회원에게 그대로 보여줄 질문이 돌아온다(번호로 고르기만 하면 되는 형태).
-    assert "1. namu-agent" in msg
-    assert "0. 새 프로젝트로 만들기 — 'blog-summary-bot'" in msg
-    assert "회원에게" in msg
-    # 우회 방법(칸 이름)을 알려주면 붙은 AI가 회원 대신 그것을 집어 든다 —
-    # 실사고 2회(blog-summary-bot, blog-auto-bot)가 정확히 그 경로였다.
-    assert "new_project" not in msg
+    # 번호 매긴 목록 = 이 회원의 방들 + web-project. 고르기만 하면 된다.
+    assert "1. onnamu-project" in msg
+    assert f"2. {_WEB}" in msg
+    assert "회원" in msg
+    # 목록에 '새 프로젝트로 만들기'가 있으면 붙은 AI가 그것을 골라 사고가 재현된다
+    # (2차 게이트가 뚫린 자리가 정확히 거기였다).
+    assert "새 프로젝트로 만들기" not in msg
     assert not (tmp_path / "users" / "alice" / "tasks" / "blog-summary-bot").exists()
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB).exists()
 
 
-def test_task_create_immediate_retry_with_flag_is_rejected(tmp_path, _fake_home):
-    """거절 직후 회원의 답 없이 곧바로 확인 칸을 켜서 다시 부르는 것은 막는다.
+def test_task_create_without_project_asks_too(tmp_path, _fake_home):
+    """이름을 아예 안 줘도 마찬가지로 목록을 돌려준다 — 자리를 정하는 것은 회원이다.
 
-    실사고: 1차 게이트 배포 뒤에도 웹채팅이 거절문을 읽고 스스로 new_project=True를
-    붙여 재시도해 'blog-auto-bot'이 확인 없이 생겼다 — 거절만으로는 AI를 멈추게
-    하지 못하고 한 번 더 부르게 할 뿐이었다.
+    예전에는 여기서 "project를 명시하라"고만 거절했고, 그 빈자리를 AI가 지어낸
+    이름으로 채운 것이 사고였다. 지금은 채울 이름 대신 고를 목록을 준다.
     """
-    _make_task(project="namu-agent")
-
-    for flag in (False, True):
-        with pytest.raises(ValueError) as exc:
-            rs.namu_record(
-                bowl="tasks", create=True, project="blog-auto-bot", topic="idea-1",
-                summary="시험용", reason="즉시 재시도 확인", body="생략",
-                new_project=flag, ctx=_ctx("alice"),
-            )
-    assert "시간이 없었습니다" in str(exc.value)
-    assert not (tmp_path / "users" / "alice" / "tasks" / "blog-auto-bot").exists()
-
-
-def test_task_create_retry_after_the_wait_succeeds(tmp_path, monkeypatch, _fake_home):
-    """회원이 답할 만한 시간이 지난 뒤의 재시도는 통과한다 — 문턱은 지연이지
-    금지가 아니다."""
-    import new_project_gate
-
-    _make_task(project="namu-agent")
-
-    with pytest.raises(ValueError):
-        rs.namu_record(
-            bowl="tasks", create=True, project="blog-auto-bot", topic="idea-1",
-            summary="시험용", reason="기다린 뒤 재시도", body="생략",
-            ctx=_ctx("alice"),
-        )
-
-    monkeypatch.setattr(new_project_gate, "COOLDOWN_SECONDS", 0.0)
-    result = rs.namu_record(
-        bowl="tasks", create=True, project="blog-auto-bot", topic="idea-1",
-        summary="시험용", reason="기다린 뒤 재시도", body="생략",
-        new_project=True, ctx=_ctx("alice"),
-    )
-    assert "idea-1" in result
-    assert (tmp_path / "users" / "alice" / "tasks" / "blog-auto-bot").exists()
-
-
-def test_task_create_gate_memory_is_split_per_member(_fake_home):
-    """회원 A에게 물어본 것이 회원 B의 통행증이 되면 안 된다 — 멀티테넌트라 한
-    회원의 질문·답이 다른 회원에게 새면 격리가 깨진다."""
-    new_project_gate._prime_for_tests("shared-name", scope="alice")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "beta-one")
 
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
-            bowl="tasks", create=True, project="shared-name", topic="idea-1",
-            summary="시험용", reason="회원 격리 확인", body="생략",
-            new_project=True, ctx=_ctx("bob"),
+            bowl="tasks", create=True, topic="idea-2",
+            summary="시험용", reason="목록 확인", body="생략", ctx=_ctx("alice"),
         )
-    assert "질문을 보여준 적이 없" in str(exc.value)
+    msg = str(exc.value)
+    assert "onnamu-project" in msg and _WEB in msg
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB).exists()
 
-    # alice 쪽은 제 순서대로 통과한다(격리가 한쪽만 막는 것이 아님을 확인).
+
+def test_task_create_after_choosing_web_project(tmp_path, _fake_home):
+    """목록에서 web-project를 골라 다시 부르면 그 방에 만들어진다 — 그 폴더가 아직
+    없어도 된다(웹에서 만든 작업이 모이는 기본 자리라 첫 작업도 여기로 온다)."""
     result = rs.namu_record(
-        bowl="tasks", create=True, project="shared-name", topic="idea-1",
-        summary="시험용", reason="회원 격리 확인", body="생략",
-        new_project=True, ctx=_ctx("alice"),
+        bowl="tasks", create=True, project=_WEB, topic="idea-3",
+        summary="시험용", reason="골라서 만들기", body="생략", ctx=_ctx("alice"),
     )
-    assert "idea-1" in result
+    assert (tmp_path / "users" / "alice" / "tasks" / _WEB / "idea-3" / "task.md").exists()
+    assert "idea-3" in result
 
 
-def test_task_create_with_flag_alone_on_first_call_is_rejected(tmp_path, _fake_home):
-    """확인 칸만 켜서 **첫 호출에** 새 프로젝트를 만드는 길은 없다 — 그 길을
-    열어두면 붙은 AI는 거절문을 읽을 것도 없이 칸만 켜면 되고, 회원은 질문을 한
-    번도 못 본다(첫 구현에서 이 구멍이 검수에 잡혔다)."""
+def test_web_project_is_a_room_per_member(tmp_path, _fake_home):
+    """web-project는 회원 폴더 **안**의 이름이라 회원마다 제 방이다 — 이름이 같아도
+    남의 기록이 섞이면 격리가 깨진다."""
+    _make_task(user="alice", slug="alice-one")
+    _make_task(user="bob", slug="bob-one")
+
+    assert (tmp_path / "users" / "alice" / "tasks" / _WEB / "alice-one").exists()
+    assert (tmp_path / "users" / "bob" / "tasks" / _WEB / "bob-one").exists()
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB / "bob-one").exists()
+    assert [t["slug"] for t in rs.namu_recall(ctx=_ctx("bob"))["tasks"]] == ["bob-one"]
+
+
+def test_existing_room_names_do_not_leak_between_members(tmp_path, _fake_home):
+    """'이미 있는 방'은 그 회원의 방만 센다 — 남의 방 이름을 대면 만들어지지 않고
+    제 방 목록이 돌아온다(방 목록이 새면 격리가 깨진다)."""
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "alpha-one")
+
     with pytest.raises(ValueError) as exc:
         rs.namu_record(
-            bowl="tasks", create=True, project="blog-summary-bot", topic="idea-1",
-            summary="시험용", reason="새 프로젝트 게이트 확인", body="생략",
-            new_project=True, ctx=_ctx("alice"),
+            bowl="tasks", create=True, project="onnamu-project", topic="idea-9",
+            summary="시험용", reason="남의 방 이름", body="생략", ctx=_ctx("bob"),
         )
-    assert "질문을 보여준 적이 없" in str(exc.value)
-    assert not (tmp_path / "users" / "alice" / "tasks" / "blog-summary-bot").exists()
-
-
-def test_task_create_unknown_project_after_asking_succeeds(_fake_home):
-    """물어보고 답을 받아 온 흐름은 실제로 새 프로젝트를 만든다 — 게이트가 새
-    프로젝트를 영영 못 만들게 하는 것은 아니라는 대조군."""
-    new_project_gate._prime_for_tests("blog-summary-bot", scope="alice")
-    result = rs.namu_record(
-        bowl="tasks", create=True, project="blog-summary-bot", topic="idea-1",
-        summary="시험용", reason="새 프로젝트 게이트 확인", body="생략",
-        new_project=True, ctx=_ctx("alice"),
-    )
-    assert "idea-1" in result
-
-
-def test_task_create_known_project_needs_no_flag(_fake_home):
-    """이미 다른 작업이 있는 프로젝트에 새 작업을 더할 때는 new_project 없이도
-    통과한다 — 게이트는 '처음 보는 프로젝트 이름'에만 걸려야 기존 사용이 안 깨진다."""
-    _make_task(project="namu-agent", slug="namu-99-demo")
-
-    result = rs.namu_record(
-        bowl="tasks", create=True, project="namu-agent", topic="namu-100-demo",
-        summary="시험용", reason="기존 프로젝트에 추가", body="생략",
-        ctx=_ctx("alice"),
-    )
-    assert "namu-100-demo" in result
+    # bob이 고를 수 있는 방은 제 web-project 하나뿐이다 — alice의 방이 목록에 끼면
+    # 이름만으로도 남의 저장소 구성이 새어 나간다. (문두에 되울리는 것은 bob이 방금
+    # 준 글자라 유출이 아니다 — 그래서 목록 줄로 확인한다.)
+    msg = str(exc.value)
+    assert f"1. {_WEB}" in msg
+    assert "2. " not in msg
+    assert not (tmp_path / "users" / "bob" / "tasks" / "onnamu-project").exists()
+    assert not (
+        tmp_path / "users" / "alice" / "tasks" / "onnamu-project" / "idea-9"
+    ).exists()
 
 
 def test_task_record_pushes_to_user_repo(monkeypatch, _fake_home):
