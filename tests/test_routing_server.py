@@ -816,6 +816,133 @@ def test_task_record_pushes_to_user_repo(monkeypatch, _fake_home):
     assert calls == ["alice"]
 
 
+# ---------------------------------------------------------------------------
+# 작업 옮기기 (namu_task_move) — new-project-rule 설계서 4단계의 클라우드 판.
+#
+# 판정 로직(어느 방으로 옮길 수 있는지, 폴더를 실제로 옮기는 절차)은 코어
+# `task_move` 모듈을 그대로 부른다(routing_server.py 도구 정의 위 주석 참고) —
+# 여기서는 그 판정을 다시 구현하지 않고, **클라우드에서만 뜻이 있는 것**(회원
+# 격리·project 필수·push 배선)만 겨눈다.
+# ---------------------------------------------------------------------------
+def test_task_move_unknown_room_rejected(tmp_path, _fake_home):
+    """없는 방으로 옮기려 하면 거절되고, 그 회원의 방 목록이 그대로 돌아온다."""
+    _make_task(user="alice", slug="alice-one")
+
+    with pytest.raises(ValueError) as exc:
+        rs.namu_task_move(task="alice-one", to="ghost-room", project=_WEB, ctx=_ctx("alice"))
+    msg = str(exc.value)
+    assert f"1. {_WEB}" in msg
+    assert "2. " not in msg
+
+    # 아무것도 옮기지 않았다.
+    assert (tmp_path / "users" / "alice" / "tasks" / _WEB / "alice-one").exists()
+
+
+def test_task_move_destination_isolated_between_members(tmp_path, _fake_home):
+    """다른 회원의 방 이름을 목적지로 주면 거절되고, 그 이름이 목록에도 안 나온다
+    (격리 시험 — 이 도구의 급소). `bob-room`은 실제로 존재하는 방이지만 bob의
+    것이라, alice에게는 없는 이름과 똑같이 취급돼야 한다."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "alice-second", "alice-two")
+    _seed_task_folder(tmp_path, "bob", "bob-room", "bob-one")
+
+    with pytest.raises(ValueError) as exc:
+        rs.namu_task_move(task="alice-one", to="bob-room", project=_WEB, ctx=_ctx("alice"))
+    msg = str(exc.value)
+    # 문두에 되울리는 "방 'bob-room'는 없습니다"는 alice가 방금 준 글자라 유출이
+    # 아니다(test_existing_room_names_do_not_leak_between_members와 같은 이유) —
+    # 그래서 목록 줄(번호가 붙은 줄)만으로 확인한다. alice의 방 둘만 번호로 뜨고
+    # bob-room은 목록 줄로는 전혀 안 나와야 한다.
+    listed = [line.strip() for line in msg.splitlines() if line.strip()[:2].rstrip(".").isdigit()]
+    # known은 sorted()로 만들어지므로 순서도 고정이다: 'alice-second' < 'web-project'.
+    assert listed == ["1. alice-second", f"2. {_WEB}"]
+    assert not any("bob-room" in line for line in listed)
+
+    # alice 쪽에는 bob의 방이 생기지 않았고, alice의 작업도 그대로다.
+    assert not (tmp_path / "users" / "alice" / "tasks" / "bob-room").exists()
+    assert (tmp_path / "users" / "alice" / "tasks" / _WEB / "alice-one").exists()
+    # bob의 방은 손대지 않았다.
+    assert (tmp_path / "users" / "bob" / "tasks" / "bob-room" / "bob-one").exists()
+
+
+def test_task_move_normal(tmp_path, _fake_home):
+    """정상 이동: 그 회원의 A방 작업이 B방으로 옮겨진다."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "placeholder")
+
+    result = rs.namu_task_move(
+        task="alice-one", to="onnamu-project", project=_WEB, ctx=_ctx("alice")
+    )
+
+    assert not (tmp_path / "users" / "alice" / "tasks" / _WEB / "alice-one").exists()
+    dest_dir = tmp_path / "users" / "alice" / "tasks" / "onnamu-project" / "alice-one"
+    assert dest_dir.exists()
+    assert "alice-one" in str(result)
+    log = (dest_dir / "log.md").read_text(encoding="utf-8")
+    assert "[기록]" in log
+    assert _WEB in log and "onnamu-project" in log
+
+
+def test_task_move_without_source_project_rejected(_fake_home):
+    """원본 방(project)을 안 주면 거절된다 — 웹에는 '지금 이 폴더'가 없다."""
+    with pytest.raises(ValueError) as exc:
+        rs.namu_task_move(task="whatever", to=_WEB, ctx=_ctx("alice"))
+    assert "project" in str(exc.value)
+
+
+def test_task_move_destination_slug_conflict_rejected(tmp_path, _fake_home):
+    """목적지에 같은 이름 작업이 이미 있으면 거절되고 원본이 그대로 남는다."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "alice-one")
+
+    with pytest.raises(ValueError) as exc:
+        rs.namu_task_move(
+            task="alice-one", to="onnamu-project", project=_WEB, ctx=_ctx("alice")
+        )
+    assert "이미" in str(exc.value)
+
+    # 원본은 그대로, 목적지에 원래 있던 것도 손대지 않았다(합치지 않는다).
+    assert (tmp_path / "users" / "alice" / "tasks" / _WEB / "alice-one").exists()
+    assert (
+        tmp_path / "users" / "alice" / "tasks" / "onnamu-project" / "alice-one"
+    ).exists()
+
+
+def test_task_move_pushes_to_user_repo(monkeypatch, tmp_path, _fake_home):
+    """옮긴 뒤에도 다른 쓰기 도구와 같이 곧바로 회원 저장소로 push를 시도한다."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "placeholder")
+
+    calls = []
+    monkeypatch.setattr(
+        ur, "push", lambda conn, key, message=ur.DEFAULT_COMMIT_MESSAGE: calls.append(key)
+    )
+    rs.namu_task_move(task="alice-one", to="onnamu-project", project=_WEB, ctx=_ctx("alice"))
+    assert calls == ["alice"]
+
+
+def test_task_move_push_failure_still_succeeds_with_warning(monkeypatch, tmp_path, _fake_home):
+    """push가 실패해도 이동 자체는 이미 끝났으니 raise하지 않고 경고로 담는다
+    (다른 쓰기 도구들과 같은 배선, `_push_and_collect_warning`)."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "placeholder")
+
+    def _boom(conn, key, message=ur.DEFAULT_COMMIT_MESSAGE):
+        raise ur.PushRejected("dummy push rejected for test")
+
+    monkeypatch.setattr(ur, "push", _boom)
+    result = rs.namu_task_move(
+        task="alice-one", to="onnamu-project", project=_WEB, ctx=_ctx("alice")
+    )
+
+    assert isinstance(result, dict)
+    assert "dummy push rejected for test" in result.get("warning", "")
+    # 이동 자체는 성공했다 — push 실패가 되돌리지 않는다.
+    assert (
+        tmp_path / "users" / "alice" / "tasks" / "onnamu-project" / "alice-one"
+    ).exists()
+
+
 def test_search_rejects_project_on_learnings_bowl(_fake_home):
     """조용히 무시하면 부른 쪽이 걸러진 줄 알고 잘못된 결론을 낸다."""
     with pytest.raises(ValueError) as exc:

@@ -66,6 +66,7 @@ import memo  # noqa: E402
 import profile  # noqa: E402
 import project_policy  # noqa: E402
 import record_input  # noqa: E402
+import task_move  # noqa: E402
 import task_resolve  # noqa: E402
 import ticket_web  # noqa: E402
 import tickets  # noqa: E402
@@ -86,6 +87,7 @@ EXPOSED_TOOLS = frozenset({
     "namu_delete_file",
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
+    "namu_task_move",
 })
 
 mcp = FastMCP(
@@ -1257,6 +1259,105 @@ def namu_record(
             result["warning"] = warning
         return result
     return entry_id
+
+
+# ---------------------------------------------------------------------------
+# 작업 옮기기 (new-project-rule 설계서 4단계, `docs/new_project_rule.md` 7장)
+#
+# 판정 로직(코어 `task_move.py`)을 여기 옮겨 적지 않는다 — `_create_task_entry`가
+# `project_policy`를 부르는 것과 정확히 같은 이유다. 1차 판이 판정을 이 파일에
+# 그대로 베껴 적었다가 코어만 고쳐 배포해 웹이 그대로 뚫린 사고가 있었다(원인을
+# 찾는 데 세션 절반이 들었다 — 경위는 이 파일 첫머리 배경 주석과 코어
+# `project_policy.py` 문서 참고). 이 도구가 하는 일은 셋뿐이다:
+#   ① 회원 격리 — 목적지 후보(`known`)를 그 회원의 방 목록으로만 좁힌다.
+#   ② 클라우드 전용 값(project 필수, cfg.now()/cfg.NAMU_MACHINE, 회원 호칭)을
+#      코어 함수에 인자로 넘긴다.
+#   ③ 쓰기 전 최신화·쓰기 뒤 push는 이 파일의 다른 쓰기 도구와 같은 배선
+#      (`_sync_or_reject`/`_push_and_collect_warning`)을 그대로 쓴다.
+# ---------------------------------------------------------------------------
+_TASK_MOVE_DESCRIPTION = (
+    "Move a task's whole folder (task.md + log.md) from one room to another, "
+    "inside this member's own storage only (multi-tenant mirror of the "
+    "personal tool of the same name — the actual move/permission logic lives "
+    "in vendor/namu-agent's `task_move` module, not in this server).\n"
+    "- `to` must already be one of THIS MEMBER's own rooms. An unknown or "
+    "missing name never creates one — the error message IS the numbered room "
+    "list to show the member, and that list only ever contains their own "
+    "rooms (another member's room names never appear in it, and can never be "
+    "a destination, even if you already know the exact name).\n"
+    "- `project` (the source room) is required — there is no 'current "
+    "folder' on the web, same rule as recording to the tasks bowl.\n"
+    "- Bookmarks (`.pin.<machine>`) travel with the task to the new room, "
+    "unless the destination room already has that machine's bookmark on "
+    "something else — then only the source bookmark is dropped (never "
+    "silently overwriting what another machine already pinned there).\n"
+    "- Closed tasks ([완료]/[중단]) can be moved too — tidying up finished "
+    "work into the right room is a common, legitimate reason to move.\n"
+    "- If a task with the same name already exists in the destination room, "
+    "this is rejected and nothing moves (log.md is append-only; merging two "
+    "of them would make it impossible to tell which lines came from where).\n"
+    "- ⚠ Do not call this twice at once on the same task (e.g. from two open "
+    "sessions). log.md is designed for union-merge across machines/sessions "
+    "— each caller only ever appends its own lines. If one call is mid-move "
+    "while another appends to the same task's log.md in the old room, that "
+    "line either never reaches the new location or collides at the next "
+    "sync. There is no cross-call lock; this tool pushes to the member's "
+    "repo immediately after moving, to keep the danger window as short as "
+    "possible."
+)
+
+
+@mcp.tool(description=_TASK_MOVE_DESCRIPTION)
+def namu_task_move(
+    task: str,
+    to: str,
+    project: "str | None" = None,
+    ctx: Context | None = None,
+) -> "str | dict":
+    key = _resolve_user(ctx)
+    if project is None:
+        raise ValueError(_TASKS_PROJECT_REQUIRED)
+    source_root = _tasks_root_for(key, project)
+
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부
+
+        slug = _resolve_task_slug(source_root, project, task)
+
+        # 목적지 후보는 반드시 이 회원의 방만이다 — `_create_task_entry`가
+        # `project_policy.resolve_create_project`에 넘기는 `existing`과 같은
+        # 발상이다. 코어 `task_move.resolve_move_destination`은 이 목록 밖으로
+        # 절대 고르지 못한다(없으면 ValueError로 이 목록 자체를 돌려준다).
+        known = sorted(d.name for d in _task_project_dirs_for_user(key))
+        dest_project = task_move.resolve_move_destination(to, known=known, person="회원")
+        dest_root = _tasks_root_for(key, dest_project)
+
+        ts = cfg.now().strftime("%Y-%m-%d %H:%M:%S")
+        result = task_move.move_task(
+            source_root=source_root, dest_root=dest_root, slug=slug,
+            machine=cfg.NAMU_MACHINE, ts=ts,
+        )
+
+        # 옮긴 직후 곧바로 밀어 올린다 — 다른 곳이 옛 자리 log.md에 줄을 붙일 수
+        # 있는 창을 좁히는 것이 이 도구가 낼 수 있는 유일한 조치다(잠금은 없다).
+        # push 실패는 다른 쓰기 도구들과 같은 배선으로 raise하지 않고 경고로 담는다.
+        warning = _push_and_collect_warning(conn, key)
+
+    note = ""
+    if result["moved_pins"]:
+        machines = ", ".join(p["machine"] for p in result["moved_pins"])
+        note += f" 책갈피({machines})도 함께 옮겼습니다."
+    if result["dropped_pins"]:
+        machines = ", ".join(p["machine"] for p in result["dropped_pins"])
+        note += (
+            f" {dest_project!r}에 이미 책갈피가 있던 기기({machines})는 원본 책갈피만 "
+            "뗐습니다(덮어쓰지 않았습니다)."
+        )
+
+    summary = f"작업 {slug!r}를 {project!r}에서 {dest_project!r}로 옮겼습니다.{note}"
+    if warning:
+        return {"summary": summary, "warning": warning}
+    return summary
 
 
 # ---------------------------------------------------------------------------
