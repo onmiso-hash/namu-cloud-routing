@@ -43,7 +43,8 @@ _TOKENS_CSS = (
     "--radius:14px;--radius-sm:8px;"
     "--maxw:780px;--maxw-wide:1080px;"
     "}"
-    "@media (prefers-color-scheme:dark){:root{"
+    # ① 아무것도 안 고른 사람 — 컴퓨터 설정을 따른다.
+    "@media (prefers-color-scheme:dark){:root:not([data-theme=\"light\"]){"
     "--bg:#141012;--bg-soft:#1a1518;--bg-card:#1e181b;--bg-elev:#231c20;"
     "--fg:#ede9eb;--fg-soft:#b6a7af;--fg-faint:#887d83;"
     "--accent:#ba6b94;--accent-deep:#d090b1;--accent-soft:#2a1d24;"
@@ -55,6 +56,19 @@ _TOKENS_CSS = (
     "--shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px -12px rgba(0,0,0,.6);"
     "--shadow-lg:0 2px 6px rgba(0,0,0,.45),0 18px 40px -22px rgba(0,0,0,.7);"
     "}}"
+    # ② 단추로 어둡게를 고른 사람 — 컴퓨터가 밝아도 어둡다.
+    ":root[data-theme=\"dark\"]{"
+    "--bg:#141012;--bg-soft:#1a1518;--bg-card:#1e181b;--bg-elev:#231c20;"
+    "--fg:#ede9eb;--fg-soft:#b6a7af;--fg-faint:#887d83;"
+    "--accent:#ba6b94;--accent-deep:#d090b1;--accent-soft:#2a1d24;"
+    "--accent-glow:rgba(186,107,148,.12);"
+    # 어두울 때 강조색이 밝아지므로 그 위에 얹는 글자는 반대로 어두워야 한다.
+    "--on-accent:#1c0d15;"
+    "--border:#2b2227;--border-strong:#3a2f35;"
+    "--ok:#7bc193;--warn:#c1a17b;--danger:#ef8b83;"
+    "--shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px -12px rgba(0,0,0,.6);"
+    "--shadow-lg:0 2px 6px rgba(0,0,0,.45),0 18px 40px -22px rgba(0,0,0,.7);"
+    "}"
 )
 
 # ---------------------------------------------------------------------------
@@ -193,6 +207,19 @@ _CHROME_CSS = (
     ".menu a:hover{background:var(--bg-soft);color:var(--fg);}"
     ".menu a.on{color:var(--accent-deep);background:var(--accent-soft);}"
     ".topbar .btn{padding:7px 14px;font-size:.9rem;}"
+    # 밝게/어둡게 단추. **이 두 줄은 _TOKENS_CSS가 아니라 여기 있어야 한다** —
+    # 그 블록은 /design-apply가 통째로 다시 써서 갈아 끼우는 자리라, 거기 적으면
+    # 다음 디자인 교체 때 조용히 사라진다. 색이 아니라 동작에 딸린 값이므로
+    # 물감통이 아니라 부품 쪽이 제자리이기도 하다.
+    ':root[data-theme="dark"]{color-scheme:dark;}'
+    ':root[data-theme="light"]{color-scheme:light;}'
+# 크기·모서리·여백은 `.btn`에서 그대로 받는다 — 옆의 [내 페이지]와 나란히 서므로
+    # 여기서 따로 정하면 반드시 어긋난다(2026-08-15에 실제로 어긋났다).
+    # 이 규칙이 더하는 것은 셋뿐이다: 줄어들지 않게, 글꼴을 물려받게(단추는
+    # 기본으로 안 물려받는다), 좁은 화면에서 글자를 접게.
+    ".themebtn{flex:none;font-family:inherit;}"
+    ".themebtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}"
+    "@media (max-width:520px){.themebtn .lab{display:none;}}"
     "@media (max-width:720px){.topbar-in{flex-wrap:wrap;gap:8px;padding:8px 16px;}"
     ".menu{order:3;width:100%;flex:none;margin:0 -16px;padding:0 16px 6px;}"
     ".brand{flex:1;}}"
@@ -495,10 +522,18 @@ def topbar(current: str = "", cta: str = "me") -> str:
         button = ""
     else:
         button = '<a class="btn" href="/auth/me">내 페이지</a>'
+    # 처음엔 숨겨 둔다 — 자바스크립트가 살아 있을 때만 _THEME_TOGGLE_SCRIPT가
+    # 꺼낸다. 눌러도 안 듣는 단추를 보여 주지 않는 것이 요점이다.
+    theme_btn = (
+        '<button type="button" class="btn themebtn" id="themebtn" hidden '
+        'aria-label="어둡게 보기">'
+        '<span class="ico" aria-hidden="true">🌙</span>'
+        '<span class="lab">어둡게</span></button>'
+    )
     return (
         '<header class="topbar"><div class="topbar-in">'
         '<a class="brand" href="/"><span class="leaf">🌳</span>나무 클라우드</a>'
-        f'<ul class="menu">{items}</ul>{button}'
+        f'<ul class="menu">{items}</ul>{theme_btn}{button}'
         "</div></header>"
     )
 
@@ -535,6 +570,60 @@ def footer() -> str:
 
 # 스르륵 등장 — 외부 스크립트 없음. 자바스크립트가 있을 때만 감췄다가 보여주므로,
 # 스크립트가 막힌 브라우저에서는 처음부터 다 보인다(내용이 사라지지 않는다).
+# ---------------------------------------------------------------------------
+# 밝게/어둡게 단추 — 값은 이 브라우저에만 남는다(서버는 모른다).
+#
+# 상태가 셋이다: 아무것도 안 고름(컴퓨터 설정을 따름) · 밝게 고정 · 어둡게 고정.
+# 서버는 사람이 무엇을 골랐는지 모르므로 화면을 그릴 때 정할 수 없다 — 그래서
+# 아래 두 조각이 필요하다.
+#
+# _THEME_BOOT_SCRIPT는 <head> 안, 화면이 그려지기 **전에** 돈다. 뒤로 밀면
+# 밝은 화면이 한 번 번쩍이고 나서 어두워진다(흔히 말하는 '흰 섬광').
+# 단추는 자바스크립트가 꺼져 있으면 눌러도 아무 일이 없으므로 처음엔 숨겨
+# 두고, 이 조각이 살아 있을 때만 꺼낸다.
+# ---------------------------------------------------------------------------
+_THEME_KEY = "namu-theme"
+
+_THEME_BOOT_SCRIPT = (
+    "<script>"
+    "(function(){try{"
+    f"var v=localStorage.getItem('{_THEME_KEY}');"
+    "if(v==='dark'||v==='light')document.documentElement.setAttribute('data-theme',v);"
+    "}catch(e){}"
+    "document.documentElement.setAttribute('data-themejs','1');"
+    "})();"
+    "</script>"
+)
+
+_THEME_TOGGLE_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "var b=document.getElementById('themebtn');if(!b)return;"
+    "var r=document.documentElement;"
+    "b.hidden=false;"
+    # 지금 어두운가 — 고른 값이 있으면 그것, 없으면 컴퓨터 설정.
+    "function dark(){var a=r.getAttribute('data-theme');"
+    "if(a)return a==='dark';"
+    "return window.matchMedia('(prefers-color-scheme:dark)').matches;}"
+    "function paint(){var d=dark();"
+    "b.querySelector('.ico').textContent=d?'\\u2600\\ufe0f':'\\ud83c\\udf19';"
+    "b.querySelector('.lab').textContent=d?'\\ubc1d\\uac8c':'\\uc5b4\\ub460\\uac8c';"
+    "b.setAttribute('aria-label',(d?'\\ubc1d\\uac8c':'\\uc5b4\\ub460\\uac8c')+' \\ubcf4\\uae30');}"
+    "paint();"
+    "b.addEventListener('click',function(){"
+    "var n=dark()?'light':'dark';"
+    "r.setAttribute('data-theme',n);"
+    f"try{{localStorage.setItem('{_THEME_KEY}',n);}}catch(e){{}}"
+    "paint();});"
+    # 아직 아무것도 안 고른 사람은 컴퓨터 설정을 그대로 따라간다 — 그 설정이
+    # 도중에 바뀌면 단추 글자도 같이 바뀌어야 말이 맞는다.
+    "try{window.matchMedia('(prefers-color-scheme:dark)')"
+    ".addEventListener('change',function(){if(!r.getAttribute('data-theme'))paint();});"
+    "}catch(e){}"
+    "})();"
+    "</script>"
+)
+
 _REVEAL_SCRIPT = (
     "<script>"
     "(function(){"
@@ -751,8 +840,10 @@ def page(
         '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)}</title>{meta}{_FAVICON}"
+        f"{_THEME_BOOT_SCRIPT}"
         f"<style>{SITE_CSS}</style></head>"
         f"<body>{topbar(current, cta)}{inner}{footer()}"
+        f"{_THEME_TOGGLE_SCRIPT}"
         f"{_REVEAL_SCRIPT if reveal else ''}"
         f"{ask_widget() if ask else ''}</body></html>"
     )

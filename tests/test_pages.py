@@ -159,11 +159,20 @@ def test_safety_page_tells_where_the_ai_guide_sends_what_you_type():
 
 
 def test_faq_does_not_promise_prices_or_dates():
-    """확인하지 않은 것을 적으면 그 순간 서비스의 약속이 된다."""
+    """확인하지 않은 것을 적으면 그 순간 서비스의 약속이 된다.
+
+    2026-08-15에 '돈이 드나요?'를 '무료인가요?'로 바꾸면서 "요금제는 아직 정해진
+    것이 없으며, 생기면 미리 알려 드립니다"라는 문장을 뺐다. 그 문장은 약속이
+    아니었지만 **앞으로의 요금을 화제로 올렸고**, 아직 값을 매길 단계가 아닌
+    서비스에서 그 화제는 오히려 경계를 부른다는 사용자 판단이다.
+
+    그래서 이 검사가 못 박던 문장 하나는 풀되, 지키던 것은 그대로 둔다 —
+    기한도, 영원한 무료도 약속하지 않는다.
+    """
     out = pages.faq_page(False)
 
-    assert "요금제는 아직 정해진 것이 없" in out
-    for word in ("평생 무료", "영원히 무료", "곧 출시"):
+    assert "무료" in out
+    for word in ("평생 무료", "영원히 무료", "계속 무료", "곧 출시", "곧 유료"):
         assert word not in out
 
 

@@ -264,3 +264,68 @@ def test_ask_button_says_what_it_is_instead_of_leaving_a_lone_icon(ai_key_on):
     assert ">물어보기<" in out, "넓은 화면에서 읽을 글자가 단추에 없다"
     # 좁은 화면에서는 글자를 접으므로, 그때도 이름이 읽히도록 남겨 둔다.
     assert 'aria-label="나무에게 물어보기"' in out
+
+
+# ---------------------------------------------------------------------------
+# 밝게/어둡게 단추
+# ---------------------------------------------------------------------------
+
+
+def test_theme_tokens_cover_all_three_states():
+    """색이 세 갈래로 다 적혀 있어야 단추가 양쪽으로 듣는다.
+
+    ①안 고른 사람(컴퓨터 설정) ②어둡게 고른 사람 ③컴퓨터가 어두운데 밝게 고른
+    사람. 셋 중 하나라도 빠지면 단추가 한쪽 방향으로만 듣는다 — 화면은 멀쩡해
+    보여서 눈으로는 잘 안 잡힌다. /design-apply가 이 블록을 통째로 다시 쓰므로
+    그 도구가 옛 두 갈래 방식으로 되돌아가는 것도 여기서 걸린다.
+    """
+    css = ui._TOKENS_CSS
+
+    assert '@media (prefers-color-scheme:dark){:root:not([data-theme="light"])' in css
+    assert ':root[data-theme="dark"]{' in css
+    # 어두운 값은 두 곳에 똑같이 있어야 한다 — 한쪽만 고치면 단추로 켠 어두운
+    # 화면과 컴퓨터 설정을 따른 어두운 화면의 색이 갈린다.
+    assert css.count("--accent-glow:rgba") == 3
+
+
+def test_theme_button_is_in_the_topbar_and_starts_hidden():
+    """단추는 자바스크립트가 살아 있을 때만 나온다 — 눌러도 안 듣는 단추를
+    보여 주지 않는다."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert 'id="themebtn"' in out
+    assert "hidden" in out[out.index('id="themebtn"') - 80 : out.index('id="themebtn"') + 80]
+    assert "themebtn" in ui._THEME_TOGGLE_SCRIPT
+
+
+def test_theme_button_wears_the_same_clothes_as_the_button_beside_it():
+    """크기·모서리·여백을 `.btn`에서 받아야 옆의 [내 페이지]와 나란히 선다.
+
+    처음에는 `.themebtn`이 그 값들을 따로 갖고 있었고, 그래서 옆 단추보다
+    작았다(사용자가 보자마자 짚었다). 값을 두 곳에 두면 한쪽만 바뀌는 날이
+    반드시 오므로 아예 안 갖는 쪽으로 고쳤다.
+    """
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert 'class="btn themebtn"' in out
+    # 크기에 관한 값은 .themebtn 쪽에 있으면 안 된다.
+    for forbidden in ("padding:", "font-size:", "border-radius:"):
+        assert f".themebtn{{" not in ui._CHROME_CSS or forbidden not in (
+            ui._CHROME_CSS.split(".themebtn{")[1].split("}")[0]
+        ), f".themebtn이 {forbidden}를 따로 정하고 있다"
+
+
+def test_theme_choice_is_read_before_the_page_is_painted():
+    """고른 값을 읽는 조각이 <style>보다 앞, 그러니까 <head> 안에 있어야 한다.
+    뒤로 밀면 밝은 화면이 한 번 번쩍이고 나서 어두워진다."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert out.index(ui._THEME_BOOT_SCRIPT) < out.index("<style>")
+    assert out.index("<style>") < out.index("<body>")
+
+
+def test_theme_choice_never_leaves_this_browser():
+    """무엇을 골랐는지는 서버로 보내지 않는다 — 이 브라우저에만 남는다."""
+    assert "localStorage" in ui._THEME_BOOT_SCRIPT
+    assert "fetch(" not in ui._THEME_TOGGLE_SCRIPT
+    assert "XMLHttpRequest" not in ui._THEME_TOGGLE_SCRIPT
