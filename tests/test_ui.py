@@ -48,6 +48,27 @@ def test_shell_pulls_nothing_from_another_server():
     # 스크립트는 파일을 받아오지 않고 페이지 안에 통째로 들어 있어야 한다.
     for tag in re.findall(r"<script\b[^>]*>", out):
         assert "src=" not in tag, f"바깥 스크립트를 받아온다: {tag}"
+    # CSS 안에서도 마찬가지다. 위의 태그 검사는 `href="…"`·`src="…"` 모양만
+    # 보므로 `url(…)`은 걸리지 않는다 — 글꼴이 들어오면서 이 길이 처음 생겼다.
+    for ref in re.findall(r"url\(\s*['\"]?([^)'\"]+)", out):
+        assert not ref.startswith(("http://", "https://", "//")), (
+            f"CSS가 바깥에서 받아온다: {ref}"
+        )
+
+
+def test_the_font_comes_from_our_own_address():
+    """글꼴 파일 주소는 내보내는 쪽(web_auth 라우트·디스패처)과 같은 목록에서
+    와야 한다. 여기에 주소를 손으로 적으면 한쪽만 고쳐져 글꼴이 404가 되는데,
+    화면은 시스템 글꼴로 멀쩡히 떠서 아무도 눈치채지 못한다."""
+    out = ui.page("제목", "<p>본문</p>")
+
+    assert "@font-face" in out
+    for path in ui.ASSET_PATHS:
+        assert f"url({path})" in out, f"{path}를 부르지 않는다"
+    # 글꼴을 받는 동안에도 글이 먼저 보여야 한다.
+    assert "font-display:swap" in out
+    # 못 받았을 때를 대비해 시스템 글꼴이 뒤에 남아 있어야 한다.
+    assert "Malgun Gothic" in out and ui.FONT_FAMILY in out
 
 
 def test_footer_leads_back_into_the_site_and_out_to_the_guides():

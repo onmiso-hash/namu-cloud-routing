@@ -14,6 +14,7 @@ import asyncio
 import re
 import sqlite3
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -21,6 +22,7 @@ from starlette.testclient import TestClient
 
 import identity
 import routing_server as rs
+import ui
 import web_auth as wa
 
 
@@ -2487,3 +2489,38 @@ def test_attachments_tab_without_any_file_says_none(client, monkeypatch, tmp_pat
 
     assert r.status_code == 200
     assert "아직 올리신 파일이 없습니다" in r.text
+
+
+# ---------------------------------------------------------------------------
+# 글꼴 파일 내보내기 (namu-75)
+#
+# 이 앱이 파일을 그대로 내보내는 유일한 자리다. 목록에 적힌 것만 나가야 하고,
+# 목록과 실제 라우트가 어긋나면 글꼴만 조용히 404가 된다(화면은 시스템 글꼴로
+# 계속 떠서 아무도 모른다) — 그래서 여기서 못박는다.
+# ---------------------------------------------------------------------------
+def test_every_listed_font_file_is_actually_served(client):
+    assert ui.ASSET_PATHS, "내보낼 파일 목록이 비었다"
+    for path in ui.ASSET_PATHS:
+        r = client.get(path)
+        assert r.status_code == 200, f"{path}가 안 나온다"
+        assert r.headers["content-type"] == "font/woff2"
+        # 파일 이름이 곧 내용이므로 다시 물어볼 이유가 없다.
+        assert "immutable" in r.headers["cache-control"]
+        # woff2 파일의 첫 네 글자는 언제나 'wOF2'다 — 엉뚱한 파일이 아닌지.
+        assert r.content[:4] == b"wOF2"
+
+
+def test_font_files_exist_in_the_repo(client):
+    """파일이 저장소에 없으면 404가 되는데, 화면은 시스템 글꼴로 멀쩡히 떠서
+    배포하고 한참 뒤에야 눈치챈다. 이미지에 안 들어간 경우도 같은 모양이다."""
+    for path in ui.ASSET_PATHS:
+        assert (wa._ASSET_DIR / Path(path).name).is_file(), f"{path} 파일이 없다"
+
+
+def test_font_route_does_not_open_the_folder_underneath(client):
+    """폴더를 통째로 여는 것(StaticFiles)이 아니라 목록에 적은 것만 연다 —
+    같은 폴더의 사용 조건 파일조차 주소로는 나가지 않아야 한다."""
+    assert (wa._ASSET_DIR / "OFL.txt").is_file(), "사용 조건 원문을 같이 두어야 한다"
+
+    for path in ["/asset/OFL.txt", "/asset/../web_auth.py", "/asset/"]:
+        assert client.get(path).status_code == 404, f"{path}가 열렸다"

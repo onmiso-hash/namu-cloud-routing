@@ -49,12 +49,14 @@ import secrets
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from urllib.parse import urlencode
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
@@ -1445,6 +1447,41 @@ def _session_user_key(request: Request) -> "str | None":
 # 세션이 위조·만료됐어도 공개 페이지는 그냥 "로그인 안 한 사람"으로 그린다 —
 # 이 화면들은 회원 정보를 한 글자도 싣지 않으므로 거절할 이유가 없다.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 글꼴 파일 내보내기 (namu-75)
+#
+# 이 앱에서 **파일을 그대로 내보내는 유일한 자리**다. StaticFiles를 통째로
+# 붙이지 않는 이유: 디렉터리를 열면 그 아래 무엇이 들어와도 같이 나가는데,
+# 여기는 회원의 기억을 다루는 서버라 "그 아래 전부"라는 문을 만들지 않는다.
+# 내보낼 파일을 `ui.ASSET_PATHS`에 이름으로 적고, 그 목록에 있는 것만 연다.
+#
+# 캐시를 1년으로 길게 잡는 근거: 파일 이름이 곧 내용이다(글꼴을 바꾸면 이름도
+# 바뀐다). 같은 이름이면 같은 파일이므로 다시 물어볼 이유가 없다 — 그래서
+# immutable을 붙인다. 이게 없으면 페이지를 옮길 때마다 260KB를 다시 받는다.
+# ---------------------------------------------------------------------------
+_ASSET_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+def _asset_file(path: str):
+    # 주소에서 파일 이름만 떼어 쓴다 — 주소 자체를 경로로 이어 붙이지 않으므로
+    # `..` 같은 조작이 상위 폴더로 나갈 길이 없다.
+    target = _ASSET_DIR / Path(path).name
+
+    async def handler(request: Request) -> Response:
+        if not target.is_file():
+            # 이미지에 파일이 안 들어간 경우 — 화면은 시스템 글꼴로 계속 뜬다.
+            return PlainTextResponse("not found", status_code=404)
+        return FileResponse(
+            target,
+            media_type="font/woff2",
+            headers={"Cache-Control": _ASSET_CACHE},
+        )
+
+    handler.__name__ = f"asset_{target.name.replace('.', '_').replace('-', '_')}"
+    return handler
+
+
 def _public_page(path: str):
     render = pages.PAGES[path]
 
@@ -2652,8 +2689,14 @@ def build_auth_app() -> Starlette:
     public_routes = [
         Route(path, _public_page(path), methods=["GET"]) for path in pages.PAGES
     ]
+    # 글꼴 파일도 같은 이유로 목록을 손으로 다시 적지 않는다 — routing_server의
+    # 문(`ui.ASSET_PATHS`)과 여기가 어긋나면 글꼴만 조용히 404가 된다.
+    asset_routes = [
+        Route(path, _asset_file(path), methods=["GET"]) for path in ui.ASSET_PATHS
+    ]
     return Starlette(
         routes=public_routes
+        + asset_routes
         + [
             Route("/auth/github/login", login, methods=["GET"]),
             Route("/auth/github/install", install, methods=["GET"]),

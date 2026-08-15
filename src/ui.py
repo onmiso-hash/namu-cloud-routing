@@ -58,6 +58,56 @@ _TOKENS_CSS = (
 )
 
 # ---------------------------------------------------------------------------
+# 1-2. 글꼴 — 우리 서버가 직접 내보낸다.
+#
+# **왜 바깥 글꼴 서버를 안 쓰나.** 기억을 다루는 화면이라 제3자 서버로 요청이
+# 새는 경로를 만들지 않는다(test_ui.test_shell_pulls_nothing_from_another_server).
+# 글꼴 CDN은 방문자의 IP와 어느 페이지를 봤는지를 그 회사에 넘긴다.
+#
+# **왜 파일을 안 고치나.** 제작자가 낸 파일을 한 바이트도 안 고치고 그대로
+# 내보낸다. 사용 조건(OFL 1.1)은 고치는 것도 허락하지만 — 이 글꼴은 이름을
+# 묶어두는 조항(Reserved Font Name)이 없다 — 안 고치면 "우리가 뭘 건드렸나"를
+# 따질 일 자체가 없다. 실측으로도 자를 게 없었다: 한자·가나가 애초에 안 들어
+# 있어 우리말과 라틴만 남겨도 1,259KB → 1,207KB로 52KB밖에 안 줄었다.
+# 사용 조건 원문은 src/assets/fonts/OFL.txt.
+#
+# **왜 파일 하나인가.** 굵기가 축으로 들어 있는 가변 글꼴이라 한 파일이
+# 400~900을 다 낸다. 고정 굵기로 뽑으면 400이 574KB·700이 667KB로 **합쳐서 더
+# 무겁고**(1,241KB), 화면에 쓰는 600·800은 가장 가까운 굵기로 밀려 그려진다.
+# 한 파일이 더 가볍고 더 정확하다.
+#
+# **한글이 전부 들어 있다(11,172자).** 기억 화면에는 회원이 쓴 아무 글자나
+# 나오므로 빠지는 글자가 있으면 그 글자만 다른 글꼴로 떨어져 한 낱말이 두
+# 글꼴로 보인다. 흔한 글자만 담은 판(2,000자대)은 절반 무게지만 그 위험이 있다.
+#
+# **font-display:swap** — 글꼴이 오기 전에도 시스템 글꼴로 글이 먼저 보인다.
+# 이게 없으면 글꼴을 받는 동안 글자가 통째로 안 보인다.
+# ---------------------------------------------------------------------------
+FONT_FAMILY = "Wanted Sans"
+
+# 글꼴 파일을 내보낼 주소. 디스패처가 웹 쪽으로 보내야 하므로 ui가 원본을 쥔다
+# (메뉴와 같은 이유 — 두 곳에 적으면 한쪽만 고쳐진다).
+ASSET_PATHS = ("/asset/wanted-sans-variable.woff2",)
+
+_FONT_CSS = (
+    "@font-face{"
+    f"font-family:'{FONT_FAMILY}';font-style:normal;"
+    # 가변 글꼴이라 굵기를 범위로 적는다. 하나만 적으면 나머지 굵기에서
+    # 브라우저가 가짜 굵게를 그린다(획이 뭉개진다).
+    "font-weight:100 900;"
+    f"font-display:swap;src:url({ASSET_PATHS[0]}) format('woff2');"
+    "}"
+)
+
+# 시스템 글꼴 목록을 뒤에 그대로 남긴다 — 글꼴을 못 받았을 때(느린 망·차단)도
+# 한글이 깨지지 않아야 한다.
+_FONT_STACK = (
+    f"'{FONT_FAMILY}',-apple-system,BlinkMacSystemFont,'Segoe UI','Malgun Gothic',"
+    "'Apple SD Gothic Neo',Roboto,Helvetica,Arial,sans-serif"
+)
+
+
+# ---------------------------------------------------------------------------
 # 2. 본문 기본기. 여기 있는 규칙은 전부 실측으로 필요해진 것들이다.
 #  - viewport(page()에 있음): 없으면 모바일이 데스크톱 폭을 가정해 축소해 그린다.
 #  - overflow-wrap/word-break: 접속 주소는 공백 없는 100자 한 덩어리라 줄바꿈
@@ -68,8 +118,7 @@ _BASE_CSS = (
     "html{scroll-behavior:smooth;}"
     "body{margin:0;background:var(--bg);color:var(--fg);line-height:1.75;"
     "font-size:16.5px;letter-spacing:-.003em;"
-    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Malgun Gothic',"
-    "'Apple SD Gothic Neo',Roboto,Helvetica,Arial,sans-serif;"
+    f"font-family:{_FONT_STACK};"
     "-webkit-font-smoothing:antialiased;}"
     ".wrap{max-width:var(--maxw);margin:0 auto;padding:36px 20px 8px;}"
     ".wrap-wide{max-width:var(--maxw-wide);margin:0 auto;padding:0 20px;}"
@@ -383,7 +432,13 @@ _ASK_CSS = (
 )
 
 SITE_CSS = (
-    _TOKENS_CSS + _BASE_CSS + _CHROME_CSS + _COMPONENT_CSS + _PUBLIC_CSS + _ASK_CSS
+    _FONT_CSS
+    + _TOKENS_CSS
+    + _BASE_CSS
+    + _CHROME_CSS
+    + _COMPONENT_CSS
+    + _PUBLIC_CSS
+    + _ASK_CSS
 )
 
 

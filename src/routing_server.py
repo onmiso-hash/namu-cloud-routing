@@ -2182,6 +2182,16 @@ class _PerUserSecretDispatcher:
 # 없다 — 메뉴에 없는 공개 경로도, 문이 안 열린 메뉴도 생기지 않는다.
 _PUBLIC_PATHS = frozenset(ui.PUBLIC_PATHS)
 
+# 화면이 아니라 파일(글꼴)을 내보내는 주소. 공개 페이지와 **따로 둔다** —
+# 합치면 "메뉴 = 공개 경로"라는 규칙이 흐려져, 메뉴에 없는 경로가 슬금슬금
+# 늘어나도 아무도 눈치채지 못한다. 문을 여는 검사는 아래에서 둘을 합쳐 쓰되,
+# 목록 자체는 각자의 이유를 갖고 따로 산다.
+_ASSET_PATHS = frozenset(ui.ASSET_PATHS)
+
+# 웹 앱으로 보낼 정확한 주소 전부. `startswith`가 아니라 `in`으로 보는 성질은
+# 그대로다 — 목록에 적힌 그 글자가 아니면 종전대로 닫히는 쪽(MCP+인증)으로 간다.
+_WEB_PATHS = _PUBLIC_PATHS | _ASSET_PATHS
+
 
 class _AuthOrMcpDispatcher:
     """`/auth/`(웹 로그인) vs 그 외 전부(MCP+Auth)를 가르는 순수 ASGI 3-인자
@@ -2209,6 +2219,8 @@ class _AuthOrMcpDispatcher:
     `/faq/../mcp` 같은 조작에 문이 열릴 여지가 생기지만, `==`로 보면 목록에 적힌
     그 글자 그대로가 아닌 모든 요청은 종전대로 닫히는 방향(MCP+인증)으로 간다.
     목록은 `ui.PUBLIC_PATHS` 한 곳에서 온다(메뉴와 문이 어긋나지 않게).
+    글꼴 파일 주소(`ui.ASSET_PATHS`)도 같은 방식으로 — 정확히 일치하는 것만 —
+    웹 쪽에 보낸다. 화면이 아니라 파일이지만 여는 방식은 다를 이유가 없다.
 
     티켓 주소(`/u/…`·`/d/…`)도 웹 쪽으로 보낸다. 여기서는 접두어로 가르는데,
     위에서 공개 페이지를 `==`로만 연 것과 어긋나 보이지만 판단 근거는 같다 —
@@ -2226,7 +2238,7 @@ class _AuthOrMcpDispatcher:
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
         if scope["type"] == "http":
-            if path.startswith("/auth/") or path in _PUBLIC_PATHS:
+            if path.startswith("/auth/") or path in _WEB_PATHS:
                 await self.auth_app(scope, receive, send)
                 return
             if ticket_web.is_ticket_path(path):

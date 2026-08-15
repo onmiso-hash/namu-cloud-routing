@@ -1281,6 +1281,49 @@ def test_public_paths_and_menu_never_drift_apart():
     assert rs._PUBLIC_PATHS == frozenset(path for path, _label in ui.MENU)
 
 
+# ---------------------------------------------------------------------------
+# 글꼴 파일 주소(namu-75) — 화면이 아니라 파일을 내보내는 유일한 문이다.
+# 여는 방식은 공개 페이지와 똑같아야 한다(정확히 일치하는 것만).
+# ---------------------------------------------------------------------------
+def test_dispatcher_opens_the_font_files_to_the_web_app():
+    import ui
+
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket")))
+
+    assert ui.ASSET_PATHS, "내보낼 파일 목록이 비었다"
+    for path in ui.ASSET_PATHS:
+        assert client.get(path).text == "auth", f"글꼴 주소 {path!r}가 안 열렸다"
+
+
+def test_font_paths_are_matched_exactly_not_by_prefix():
+    """파일 주소도 접두어로 열면 안 된다 — 한 글자라도 다르면 닫히는 쪽으로."""
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket")))
+
+    for path in [
+        "/asset",
+        "/asset/",
+        "/asset/pretendard-regular.woff2/mcp",
+        "/asset/../mcp",
+        "/asset/pretendard-regular.woff",
+        "/ASSET/pretendard-regular.woff2",
+    ]:
+        assert client.get(path).text == "mcp", f"{path!r}가 파일 쪽으로 새어 나갔다"
+
+
+def test_font_paths_stay_out_of_the_public_page_list():
+    """파일 주소를 공개 페이지 목록에 섞지 않는다 — 섞으면 '메뉴 = 공개 경로'
+    라는 규칙이 흐려져, 메뉴에 없는 경로가 늘어나도 아무도 눈치채지 못한다."""
+    import ui
+
+    assert not (rs._PUBLIC_PATHS & rs._ASSET_PATHS)
+    assert rs._WEB_PATHS == rs._PUBLIC_PATHS | rs._ASSET_PATHS
+    assert rs._ASSET_PATHS == frozenset(ui.ASSET_PATHS)
+
+
 def test_dispatcher_default_is_the_authenticated_side():
     """디스패처 생성 시 mcp_app 자리에 실제 AuthMiddleware를 넣으면, '/auth/'가
     아닌 모든 요청이 여전히 인증을 요구해야 한다 — 기본값이 안전한 쪽인지
