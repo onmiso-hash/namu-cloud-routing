@@ -2387,6 +2387,17 @@ def main() -> None:
     except ValueError as exc:
         raise ValueError(f"NAMU_HTTP_PORT 값이 정수가 아닙니다: {port_raw!r}") from exc
 
+    # 요청을 받기 **전에** 앞 세대가 남긴 죽은 git 잠금을 치운다. 지금은 이
+    # 컨테이너 안에 우리 git 프로세스가 하나도 없으므로, 남아 있는 잠금은 나이와
+    # 무관하게 전부 죽은 것이다(근거는 user_repo.clear_locks_at_startup 문서).
+    # 재시작 도중 끊긴 git이 남긴 잠금 탓에 그 사용자의 기억 쓰기가 통째로 막히던
+    # 사고를 여기서 0분 만에 끊는다.
+    try:
+        user_repo.clear_locks_at_startup()
+    except Exception:
+        # 청소가 실패해도 서버는 떠야 한다 — 거들기이지 기동 관문이 아니다.
+        logger.exception("기동 시 git 잠금 청소에 실패했습니다(서버는 계속 기동합니다)")
+
     app = build_app()
 
     import uvicorn

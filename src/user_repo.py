@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import github_app
@@ -212,6 +213,120 @@ def _run_git(
             f"git 명령 실패(exit={proc.returncode}): git {cmd_desc}\n{output}"
         )
     return proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# 죽은 git 잠금 치우기
+# ---------------------------------------------------------------------------
+# git은 index나 ref를 고칠 때 `.git` 아래에 `*.lock` 파일을 만들고 끝나면 지운다.
+# 그 도중에 프로세스가 사라지면(컨테이너 재시작·강제 종료) 잠금만 남는다. 그
+# 순간부터 그 사용자의 기억 쓰기는 **전부** 막히고, 사람이 서버에 들어가 손으로
+# 지워야만 풀린다.
+#
+# 실제 사고(2026-08-21): 잠금 생성 11:09:27 / 컨테이너 시작 11:09:57 — 잠금이
+# 재시작보다 30초 앞섰다. 앞 세대가 남긴 잠금이 새 세대까지 살아남은 것이고, 그때
+# 이 컨테이너 안의 git 프로세스는 0개였다(ps로 확인). 완전히 죽은 잠금이었다.
+#
+# 나무 코어(vendor/namu-agent/namu-plugin/startup_sync.py)에 같은 일을 하는 함수가
+# 있지만 import하지 않고 여기에 복제해 둔다 — 이유는 `ATTACH_DIR_NAME`·`_USER_KEY_RE`와
+# 같다: user_repo는 vendor를 sys.path에 얹지 않는 계층이다. 두 구현이 어긋나면
+# tests/test_user_repo.py의 계약 검사가 잡는다.
+#
+# ## 왜 5분인가 — 코어 기본값(1시간)을 그대로 쓰지 않는 이유
+#
+# "갓 생긴 잠금은 지금 돌고 있는 git의 것일 수 있으니 손대지 않는다"는 원칙은 코어와
+# 같다. 다른 것은 숫자의 근거다. 이 서버에서 git을 부르는 유일한 지점은 `_run_git`이고
+# 거기에는 `_GIT_TIMEOUT_SEC`(120초) 제한이 걸려 있다. 즉 **살아 있는 우리 git이 쥔
+# 잠금은 120초를 넘길 수 없다** — 그 시각에 subprocess가 죽기 때문이다. 5분은 그 한계에
+# 넉넉한 여유를 얹은 값이다. 코어의 1시간을 그대로 쓰면 위 사고(막혔을 때 잠금 나이가
+# 6~9분이었다)는 그대로 재현되고, 그 사용자는 한 시간 동안 기억을 못 쓴다.
+STALE_LOCK_AGE_SECONDS = 300.0
+
+
+def _git_lock_files(home: "Path | str") -> list[Path]:
+    """`.git` 아래 **모든** `*.lock`. 바로 아래만 보면 안 되는 게 이 함수의 존재
+    이유다 — 사고 때 사람을 두 번 막은 `refs/heads/main.lock`은 하위 폴더에 있었다."""
+    git_dir = Path(home) / ".git"
+    if not git_dir.is_dir():
+        return []
+    try:
+        return sorted(p for p in git_dir.rglob("*.lock") if p.is_file())
+    except Exception:
+        return []
+
+
+def clear_stale_git_locks(
+    home: "Path | str", max_age_seconds: float = STALE_LOCK_AGE_SECONDS
+) -> list[str]:
+    """나이가 `max_age_seconds`를 넘긴 git 잠금만 지우고, 지운 경로 목록을 돌려준다.
+
+    지우지 못한 잠금(권한 등)은 조용히 건너뛴다 — 여기서 예외를 밖으로 내보내면
+    청소가 실패했다는 이유로 **원래 되던 git 작업까지** 막히기 때문이다. 청소는
+    거들기이지 관문이 아니다.
+    """
+    removed: list[str] = []
+    now = time.time()
+    for lock in _git_lock_files(home):
+        try:
+            age = now - lock.stat().st_mtime
+        except Exception:
+            continue
+        if age < max_age_seconds:
+            continue
+        try:
+            lock.unlink()
+        except Exception:
+            continue
+        removed.append(str(lock.relative_to(Path(home))))
+    return removed
+
+
+def _clear_stale_locks_before_git(home: "Path | str", user_key: str, at: str) -> None:
+    """저장소를 만지기 직전에 부르는 자리 — 지운 게 있을 때만 로그를 남긴다.
+
+    조용히 지우면 안 된다: 잠금이 남았다는 것은 앞선 요청이 비정상 종료했다는 뜻이라,
+    사고를 되짚을 때 이 줄이 유일한 단서가 된다.
+    """
+    removed = clear_stale_git_locks(home)
+    if removed:
+        logger.warning(
+            "사용자(%s) 저장소에서 죽은 git 잠금 %d개를 치웠습니다(%s): %s — "
+            "앞선 요청이 git 작업 도중 비정상 종료했다는 뜻입니다.",
+            user_key, len(removed), at, ", ".join(removed),
+        )
+
+
+def clear_locks_at_startup() -> list[str]:
+    """서버가 뜰 때 **모든** 사용자 사본의 git 잠금을 나이와 무관하게 치운다.
+
+    나이 기준이 0인 이유: 이 시점에는 우리 git 프로세스가 하나도 없다(아직 요청을
+    받기 전이다). 그러므로 여기 남아 있는 잠금은 전부 앞 세대가 죽으면서 남긴 것이고,
+    살아 있는 잠금과 헷갈릴 여지가 원천적으로 없다. 위 5분 기준과 자리를 나눠 둔
+    이유가 이것이다 — 요청 중에는 **같은 사용자의 다른 요청**이 진짜로 git을 돌리고
+    있을 수 있어서, 거기에 0초를 쓰면 살아 있는 잠금을 지워 그 요청을 깨뜨린다.
+
+    돌려주는 값은 지운 경로 목록(`users/<키>/...` 형태)이다. 볼륨이 아직 없거나
+    사용자가 하나도 없으면 빈 목록.
+    """
+    try:
+        users_root = store_root() / "users"
+    except RuntimeError:
+        return []
+    if not users_root.is_dir():
+        return []
+
+    removed: list[str] = []
+    for entry in sorted(users_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        for rel in clear_stale_git_locks(entry, max_age_seconds=0.0):
+            removed.append(f"users/{entry.name}/{rel}")
+    if removed:
+        logger.warning(
+            "기동 청소 — 앞 세대가 남긴 죽은 git 잠금 %d개를 치웠습니다: %s",
+            len(removed), ", ".join(removed),
+        )
+    return removed
 
 
 # git push가 non-fast-forward로 거부할 때 stderr에 남기는 마커 문자열.
@@ -401,6 +516,10 @@ def ensure_ready(conn, user_key: str) -> Path:
     """
     record = _require_connected(conn, user_key)
     target = user_dir(user_key)
+    # 앞선 요청이 git 도중에 죽어 남긴 잠금을 먼저 치운다 — 안 치우면 아래 fetch가
+    # `Unable to create '.../index.lock': File exists`로 죽고, 그 사용자는 사람이
+    # 손을 대기 전까지 기억을 쓸 수 없다(실제 사고 2026-08-21).
+    _clear_stale_locks_before_git(target, user_key, at="ensure_ready")
     token = github_app.installation_token(record["installation_id"])
     url = _authenticated_url(record["repo_full_name"], token)
 
@@ -610,6 +729,9 @@ def push(conn, user_key: str, message: str = DEFAULT_COMMIT_MESSAGE) -> bool:
             f"사용자({user_key})의 로컬 사본이 없습니다 — ensure_ready()를 먼저 "
             "호출하세요. Local copy is missing: call ensure_ready() first."
         )
+
+    # ensure_ready와 같은 이유 — 여기서도 add/commit/push가 잠금을 잡는다.
+    _clear_stale_locks_before_git(target, user_key, at="push")
 
     _exclude_local_only_cache_paths(target)
 

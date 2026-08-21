@@ -967,3 +967,143 @@ def test_attach_isolation_is_idempotent_across_calls(conn, fake_token, local_rem
     assert (target / ".git" / "config").read_text() == first, "반복 호출이 설정을 계속 바꾼다"
     assert ur.attach_isolation_active(target)
     assert not (target / "attach_file").exists()
+
+
+# ---------------------------------------------------------------------------
+# 죽은 git 잠금 치우기 (cloud-stale-git-lock)
+# ---------------------------------------------------------------------------
+def _age_file(path, seconds: float) -> None:
+    """파일의 수정 시각을 `seconds`초 전으로 되돌린다 — 잠금의 '나이'를 만드는
+    유일한 방법이다(청소 판정이 mtime만 본다)."""
+    import os
+    import time as _time
+
+    moment = _time.time() - seconds
+    os.utime(path, (moment, moment))
+
+
+def _make_lock_fixture(root):
+    """청소 대상이 섞여 있는 `.git` 한 벌 — 오래된 잠금 2개(하나는 하위 폴더),
+    갓 생긴 잠금 1개, 잠금이 아닌 파일 1개."""
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    stale = root / ".git" / "index.lock"
+    deep = root / ".git" / "refs" / "heads" / "main.lock"
+    fresh = root / ".git" / "fresh.lock"
+    plain = root / ".git" / "HEAD"
+    for f in (stale, deep, fresh):
+        f.write_text("")
+    plain.write_text("ref: refs/heads/main\n")
+    _age_file(stale, 3000)
+    _age_file(deep, 3000)
+    return root
+
+
+def test_clear_stale_git_locks_matches_core_implementation(tmp_path):
+    """잠금 청소 계약 — 나무 코어(vendor)와 이 방의 복제본이 같은 판정을 해야 한다.
+
+    `ATTACH_DIR_NAME`과 같은 이유로 코어를 import하지 않고 복제했으므로(user_repo는
+    vendor를 sys.path에 얹지 않는 계층), 한쪽만 바뀌었을 때 여기서 잡는다. 문자열
+    비교가 아니라 **같은 폴더 두 벌에 각각 돌려 결과를 맞춰 보는** 방식이다 — 구현이
+    달라도 판정이 같으면 계약은 지켜진 것이기 때문이다.
+    """
+    import routing_server  # noqa: F401 — vendor/namu-plugin을 sys.path에 얹는다
+    import startup_sync as core_sync
+
+    ours = _make_lock_fixture(tmp_path / "ours")
+    theirs = _make_lock_fixture(tmp_path / "theirs")
+
+    mine = ur.clear_stale_git_locks(ours, max_age_seconds=600)
+    core = core_sync.clear_stale_git_locks(theirs, max_age_seconds=600)
+
+    assert mine, "오래된 잠금을 하나도 안 지웠다면 이 검사는 아무것도 확인하지 못한다"
+    assert mine == core, f"코어와 판정이 갈렸다: 클라우드={mine} 코어={core}"
+    left_ours = sorted(p.name for p in (ours / ".git").rglob("*") if p.is_file())
+    left_theirs = sorted(p.name for p in (theirs / ".git").rglob("*") if p.is_file())
+    assert left_ours == left_theirs
+    assert left_ours == ["HEAD", "fresh.lock"], "갓 생긴 잠금이나 잠금 아닌 파일까지 건드렸다"
+
+
+def test_clear_stale_git_locks_ignores_missing_git_dir(tmp_path):
+    """`.git`이 없는 폴더에서도 조용히 빈 목록 — 청소는 관문이 아니라 거들기다."""
+    (tmp_path / "empty").mkdir()
+    assert ur.clear_stale_git_locks(tmp_path / "empty") == []
+
+
+def test_stale_lock_age_is_above_git_timeout():
+    """5분 기준의 근거 — 살아 있는 우리 git이 쥔 잠금은 `_GIT_TIMEOUT_SEC`(120초)를
+    넘길 수 없다. 기준을 그 아래로 내리면 살아 있는 잠금을 지우게 된다."""
+    assert ur.STALE_LOCK_AGE_SECONDS > ur._GIT_TIMEOUT_SEC
+
+
+def test_ensure_ready_clears_stale_lock(conn, fake_token, local_remote, bare_repo, tmp_path):
+    """실제 사고 재현 — 앞 세대가 남긴 `index.lock`이 있으면 `reset --hard`가
+    `File exists`로 죽어 그 사용자의 기억이 통째로 막힌다. 이제는 스스로 치운다."""
+    key = _connect_user(conn, 70, "stale-lock")
+    target = ur.ensure_ready(conn, key)
+
+    lock = target / ".git" / "index.lock"
+    lock.write_text("")
+    _age_file(lock, 3000)
+
+    again = ur.ensure_ready(conn, key)
+
+    assert not lock.exists(), "죽은 잠금이 그대로 남았다"
+    assert (again / "a.txt").read_text() == "hello\n", "청소 뒤 갱신이 정상으로 끝나야 한다"
+
+
+def test_ensure_ready_keeps_fresh_lock(conn, fake_token, local_remote, bare_repo, tmp_path):
+    """갓 생긴 잠금은 건드리지 않는다 — 같은 사용자의 다른 요청이 지금 git을 돌리고
+    있을 수 있다. 그 잠금 때문에 이번 호출이 실패하는 것이 **맞는 동작**이다
+    (남의 살아 있는 작업을 깨뜨리는 것보다 낫다)."""
+    key = _connect_user(conn, 71, "fresh-lock")
+    target = ur.ensure_ready(conn, key)
+
+    lock = target / ".git" / "index.lock"
+    lock.write_text("")
+
+    with pytest.raises(ur.GitCommandFailed):
+        ur.ensure_ready(conn, key)
+
+    assert lock.exists(), "살아 있을 수 있는 잠금을 지웠다"
+
+
+def test_push_clears_stale_lock(conn, fake_token, local_remote, bare_repo, tmp_path):
+    """push 경로에도 같은 청소가 걸려 있어야 한다 — add/commit도 잠금을 잡는다."""
+    key = _connect_user(conn, 72, "stale-lock-push")
+    target = ur.ensure_ready(conn, key)
+    (target / "new.txt").write_text("world\n")
+
+    lock = target / ".git" / "index.lock"
+    lock.write_text("")
+    _age_file(lock, 3000)
+
+    assert ur.push(conn, key, "잠금 청소 뒤 push") is True
+    assert not lock.exists()
+
+
+def test_clear_locks_at_startup_removes_even_fresh_locks(_store_root):
+    """기동 청소는 나이를 안 본다 — 이 시점에는 우리 git 프로세스가 하나도 없어서
+    남아 있는 잠금이 전부 앞 세대의 것이기 때문이다. 사용자 전원을 훑는다."""
+    users = _store_root / "users"
+    for name in ("gh-1", "gh-2"):
+        (users / name / ".git" / "refs" / "heads").mkdir(parents=True)
+        (users / name / ".git" / "index.lock").write_text("")
+    deep = users / "gh-2" / ".git" / "refs" / "heads" / "main.lock"
+    deep.write_text("")
+    stray = users / "not-a-dir.txt"
+    stray.write_text("사용자 폴더가 아닌 것은 건너뛴다")
+
+    removed = ur.clear_locks_at_startup()
+
+    assert sorted(removed) == [
+        "users/gh-1/.git/index.lock",
+        "users/gh-2/.git/index.lock",
+        "users/gh-2/.git/refs/heads/main.lock",
+    ]
+    assert not deep.exists()
+    assert stray.exists()
+
+
+def test_clear_locks_at_startup_without_volume(_store_root):
+    """볼륨이 아직 비어 있어도(첫 기동) 조용히 빈 목록 — 기동을 막으면 안 된다."""
+    assert ur.clear_locks_at_startup() == []
