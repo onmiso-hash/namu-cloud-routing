@@ -70,6 +70,7 @@ import task_move  # noqa: E402
 import task_resolve  # noqa: E402
 import ticket_web  # noqa: E402
 import tickets  # noqa: E402
+import traffic_log  # noqa: E402
 import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
@@ -2248,6 +2249,94 @@ class _AuthOrMcpDispatcher:
 
 
 # ---------------------------------------------------------------------------
+# 접속 기록(관리자 '접속자 지도') — traffic_log.py에 한 줄씩 붙인다.
+# ---------------------------------------------------------------------------
+
+# 보관함 파일 이름의 앞자락. 포털은 "portal", 도메인 조회는 "rdap", 스튜디오는
+# "studio"로 적고 이 서버는 "cloud"로 적는다. 관리자 화면은 목록을 들고 있지
+# 않고 파일 이름에서 이 글자를 읽어 서비스를 가르므로, 새 이름을 써도 저절로
+# 합류한다.
+_TRAFFIC_SERVICE = "cloud"
+
+# 티켓 주소(`/u/<번호>`·`/d/<번호>`)의 번호는 32바이트 난수이고, **그 번호를 아는
+# 것이 곧 그 파일을 올리고 받을 권한**이다(tickets.new_ticket_id). 코어도 로그에는
+# 앞 8자만 적는다(tickets.short). 여기서는 앞자락조차 남기지 않고 access_log의
+# 지문으로 바꾼다 — 되돌릴 수 없으면서, 같은 티켓을 두드린 요청끼리는 묶어 볼 수
+# 있다(access_log.py 머리말의 판단을 그대로 따른다).
+_TICKET_PREFIXES = (ticket_web.UPLOAD_PREFIX, ticket_web.DOWNLOAD_PREFIX)
+
+
+def _traffic_path(path: str) -> str:
+    """보관함에 적어도 되는 모양의 경로.
+
+    이 서버의 주소에는 비밀값이 세 가지 모양으로 박혀 있다 — `/mcp/<사용자별
+    열쇠>`, `/u/<티켓 번호>`, `/d/<티켓 번호>`. 그대로 적으면 2026-08-01에
+    접속 기록에서 열쇠를 지운 일(namu-67)이 통째로 무효가 된다. 보관함 파일은
+    관리자 화면이 읽는 곳이라 컨테이너 로그보다 오히려 손이 더 많이 닿는다.
+
+    `/mcp/`와 로그인 왕복의 일회용 자격증명(`?code=`·`?state=`)은 access_log가
+    이미 아는 모양이라 그쪽에 맡기고, 티켓 번호만 여기서 더 가린다.
+    """
+    for prefix in _TICKET_PREFIXES:
+        if path.startswith(prefix):
+            rest = path[len(prefix):]
+            if rest:
+                path = prefix + access_log.MASK_PREFIX + access_log.fingerprint(rest)
+            break
+    return access_log.mask(path)
+
+
+def _header_getter(raw_headers):
+    """ASGI scope의 머리말 목록 → 이름으로 찾아 주는 함수.
+
+    traffic_log.record는 포털·도메인 조회가 쓰는 웹 틀(Flask·FastAPI)의
+    `headers.get`을 받도록 만들어졌다. 이 서버는 그런 틀 없이 ASGI scope를
+    직접 보므로 같은 모양의 함수를 여기서 지어 넘긴다. ASGI는 머리말 이름을
+    소문자 바이트로 준다.
+    """
+
+    def get(name):
+        wanted = name.lower().encode("latin-1")
+        for key, value in raw_headers:
+            if key.lower() == wanted:
+                return value.decode("latin-1", "replace")
+        return None
+
+    return get
+
+
+class _TrafficRecorder:
+    """접속 한 건마다 나라·주소를 보관함에 한 줄 적는 순수 ASGI 3-인자 미들웨어.
+
+    **가장 바깥에 둔다.** 여기서 갈라지기 전이라 웹 화면·MCP·티켓이 한 자리에서
+    다 잡히고, 열쇠가 틀려 404로 끊기는 요청(`_PerUserSecretDispatcher`)도 남는다
+    — 남의 열쇠를 찍어 보는 두드림이야말로 이 화면으로 봐야 할 것이라, 안쪽에
+    붙여 그것들을 놓치면 화면의 쓸모가 반으로 준다.
+
+    **어떤 실패도 요청 처리로 새어 나가지 않는다**(traffic_log 머리말의 규칙 2).
+    기록은 곁다리이고, 곁다리 때문에 서비스가 멎으면 안 된다. traffic_log.record
+    자체가 안에서 다 삼키지만, 그 앞에서 짓는 경로·머리말도 같은 이유로 감싼다.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            try:
+                client = scope.get("client")
+                traffic_log.record(
+                    _TRAFFIC_SERVICE,
+                    _traffic_path(scope.get("path") or ""),
+                    _header_getter(scope.get("headers") or []),
+                    client[0] if client else None,
+                )
+            except Exception:  # pragma: no cover - 기록은 곁다리다
+                pass
+        await self.app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
 # 기동 엔트리포인트 — stateless HTTP, 경로는 path_secret 유무에 따라 /mcp 또는
 # /mcp/<secret>. `/auth/`로 시작하는 요청은 인증 우회(로그인 전이라 토큰이 없는
 # 것이 정상)로 web_auth 앱에, 그 외 전부는 기존 MCP 앱 + AuthMiddleware로 간다.
@@ -2283,7 +2372,11 @@ def build_app():
     # 토큰 로직에 닿기 전에 404로 끊는다.
     mcp_app = _PerUserSecretDispatcher(mcp_app)
     auth_app = web_auth.build_auth_app()
-    return _AuthOrMcpDispatcher(auth_app, mcp_app, build_ticket_app())
+    # 접속 기록이 가장 바깥이다 — 갈라지기 전이라 웹·MCP·티켓이 한 자리에서
+    # 다 잡히고, 열쇠가 틀려 404로 끊기는 요청도 빠짐없이 남는다.
+    return _TrafficRecorder(
+        _AuthOrMcpDispatcher(auth_app, mcp_app, build_ticket_app())
+    )
 
 
 def main() -> None:
