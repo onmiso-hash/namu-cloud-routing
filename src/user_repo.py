@@ -418,7 +418,38 @@ _PROMISOR_REMOTE_NAME = "namu-origin"
 
 
 def _promisor_url_args(url: str) -> list[str]:
-    """받아오는 명령(fetch/reset)에만 얹는 명령줄 설정 — 이 순간에만 존재하는 주소."""
+    """빠진 몸통을 받아와야 하는 명령에만 얹는 명령줄 설정 — 이 순간에만 존재하는 주소.
+
+    ## 어느 명령에 얹고 어느 명령에 안 얹는가 (2026-08-22 명령별 실측 표)
+
+    주소를 얹는 순간 git은 빠진 몸통을 **실제로 받아온다**. 그래서 "안전하니 다
+    얹자"가 아니라, 명령마다 ①주소 없이 죽는가 ②얹으면 첨부가 딸려 내려오는가를
+    따로 재서 정했다. 실서버 사본과 같은 상태(기억 파일 몸통이 오브젝트 저장소에서
+    사라지고 디스크 파일만 남은 사본)를 만들어 놓고 진짜 git으로 잰 결과다.
+
+    | 명령                  | 주소 없이 | 얹으면 | 첨부가 내려오나 |
+    |-----------------------|-----------|--------|-----------------|
+    | `status --porcelain`  | 정상      | 정상   | 안 내려옴       |
+    | `add -A`              | 정상      | 정상   | 안 내려옴       |
+    | `commit`              | **죽음**  | 정상   | 안 내려옴       |
+    | `push`                | **죽음**  | 정상   | 안 내려옴       |
+    | `fetch` / `reset`     | **죽음**  | 정상   | 안 내려옴       |
+
+    (마지막 줄만 2026-08-07 측정이고, 위 네 줄이 2026-08-22 측정이다.)
+
+    그래서 `status`와 `add -A`에는 **얹지 않는다** — 주소 없이도 멀쩡히 도는데
+    저장소 전체를 훑는 명령에 굳이 받아올 길을 열어 줄 이유가 없다.
+
+    commit이 주소를 필요로 하는 이유: commit은 인덱스에 올라온 항목의 몸통이 실제로
+    있는지 확인하고, 없으면 promisor 원격에 받으러 간다. push가 필요로 하는 이유:
+    보낼 꾸러미를 만들 때 부모 커밋의 몸통을 읽는다. 둘 다 요청하는 것은 **기억
+    파일**의 몸통이고, 재보는 내내 첨부 몸통은 끝까지 안 내려왔다(테스트
+    `test_push_on_blobless_copy_still_keeps_attachments_out`가 이 선을 지킨다).
+
+    왜 갓 만든 사본에서는 안 죽었는가: 갓 만든 사본은 기억 파일 몸통을 다 들고 있어
+    받아올 일이 없다(실측 — 주소 없이도 commit·push가 성공한다). 그래서 이 결함은
+    사본이 몸통을 잃은 뒤에야 드러났고, 갓 만든 사본만 쓰던 기존 테스트는 못 잡았다.
+    """
     return ["-c", f"remote.{_PROMISOR_REMOTE_NAME}.url={url}"]
 
 
@@ -740,24 +771,38 @@ def push(conn, user_key: str, message: str = DEFAULT_COMMIT_MESSAGE) -> bool:
         return False
 
     _run_git(["add", "-A"], cwd=target)
+
+    # 주소를 여기서 미리 만든다 — 아래 commit이 주소를 필요로 하기 때문이다
+    # (이유는 `_promisor_url_args` 주석의 명령별 실측 표). 변경이 없으면 위에서
+    # 이미 돌아갔으므로, 이 토큰 발급은 실제로 되돌려 보낼 때만 일어난다.
+    token = github_app.installation_token(record["installation_id"])
+    url = _authenticated_url(record["repo_full_name"], token)
+
     _run_git(
         [
+            *_promisor_url_args(url),
             "-c", f"user.name={_COMMIT_AUTHOR_NAME}",
             "-c", f"user.email={_COMMIT_AUTHOR_EMAIL}",
             "commit", "-q", "-m", message,
         ],
         cwd=target,
+        token=token,
     )
 
     # push 직전 검사(§5 요구사항) — 방금 커밋한 변경까지 반영된 최종 크기로 판정한다.
     _check_quota(user_key)
 
-    token = github_app.installation_token(record["installation_id"])
-    url = _authenticated_url(record["repo_full_name"], token)
     branch = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=target).strip()
 
     try:
-        _run_git(["push", "--", url, f"HEAD:{branch}"], cwd=target, token=token)
+        # 위치 인자의 주소("보낼 곳")와 `_promisor_url_args`의 주소("빠진 몸통을
+        # 받아올 곳")는 서로 다른 역할이라 **둘 다** 필요하다 — 위치 인자만 주면
+        # push가 꾸러미를 만들다가 빠진 몸통을 요청하며 죽는다(실측).
+        _run_git(
+            [*_promisor_url_args(url), "push", "--", url, f"HEAD:{branch}"],
+            cwd=target,
+            token=token,
+        )
     except GitCommandFailed as exc:
         text = str(exc)
         if _is_non_fast_forward(text):

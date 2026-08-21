@@ -970,6 +970,96 @@ def test_attach_isolation_is_idempotent_across_calls(conn, fake_token, local_rem
 
 
 # ---------------------------------------------------------------------------
+# 기억 파일 몸통을 잃은 사본에서도 되돌려 보내기 (cloud-push-promisor-url)
+#
+# 위쪽 첨부 격리 테스트가 전부 **갓 만든** 사본만 쓰기 때문에 실서버에서 벌어진
+# 고장을 하나도 못 잡았다. 실서버 사본(2026-08-22 실측)은 기억 파일의 몸통이
+# 오브젝트 저장소에서 사라진 채 디스크 파일만 남은 상태였고, 그 상태에서만
+# commit과 push가 죽는다. 아래 두 테스트는 그 상태를 만들어 놓고 잰다.
+# ---------------------------------------------------------------------------
+def _lose_memory_blobs(target, bare) -> None:
+    """실서버 사본이 실제로 처해 있던 상태를 만든다 — 기억 파일의 **몸통만** 오브젝트
+    저장소에서 사라지고 디스크 파일과 인덱스는 그대로인 사본.
+
+    만드는 방법: 팩 파일을 들어낸 뒤 걸러진 fetch(`--filter=blob:none`)와
+    `reset --hard`만 지나가게 한다. reset은 디스크 내용이 이미 목표와 같은 파일은
+    다시 쓰지 않으므로 그 몸통을 받아올 이유가 없고, 그래서 몸통이 빠진 채로 남는다.
+
+    실서버와 같은 상태인지는 실측으로 대조했다(2026-08-22): 기억 파일의 몸통이
+    없고, 디스크 파일의 해시는 HEAD가 가리키는 번호와 정확히 일치하며,
+    `git status`는 깨끗하다.
+    """
+    for pack in (target / ".git" / "objects" / "pack").glob("*"):
+        pack.unlink()
+    url = f"file://{bare}"
+    url_args = ["-c", f"remote.namu-origin.url={url}"]
+    _git([*url_args, "fetch", "--depth", "1", "--no-tags", "--filter=blob:none",
+          "-q", "namu-origin", "HEAD"], cwd=target)
+    _git([*url_args, "reset", "--hard", "-q", "FETCH_HEAD"], cwd=target)
+
+
+def test_push_survives_on_copy_that_lost_memory_blobs(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """이 테스트가 이 작업의 본체다 — 고치기 전에는 commit 단계에서 죽는다(실측).
+
+    실서버 증상: 웹에서 쪽지를 떼거나 AI가 기억을 남기면 서버 사본에는 써지는데
+    사용자 저장소로는 못 올라가고, 다음 최신화가 그것을 지운다(조용한 데이터 손실).
+    """
+    _seed_attachment(bare_repo, tmp_path, "_up8", "attach_file/lost.bin", 300_000)
+    key = _connect_user(conn, 47, "lost-blobs")
+    target = ur.ensure_ready(conn, key)
+    _lose_memory_blobs(target, bare_repo)
+    assert not _blob_present(target, "a.txt"), "사전 조건: 기억 파일 몸통이 빠져 있어야 한다"
+    assert (target / "a.txt").read_text() == "hello\n", "사전 조건: 디스크 파일은 그대로 있어야 한다"
+
+    (target / "a.txt").write_text("server wrote after blob loss\n")
+
+    assert ur.push(conn, key, message="write after blob loss") is True
+    assert _git(["show", "main:a.txt"], cwd=bare_repo) == "server wrote after blob loss\n"
+
+
+def test_push_on_blobless_copy_still_keeps_attachments_out(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """고침의 대가로 첨부 격리를 내주지 않았는지 잰다 — 주소를 얹는 순간 git은 빠진
+    몸통을 **실제로** 받아오므로, 어느 명령에 얹느냐에 따라 첨부가 통째로 내려올 수
+    있다. 첨부는 끝까지 서버 사본에 없어야 하고, 사용자 저장소에서도 안 지워져야 한다.
+    """
+    _seed_attachment(bare_repo, tmp_path, "_up9", "attach_file/lost2.bin", 300_000)
+    key = _connect_user(conn, 48, "lost-blobs-attach")
+    target = ur.ensure_ready(conn, key)
+    _lose_memory_blobs(target, bare_repo)
+    (target / "a.txt").write_text("server wrote\n")
+
+    assert ur.push(conn, key, message="write") is True
+
+    assert not _blob_present(target, "attach_file/lost2.bin"), "고친 뒤 첨부 몸통이 서버로 내려왔다"
+    assert not (target / "attach_file").exists()
+    assert ur.dir_size(key) < 200_000, f"300KB 첨부가 사본 크기에 반영됐다({ur.dir_size(key)}바이트)"
+    listed = _git(["ls-tree", "-r", "--name-only", "main"], cwd=bare_repo).split()
+    assert "attach_file/lost2.bin" in listed, "push가 사용자 저장소의 첨부를 지웠다"
+
+
+def test_push_on_blobless_copy_never_writes_url_to_config(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """토큰 비노출의 최종 방어선 — push 경로에 주소를 얹게 됐으니 그 주소가
+    `.git/config`에 눌어붙지 않는지도 여기서 함께 잰다."""
+    key = _connect_user(conn, 49, "lost-blobs-url")
+    target = ur.ensure_ready(conn, key)
+    _lose_memory_blobs(target, bare_repo)
+    (target / "a.txt").write_text("server wrote\n")
+
+    ur.push(conn, key, message="write")
+
+    cfg_text = (target / ".git" / "config").read_text()
+    assert "url" not in cfg_text, f"원격 주소가 config에 남았다:\n{cfg_text}"
+    assert "FAKE_TEST_TOKEN" not in cfg_text
+    assert str(bare_repo) not in cfg_text
+
+
+# ---------------------------------------------------------------------------
 # 죽은 git 잠금 치우기 (cloud-stale-git-lock)
 # ---------------------------------------------------------------------------
 def _age_file(path, seconds: float) -> None:
