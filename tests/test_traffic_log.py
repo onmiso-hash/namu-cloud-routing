@@ -57,7 +57,7 @@ def _lines(box, service="cloud"):
 # ---------------------------------------------------------------------------
 # 한 줄의 모양 — 네 곳이 같아야 한다
 # ---------------------------------------------------------------------------
-def test_한_줄에_아홉_칸이_다_있다(_traffic_dir):
+def test_한_줄에_열_칸이_다_있다(_traffic_dir):
     """칸 이름이 하나라도 다르면 관리자 화면이 그 줄을 못 읽는다.
 
     화면은 파일 이름에서 서비스를, 칸에서 나라·주소·좌표를 읽는다. 네 곳이 같은
@@ -71,11 +71,12 @@ def test_한_줄에_아홉_칸이_다_있다(_traffic_dir):
             "CF-IPCity": "Gwangju", "CF-IPLatitude": "35.15472",
             "CF-IPLongitude": "126.91556",
         }),
+        status=200,
     )
     traffic_log.flush()
 
     line, = _lines(_traffic_dir)
-    assert set(line) == {"t", "svc", "ip", "via", "cc", "city", "lat", "lon", "path"}
+    assert set(line) == {"t", "svc", "ip", "via", "cc", "city", "lat", "lon", "path", "st"}
     assert line["svc"] == "cloud"
     assert line["ip"] == "203.0.113.9"
     assert line["via"] == "cf"
@@ -84,6 +85,18 @@ def test_한_줄에_아홉_칸이_다_있다(_traffic_dir):
     assert line["lat"] == "35.15472"
     assert line["lon"] == "126.91556"
     assert line["path"] == "/faq"
+    assert line["st"] == 200
+
+
+def test_응답_코드를_모르면_0으로_적는다(_traffic_dir):
+    """화면 규칙(onnamu-project `portal/traffic_view.py`의 `is_valid`)은 `st`가
+    없거나 0이면 유효한 것으로 둔다 — 모르는 것을 무효로 처리하면 멀쩡한 접속이
+    화면에서 조용히 사라지기 때문이다. 빈 칸이 아니라 숫자 0이어야 한다."""
+    traffic_log.record("cloud", "/", _headers(**{"CF-Connecting-IP": "203.0.113.9"}))
+    traffic_log.flush()
+
+    line, = _lines(_traffic_dir)
+    assert line["st"] == 0
 
 
 def test_파일_이름이_서비스_하루_한_장이다(_traffic_dir):
@@ -239,6 +252,7 @@ def test_요청이_지나가면_한_줄이_남는다(_traffic_dir):
     assert r.status_code == 200 and r.text == "ok"  # 요청은 그대로 지나간다
     line, = _lines(_traffic_dir)
     assert (line["ip"], line["cc"], line["path"], line["svc"]) == ("203.0.113.9", "KR", "/faq", "cloud")
+    assert line["st"] == 200
 
 
 def test_열쇠가_틀려_404로_끊긴_요청도_남는다(monkeypatch, tmp_path, _traffic_dir):
@@ -256,6 +270,10 @@ def test_열쇠가_틀려_404로_끊긴_요청도_남는다(monkeypatch, tmp_pat
     line, = _lines(_traffic_dir)
     assert line["ip"] == "203.0.113.9"
     assert line["path"].startswith("/mcp/#") and "z" * 43 not in line["path"]
+    assert line["st"] == 404, (
+        "응답 코드가 실려야 화면이 '유효한 요청만 보기'에서 이 두드림을 걸러낸다 — "
+        "요청을 받을 때 적으면 이 값을 알 수 없다"
+    )
 
 
 def test_기록이_가장_바깥에_붙어_있다(monkeypatch, tmp_path):
@@ -299,3 +317,52 @@ def test_기록이_망가져도_요청은_그대로_지나간다(monkeypatch):
     client = TestClient(rs._TrafficRecorder(_대역앱([])))
 
     assert client.get("/faq").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 응답 코드를 적는 시점 (namu-cloud-traffic-log 추가 요청)
+# ---------------------------------------------------------------------------
+def test_답이_시작되면_바로_적는다(_traffic_dir):
+    """몸통이 다 나가기를 기다리지 않는다.
+
+    MCP는 답을 길게 흘려보내는 연결이 있어서, 끝날 때까지 기다리면 그 연결이 살아
+    있는 내내 한 줄도 안 남는다. 응답 코드는 시작 알림에 이미 실려 있으므로 더
+    기다릴 이유가 없다. 여기서는 **몸통을 보내기 전에** 이미 줄이 적혔는지 본다.
+    """
+    적힌줄 = []
+
+    async def 흐르는앱(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        traffic_log.flush()
+        적힌줄.extend(_lines(_traffic_dir))  # 몸통을 보내기 전 상태
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    client = TestClient(rs._TrafficRecorder(흐르는앱))
+    client.get("/faq", headers={"cf-connecting-ip": "203.0.113.9"})
+
+    assert len(적힌줄) == 1, "답이 시작됐는데도 아직 안 적혔다"
+    assert 적힌줄[0]["st"] == 200
+
+
+def test_안쪽이_터져도_두드린_사실은_남는다(_traffic_dir):
+    """답이 시작되지도 못한 경우다. 그래도 두드린 사실은 남아야 하고, 코드는
+    지어내지 않고 0(모름)으로 적는다."""
+    async def 터지는앱(scope, receive, send):
+        raise RuntimeError("안쪽이 죽었다")
+
+    async def 아무것도(*_a, **_k):
+        return None
+
+    scope = {
+        "type": "http",
+        "path": "/faq",
+        "headers": [(b"cf-connecting-ip", b"203.0.113.9")],
+        "client": ("172.16.0.1", 1234),
+    }
+    with pytest.raises(RuntimeError):
+        asyncio.run(rs._TrafficRecorder(터지는앱)(scope, 아무것도, 아무것도))
+    traffic_log.flush()
+
+    line, = _lines(_traffic_dir)
+    assert line["ip"] == "203.0.113.9"
+    assert line["st"] == 0

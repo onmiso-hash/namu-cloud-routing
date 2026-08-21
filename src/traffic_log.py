@@ -5,7 +5,7 @@
 
   한 줄  = {"t":시각, "svc":서비스, "ip":접속주소, "cc":나라,
             "city":도시, "lat":위도, "lon":경도, "path":경로,
-            "via":"cf" 또는 "direct"}
+            "via":"cf" 또는 "direct", "st":응답코드}
   한 파일 = <보관함>/<서비스>-YYYY-MM-DD.jsonl  (하루 한 장)
 
 지켜야 할 것 셋:
@@ -86,8 +86,12 @@ def is_asset(path):
     return lowered.endswith(_ASSET_SUFFIXES)
 
 
-def record(service, path, get_header, direct_ip=None):
+def record(service, path, get_header, direct_ip=None, status=None):
     """접속 한 건을 적는다. 실패해도 예외를 밖으로 내보내지 않는다.
+
+    status 는 서버가 뭐라고 답했는지다(200·404 …). 이것이 있어야 "유효한 요청만"을
+    가릴 수 있다 — 없는 자리를 두드린 훑기는 404로 갈린다. 그래서 요청을 받을 때가
+    아니라 **답을 내보낼 때** 적는다.
 
     direct_ip 는 서버가 직접 본 주소다. Cloudflare를 거쳐 오면 그것은 터널의
     주소라 쓸모가 없지만, 공유기에 열린 포트로 곧장 들어온 접속에는 그것이
@@ -117,6 +121,7 @@ def record(service, path, get_header, direct_ip=None):
             "lat": _first_value(get_header, "CF-IPLatitude") or "",
             "lon": _first_value(get_header, "CF-IPLongitude") or "",
             "path": (path or "")[:200],
+            "st": int(status) if status else 0,
         }
         file_name = "%s-%s.jsonl" % (service, now.strftime("%Y-%m-%d"))
         text = json.dumps(line, ensure_ascii=False)

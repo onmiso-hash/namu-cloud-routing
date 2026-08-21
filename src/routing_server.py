@@ -2313,6 +2313,17 @@ class _TrafficRecorder:
     — 남의 열쇠를 찍어 보는 두드림이야말로 이 화면으로 봐야 할 것이라, 안쪽에
     붙여 그것들을 놓치면 화면의 쓸모가 반으로 준다.
 
+    **요청을 받을 때가 아니라 답을 내보낼 때 적는다.** 응답 코드(`st`)를 알아야
+    관리자 화면이 "유효한 요청만 보기"를 가릴 수 있기 때문이다 — 없는 자리를
+    두드리는 훑기는 404로 갈린다. 받는 시점에는 그 값이 아직 없다. 다른 세 곳도
+    같은 이유로 같은 시점으로 옮겼다(포털은 after_request, 도메인 조회는
+    call_next 뒤, 스튜디오는 res 'finish').
+
+    적는 순간은 **응답이 시작될 때**(`http.response.start`)다. 응답이 다 나간 뒤가
+    아니다 — MCP는 답을 길게 흘려보내는 연결이 있어서, 끝날 때까지 기다리면 그
+    연결이 살아 있는 내내 한 줄도 안 남는다. 코드는 시작 알림에 이미 실려 있으므로
+    더 기다릴 이유가 없다.
+
     **어떤 실패도 요청 처리로 새어 나가지 않는다**(traffic_log 머리말의 규칙 2).
     기록은 곁다리이고, 곁다리 때문에 서비스가 멎으면 안 된다. traffic_log.record
     자체가 안에서 다 삼키지만, 그 앞에서 짓는 경로·머리말도 같은 이유로 감싼다.
@@ -2322,7 +2333,19 @@ class _TrafficRecorder:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") == "http":
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        written = False
+
+        def _write(status) -> None:
+            # 한 요청에 한 줄이다. `http.response.start`는 요청당 한 번뿐이지만,
+            # 아래 finally가 뒤늦게 또 부르므로 빗장을 둔다.
+            nonlocal written
+            if written:
+                return
+            written = True
             try:
                 client = scope.get("client")
                 traffic_log.record(
@@ -2330,10 +2353,24 @@ class _TrafficRecorder:
                     _traffic_path(scope.get("path") or ""),
                     _header_getter(scope.get("headers") or []),
                     client[0] if client else None,
+                    status,
                 )
             except Exception:  # pragma: no cover - 기록은 곁다리다
                 pass
-        await self.app(scope, receive, send)
+
+        async def _send(message) -> None:
+            if message.get("type") == "http.response.start":
+                _write(message.get("status"))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            # 답이 시작되지도 못한 경우(안쪽이 예외로 끊겼거나 상대가 먼저 끊었다).
+            # 그래도 두드린 사실은 남겨야 하므로 코드를 0(모름)으로 적는다.
+            # 0을 무효로 치지 않는 것은 화면 쪽 규칙과 맞춘 것이다 — 모르는 것을
+            # 무효로 처리하면 멀쩡한 접속이 화면에서 조용히 사라진다.
+            _write(0)
 
 
 # ---------------------------------------------------------------------------
