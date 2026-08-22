@@ -366,3 +366,231 @@ def test_안쪽이_터져도_두드린_사실은_남는다(_traffic_dir):
     line, = _lines(_traffic_dir)
     assert line["ip"] == "203.0.113.9"
     assert line["st"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 무슨 도구를 불렀나 (`tool` 칸)
+#
+# 왜 필요했나: 2026-08-23 접속자 지도에 낯선 미국 주소가 떴는데(알고 보니
+# claude.ai 웹 채팅), 기록에는 `/mcp/#지문`까지만 있어 **거기서 무엇을 했는지
+# 답할 수 없었다.** 컨테이너 로그도 `CallToolRequest`라는 종류만 찍고 이름은 안
+# 찍는다. 그래서 도구 **이름 하나**를 줄에 싣는다.
+#
+# 이 묶음이 지키는 두 가지: (1) 이름이 실제로 찍히는가, (2) **인자는 한 글자도
+# 안 새는가.** 도구 인자에는 기억 본문이 통째로 들어 있어서, 새는 순간 이
+# 보관함 파일이 기억의 평문 사본이 된다.
+# ---------------------------------------------------------------------------
+def _본문읽는앱(받은것=None, status=200):
+    """안쪽 앱 흉내 — 본문을 끝까지 읽고 답한다(MCP 전송 계층과 같은 순서다)."""
+    async def app(scope, receive, send):
+        body = b""
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            body += message.get("body") or b""
+            if not message.get("more_body"):
+                break
+        if 받은것 is not None:
+            받은것.append(body)
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    return app
+
+
+def _도구부르기(이름, 인자=None):
+    return json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": 이름, "arguments": 인자 or {}},
+    }).encode()
+
+
+def _한줄찍기(box, 몸통, 경로="/mcp/" + "z" * 43, 앱=None):
+    """가짜 요청 한 건을 기록 겹에 통과시키고 남은 줄 하나를 돌려준다."""
+    client = TestClient(rs._TrafficRecorder(앱 or _본문읽는앱()))
+    client.post(경로, content=몸통,
+                headers={"cf-connecting-ip": "203.0.113.9",
+                         "content-type": "application/json"})
+    traffic_log.flush()
+    line, = _lines(box)
+    return line
+
+
+def test_도구를_부르면_이름이_남는다(_traffic_dir):
+    """이 작업의 알맹이다 — 경로만으로는 읽기만 했는지 뭘 써 넣었는지 모른다."""
+    line = _한줄찍기(_traffic_dir, _도구부르기("namu_record", {"bowl": "tasks"}))
+
+    assert line["tool"] == "namu_record"
+    # 경로는 그대로 가려진 채다 — 이름을 싣는 자리가 가리기를 우회하면 안 된다.
+    assert line["path"].startswith("/mcp/#") and "z" * 43 not in line["path"]
+
+
+def test_인자는_한_글자도_안_남는다(_traffic_dir):
+    """도구 인자에는 기억 본문이 통째로 들어온다(summary·reason·body).
+    이것이 새면 보관함 파일이 곧 기억의 평문 사본이다."""
+    비밀 = {
+        "bowl": "learnings",
+        "summary": "아무도보면안되는요약",
+        "reason": "아무도보면안되는까닭",
+        "body": "아무도보면안되는몸통",
+        "project": "비밀프로젝트",
+    }
+    line = _한줄찍기(_traffic_dir, _도구부르기("namu_record", 비밀))
+
+    assert line["tool"] == "namu_record"
+    # 줄을 통째로 글자로 만들어 본다 — 어느 칸에 묻어 들어가도 여기서 걸린다.
+    적힌글자 = json.dumps(line, ensure_ascii=False)
+    for 값 in 비밀.values():
+        assert 값 not in 적힌글자, f"인자 값이 기록에 샜다: {값}"
+    # 그릇 이름·작업 이름 같은 짧은 것도 이번 범위 밖이다 — 이름 하나만이다.
+    assert set(line) == {"t", "svc", "ip", "via", "cc", "city",
+                         "lat", "lon", "path", "st", "tool"}
+
+
+def test_인자에도_name_칸이_있으면_도구_이름만_고른다(_traffic_dir):
+    """앞에서부터 `"name"`을 훑어 찾는 방식이었다면 여기서 **인자 값**을 집는다.
+
+    JSON은 칸 순서가 정해져 있지 않아 인자가 먼저 올 수 있고, 인자 쪽에도
+    `name`이라는 칸이 얼마든지 있을 수 있다. 자리를 짚어 꺼내야 안전하다.
+    """
+    몸통 = json.dumps({
+        "jsonrpc": "2.0", "id": 1,
+        "params": {"arguments": {"name": "인자에숨은값"}, "name": "namu_search"},
+        "method": "tools/call",
+    }).encode()
+
+    line = _한줄찍기(_traffic_dir, 몸통)
+    assert line["tool"] == "namu_search"
+    assert "인자에숨은값" not in json.dumps(line, ensure_ascii=False)
+
+
+def test_도구_호출이_아닌_요청에는_칸_자체가_없다(_traffic_dir):
+    """빈 글자로라도 칸을 만들면 도구와 무관한 줄까지 나머지 세 곳과 모양이
+    달라진다. 칸이 아예 없어야 한다(traffic_log 머리말 규칙 3)."""
+    목록보기 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+
+    line = _한줄찍기(_traffic_dir, 목록보기)
+    assert "tool" not in line
+    assert set(line) == {"t", "svc", "ip", "via", "cc", "city", "lat", "lon", "path", "st"}
+
+
+def test_이름_모양이_아니면_안_적는다(_traffic_dir):
+    """이름 자리에 이름이 아닌 것이 실려 오면(빈 값·아주 긴 글자·줄바꿈 섞인
+    글자) 그건 이름이 아니라 남이 넣은 글자다 — 그대로 싣지 않는다."""
+    for 수상한이름 in ("", "a" * 200, "이름 아닌 글자", "namu_record\n조작한줄"):
+        traffic_log._buffer.clear()
+        line = _한줄찍기(_traffic_dir, _도구부르기(수상한이름))
+        assert "tool" not in line, f"이름이 아닌 것이 실렸다: {수상한이름!r}"
+        for name in os.listdir(_traffic_dir):
+            os.remove(os.path.join(_traffic_dir, name))
+
+
+def test_MCP가_아닌_주소는_본문을_안_들여다본다(_traffic_dir):
+    """곁눈질하는 길과 큰 것이 지나는 길을 갈라 놓는다 — 파일을 올리는 티켓
+    주소(`/u/…`)는 본문이 통째로 파일이라 한 바이트도 복사하면 안 된다."""
+    client = TestClient(rs._TrafficRecorder(_본문읽는앱()))
+    client.post("/u/" + "9" * 43, content=b"x" * 5000,
+                headers={"cf-connecting-ip": "203.0.113.9"})
+    traffic_log.flush()
+
+    line, = _lines(_traffic_dir)
+    assert "tool" not in line
+    assert line["path"].startswith("/u/#")
+
+
+# ---------------------------------------------------------------------------
+# 곁눈질이 요청을 망가뜨리지 않는가 (큰 요청 · 토막난 요청 · 흘려보내는 답)
+# ---------------------------------------------------------------------------
+def _토막내_보내기(앱, 토막들, 경로="/mcp/" + "z" * 43):
+    """본문을 여러 토막으로 나눠 보내는 진짜 ASGI 호출."""
+    scope = {
+        "type": "http", "method": "POST", "path": 경로,
+        "headers": [(b"cf-connecting-ip", b"203.0.113.9")],
+        "client": ("172.16.0.1", 1234),
+    }
+    남은토막 = list(토막들)
+    보낸것 = []
+
+    async def receive():
+        if 남은토막:
+            토막 = 남은토막.pop(0)
+            return {"type": "http.request", "body": 토막, "more_body": bool(남은토막)}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        보낸것.append(message)
+
+    asyncio.run(rs._TrafficRecorder(앱)(scope, receive, send))
+    return 보낸것
+
+
+def test_본문이_토막나서_와도_그대로_전달되고_이름을_찾는다(_traffic_dir):
+    """복사만 하고 넘겨주는 것은 안 건드린다 — 안쪽이 받은 본문이 보낸 것과
+    한 바이트도 다르면 안 된다."""
+    몸통 = _도구부르기("namu_recall", {"긴글": "가" * 3000})
+    받은것 = []
+    토막들 = [몸통[i:i + 512] for i in range(0, len(몸통), 512)]
+    assert len(토막들) > 1
+
+    _토막내_보내기(_본문읽는앱(받은것), 토막들)
+    traffic_log.flush()
+
+    assert 받은것 == [몸통], "안쪽 앱이 받은 본문이 달라졌다"
+    line, = _lines(_traffic_dir)
+    assert line["tool"] == "namu_recall"
+
+
+def test_본문이_상한을_넘으면_이름은_비우고_요청은_멀쩡하다(monkeypatch, _traffic_dir):
+    """상한이 없으면 아무나 100MB를 밀어 넣어 서버 메모리를 밀어낼 수 있다.
+    상한을 넘긴 요청은 **이름 고르기만 포기**하고, 요청 자체는 그대로 간다."""
+    monkeypatch.setattr(rs, "_MCP_BODY_PEEK_LIMIT", 1000)
+    몸통 = _도구부르기("namu_record", {"body": "나" * 5000})
+    assert len(몸통) > 1000
+    받은것 = []
+
+    보낸것 = _토막내_보내기(_본문읽는앱(받은것), [몸통[:400], 몸통[400:]])
+    traffic_log.flush()
+
+    assert 받은것 == [몸통], "상한을 넘겼다고 본문이 잘려서 가면 요청이 죽는다"
+    assert 보낸것[0]["status"] == 200
+    line, = _lines(_traffic_dir)
+    assert "tool" not in line
+    assert "나" * 10 not in json.dumps(line, ensure_ascii=False)
+
+
+def test_흘려보내는_답을_막지_않는다(_traffic_dir):
+    """MCP는 답을 여러 토막으로 길게 흘려보낸다(SSE). 본문을 곁눈질한다고
+    그쪽이 막히면 도구 호출이 통째로 멎는다."""
+    async def 흘리는앱(scope, receive, send):
+        while True:
+            message = await receive()
+            if message["type"] != "http.request" or not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200,
+                    "headers": [(b"content-type", b"text/event-stream")]})
+        for 조각 in (b"event: message\n", b"data: 1\n", b"\n"):
+            await send({"type": "http.response.body", "body": 조각, "more_body": True})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    보낸것 = _토막내_보내기(흘리는앱, [_도구부르기("namu_search")])
+    traffic_log.flush()
+
+    몸통들 = [m["body"] for m in 보낸것 if m["type"] == "http.response.body"]
+    assert 몸통들 == [b"event: message\n", b"data: 1\n", b"\n", b""]
+    line, = _lines(_traffic_dir)
+    assert line["tool"] == "namu_search"
+
+
+def test_이름을_고르다_터져도_요청은_그대로_지나간다(monkeypatch, _traffic_dir):
+    """규칙 2를 이 겹에서도 지킨다 — 곁다리 때문에 서비스가 멎으면 안 된다."""
+    def 터지는고르기(_body):
+        raise RuntimeError("고르다 터졌다")
+
+    monkeypatch.setattr(rs, "_tool_name_from_body", 터지는고르기)
+    받은것 = []
+    보낸것 = _토막내_보내기(_본문읽는앱(받은것), [_도구부르기("namu_record")])
+    traffic_log.flush()
+
+    assert 보낸것[0]["status"] == 200
+    line, = _lines(_traffic_dir)
+    assert "tool" not in line

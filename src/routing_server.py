@@ -2305,6 +2305,141 @@ def _header_getter(raw_headers):
     return get
 
 
+# ---------------------------------------------------------------------------
+# 무슨 도구를 불렀나 — 요청 본문에서 **이름 하나만** 골라낸다
+# ---------------------------------------------------------------------------
+
+# 곁눈질할 본문의 상한. 이만큼만 복사해 두고, 넘어가면 이름 고르기를 포기한다
+# (요청 자체는 아무 영향 없이 그대로 흘러간다).
+#
+# 왜 상한이 필요한가: 본문 크기를 안 재고 다 모으면, 큰 요청 하나가 서버 메모리를
+# 그만큼 더 먹는다. 미니PC의 메모리가 유한하고, 무엇보다 상한이 없으면 **아무나
+# 100MB를 밀어 넣어 서버를 밀어낼 수 있다**.
+#
+# 왜 1MiB인가: 이 서버의 MCP 요청은 전부 글자다. 가장 큰 것이 기억 한 건을 적는
+# `namu_record`인데 몇 KB이고, 진짜 파일은 MCP를 안 지나고 티켓 주소(`/u/…`)로
+# 따로 오간다. 1MiB는 실제로 오가는 것보다 두 자릿수 크다.
+_MCP_BODY_PEEK_LIMIT = 1024 * 1024
+
+# 도구 이름으로 인정할 모양. 코어의 도구는 전부 `namu_...`지만 목록을 박아 두지는
+# 않는다 — 없는 이름을 불러 본 두드림도 그대로 보이는 편이 이 화면의 목적에 맞다.
+# 대신 **글자 종류와 길이를 좁게 잡아**, 이름이 아닌 것(=인자 값)이 이 자리에
+# 실려 나갈 여지를 없앤다.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _tool_name_from_body(body: bytes) -> "str | None":
+    """MCP 요청 본문(JSON-RPC) → 불린 도구의 이름. 아니면 None.
+
+    **인자를 남기지 않는 것이 이 함수의 전부다.** 도구 인자에는 기억 본문이
+    통째로 들어 있어서(`namu_record`의 summary·reason·body), 한 글자라도 새면
+    보관함 파일이 기억의 평문 사본이 된다.
+
+    그래서 정규식으로 훑지 않고 **JSON을 제대로 읽어 `params.name` 한 자리만**
+    집는다. 훑기가 위험한 이유는 실제로 있다 — 인자 쪽에도 `"name"`이라는 칸이
+    있을 수 있고(`{"arguments":{"name":"…"},"name":"namu_record"}`), JSON은 칸
+    순서가 정해져 있지 않아서 앞에서부터 `"name"`을 찾으면 **인자 값을 집어
+    올린다**. 자리를 짚어 꺼내면 그 일이 일어날 수 없다.
+
+    한 번에 여러 건을 보내는 모양(JSON-RPC batch)도 받는다 — 첫 도구 호출을
+    쓴다. 한 줄에 이름 하나이므로 둘 이상은 어차피 다 못 싣는다.
+    """
+    if not body:
+        return None
+    try:
+        message = json.loads(body)
+    except Exception:
+        # 본문이 JSON이 아니거나 깨졌다. 그건 MCP가 알아서 400으로 답할 일이고,
+        # 여기서는 이름을 모른 채로 넘어가면 된다.
+        return None
+    batch = message if isinstance(message, list) else [message]
+    for one in batch:
+        if not isinstance(one, dict) or one.get("method") != "tools/call":
+            continue
+        params = one.get("params")
+        if not isinstance(params, dict):
+            continue
+        name = params.get("name")
+        if isinstance(name, str) and _TOOL_NAME_RE.match(name):
+            return name
+    return None
+
+
+def _is_mcp_path(path: str) -> bool:
+    """MCP 도구가 오가는 주소인가(`/mcp` 또는 `/mcp/<열쇠>`).
+
+    본문을 곁눈질하는 자리를 여기로 좁힌다. 티켓 주소(`/u/…`)로 오가는 **진짜
+    파일**은 이 판정에 안 걸리므로 한 바이트도 복사되지 않는다 — 큰 것이 지나는
+    길과 곁눈질하는 길을 아예 갈라 놓는 것이 상한보다 앞선 방어다.
+    """
+    return path == _MCP_MOUNT_PATH or path.startswith(_MCP_MOUNT_PATH + "/")
+
+
+class _McpBodyPeek:
+    """요청 본문을 **그대로 흘려보내면서** 앞부분만 복사해 두는 receive 겹.
+
+    도구 이름은 HTTP 머리말이 아니라 본문(JSON-RPC) 안에 있는데, 본문은 안쪽 앱이
+    한 번 읽어 가면 그만이다. 그래서 읽히는 길목에 서서 지나가는 것을 복사만 한다
+    — **넘겨주는 내용은 글자 하나 안 바꾼다.** 가로채 놓고 다시 지어내 넘기는
+    방식이었다면 큰 요청·여러 토막으로 나뉘어 오는 요청에서 깨질 자리가 생긴다.
+
+    답(응답)에는 손대지 않는다. MCP는 답을 길게 흘려보내는 연결이라, 그쪽을
+    건드리면 흘려보내기가 막힌다.
+
+    시점도 맞는다 — MCP 전송 계층은 본문을 **다 읽은 뒤에** 답을 시작하므로
+    (`streamable_http._handle_post_request`: `body = await request.body()`가
+    응답보다 앞이다), 접속 기록을 적는 순간(`http.response.start`)에는 이름이
+    이미 손에 있다.
+    """
+
+    def __init__(self, receive):
+        self._receive = receive
+        self._chunks = []
+        self._size = 0
+        self._done = False       # 다 모았거나, 더 볼 필요가 없어졌다
+        self._too_big = False    # 상한을 넘겼다 → 이름 고르기를 포기한다
+
+    async def __call__(self):
+        message = await self._receive()
+        try:
+            self._observe(message)
+        except Exception:  # pragma: no cover - 곁눈질이 요청을 죽이면 안 된다
+            self._done = True
+            self._chunks = []
+        return message
+
+    def _observe(self, message) -> None:
+        if self._done or message.get("type") != "http.request":
+            return
+        body = message.get("body") or b""
+        room = _MCP_BODY_PEEK_LIMIT - self._size
+        if len(body) > room:
+            self._too_big = True
+            self._done = True
+            self._chunks = []
+            return
+        if body:
+            self._chunks.append(body)
+            self._size += len(body)
+        if not message.get("more_body"):
+            self._done = True
+
+    def tool_name(self) -> "str | None":
+        """골라낸 도구 이름. 못 골랐거나 고르다 터졌으면 None.
+
+        여기서 터지는 것을 삼키는 이유: 부르는 쪽(`_TrafficRecorder._write`)의
+        감싸개는 **줄 전체**를 감싸고 있어서, 이름 고르기가 터지면 접속 기록 한
+        줄이 통째로 안 남는다. 이름은 곁다리의 곁다리다 — 그것 때문에 "누가
+        두드렸나"까지 잃으면 안 된다.
+        """
+        if self._too_big:
+            return None
+        try:
+            return _tool_name_from_body(b"".join(self._chunks))
+        except Exception:  # pragma: no cover - 곁다리의 곁다리다
+            return None
+
+
 class _TrafficRecorder:
     """접속 한 건마다 나라·주소를 보관함에 한 줄 적는 순수 ASGI 3-인자 미들웨어.
 
@@ -2324,9 +2459,16 @@ class _TrafficRecorder:
     연결이 살아 있는 내내 한 줄도 안 남는다. 코드는 시작 알림에 이미 실려 있으므로
     더 기다릴 이유가 없다.
 
+    **무슨 도구를 불렀는지도 같이 적는다.** 이 서버의 주소는 누가 붙었든
+    `/mcp/#지문` 한 가지라, 경로만으로는 "붙어서 무엇을 했나"를 답할 수 없다.
+    도구 이름은 본문 안에 있으므로 `_McpBodyPeek`이 지나가는 본문을 복사해 두고,
+    `_tool_name_from_body`가 거기서 **이름 하나만** 골라낸다. 인자는 안 적는다
+    (traffic_log 머리말의 "이 저장소에서만 다른 것 (2)").
+
     **어떤 실패도 요청 처리로 새어 나가지 않는다**(traffic_log 머리말의 규칙 2).
     기록은 곁다리이고, 곁다리 때문에 서비스가 멎으면 안 된다. traffic_log.record
-    자체가 안에서 다 삼키지만, 그 앞에서 짓는 경로·머리말도 같은 이유로 감싼다.
+    자체가 안에서 다 삼키지만, 그 앞에서 짓는 경로·머리말·도구 이름도 같은
+    이유로 감싼다.
     """
 
     def __init__(self, app):
@@ -2336,6 +2478,14 @@ class _TrafficRecorder:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
+
+        peek = None
+        try:
+            if scope.get("method") == "POST" and _is_mcp_path(scope.get("path") or ""):
+                peek = _McpBodyPeek(receive)
+                receive = peek
+        except Exception:  # pragma: no cover - 곁눈질은 곁다리다
+            peek = None
 
         written = False
 
@@ -2354,6 +2504,7 @@ class _TrafficRecorder:
                     _header_getter(scope.get("headers") or []),
                     client[0] if client else None,
                     status,
+                    tool=peek.tool_name() if peek is not None else None,
                 )
             except Exception:  # pragma: no cover - 기록은 곁다리다
                 pass
