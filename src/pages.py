@@ -98,7 +98,7 @@ def _flow_diagram() -> str:
         "<h4>내 GitHub 저장소</h4>"
         "<p><b>기억의 원본은 여기</b>에 파일로 쌓입니다</p></div>"
         "</div>"
-        '<p class="flow-cap">나무 클라우드에는 저장소의 <b>사본</b>만이 잠시 거쳐갑니다. '
+        '<p class="flow-cap">나무 클라우드에는 저장소의 <b>사본</b>만이 잠시 거쳐 갑니다. '
         "회원님이 연결을 끊어도 기억은 회원님 저장소에 그대로 남습니다.</p>"
     )
 
@@ -116,14 +116,14 @@ def _fork() -> str:
         "<h4>브라우저에서 AI를 쓴다</h4>"
         "<p>claude.ai·ChatGPT처럼 웹에서 쓰는 AI에 MCP 주소 한 줄을 붙이면 "
         "그때부터 기억이 이어집니다. 나무 클라우드(MCP)를 사용하시면 나무의 "
-        "기억·학습 코어기능만 사용이 가능하며 나무의 업무 절차적 기능은 "
+        "기억·학습 코어 기능만 사용이 가능하며 나무의 업무 절차적 기능은 "
         "제외됩니다.</p>"
         '<a class="btn btn-primary" href="/start">시작하는 법 보기</a></div>'
         '<div class="opt"><span class="tag">여기가 아닙니다</span>'
         "<h4>터미널에서 AI를 쓴다</h4>"
         "<p>Claude Code·Antigravity CLI(agy)를 쓰신다면 MCP 주소를 붙이는 "
         "것이 아니라 나무를 <b>플러그인으로 설치</b>하셔야 합니다. 터미널에서 "
-        "나무를 설치하시면 기억·학습 코어기능과 함께 업무 절차적 기능을 모두 "
+        "나무를 설치하시면 기억·학습 코어 기능과 함께 업무 절차적 기능을 모두 "
         "사용할 수 있습니다.</p>"
         f'<a class="btn" href="{ui.INSTALL_GUIDE_URL}" target="_blank" '
         'rel="noopener">플러그인 설치 안내서 ↗</a></div>'
