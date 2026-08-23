@@ -87,7 +87,7 @@ def _flow_diagram() -> str:
         '<div class="flow">'
         '<div class="flow-node"><div class="ico" aria-hidden="true">💬</div>'
         "<h4>내가 쓰는 AI</h4>"
-        "<p>claude.ai 같은 웹 AI에 주소 한 줄을 붙여 둡니다</p></div>"
+        "<p>claude.ai 같은 웹 AI에 MCP 주소 한 줄을 붙여 둡니다</p></div>"
         '<div class="flow-arrow" aria-hidden="true">→</div>'
         '<div class="flow-node"><div class="ico" aria-hidden="true">🌳</div>'
         "<h4>나무 클라우드</h4>"
@@ -98,7 +98,7 @@ def _flow_diagram() -> str:
         "<h4>내 GitHub 저장소</h4>"
         "<p><b>기억의 원본은 여기</b>에 파일로 쌓입니다</p></div>"
         "</div>"
-        '<p class="flow-cap">나무 클라우드가 가진 것은 저장소의 <b>사본</b>뿐입니다. '
+        '<p class="flow-cap">나무 클라우드에는 저장소의 <b>사본</b>만이 잠시 거쳐갑니다. '
         "회원님이 연결을 끊어도 기억은 회원님 저장소에 그대로 남습니다.</p>"
     )
 
@@ -114,14 +114,17 @@ def _fork() -> str:
         '<div class="fork">'
         '<div class="opt here"><span class="tag">이 사이트가 맞습니다</span>'
         "<h4>브라우저에서 AI를 쓴다</h4>"
-        "<p>claude.ai·ChatGPT처럼 웹에서 쓰는 AI에 주소 한 줄을 붙이면 "
-        "그때부터 기억이 이어집니다.</p>"
+        "<p>claude.ai·ChatGPT처럼 웹에서 쓰는 AI에 MCP 주소 한 줄을 붙이면 "
+        "그때부터 기억이 이어집니다. 나무 클라우드(MCP)를 사용하시면 나무의 "
+        "기억·학습 코어기능만 사용이 가능하며 나무의 업무 절차적 기능은 "
+        "제외됩니다.</p>"
         '<a class="btn btn-primary" href="/start">시작하는 법 보기</a></div>'
         '<div class="opt"><span class="tag">여기가 아닙니다</span>'
         "<h4>터미널에서 AI를 쓴다</h4>"
-        "<p>Claude Code·agy를 쓰신다면 주소를 붙이는 것이 아니라 나무를 "
-        "<b>플러그인으로 설치</b>하셔야 합니다. 이 주소로는 기억과 파일만 "
-        "넘어가고 나머지 절반이 따라오지 않습니다.</p>"
+        "<p>Claude Code·Antigravity CLI(agy)를 쓰신다면 MCP 주소를 붙이는 "
+        "것이 아니라 나무를 <b>플러그인으로 설치</b>하셔야 합니다. 터미널에서 "
+        "나무를 설치하시면 기억·학습 코어기능과 함께 업무 절차적 기능을 모두 "
+        "사용할 수 있습니다.</p>"
         f'<a class="btn" href="{ui.INSTALL_GUIDE_URL}" target="_blank" '
         'rel="noopener">플러그인 설치 안내서 ↗</a></div>'
         "</div>"
@@ -153,11 +156,11 @@ def home_page(logged_in: bool = False) -> str:
     hero = (
         '<div class="hero"><div class="hero-in">'
         "<div>"
-        '<span class="eyebrow">🌳 웹에서 쓰는 AI를 위한 기억</span>'
+        '<span class="eyebrow">🌳 웹에서 쓰는 (클라우드) AI를 위한 기억</span>'
         "<h1>대화가 끝나도<br>남는 AI 기억</h1>"
         '<p class="lead">오늘 알려준 것을 내일 또 설명하지 않아도 됩니다. '
-        "기억은 회원님의 GitHub 저장소에 파일로 쌓이고, 어떤 AI에서든 같은 "
-        "기억을 꺼내 씁니다.</p>"
+        "기억은 회원님의 GitHub 저장소에 파일로 쌓이고, 어떤 AI든 저장소의 "
+        "같은 기억 공유해 꺼내 봅니다.</p>"
         + _cta_row(logged_in)
         + "</div>"
         f'<div class="hero-art" aria-hidden="true">{_HERO_ART}</div>'
@@ -168,17 +171,18 @@ def home_page(logged_in: bool = False) -> str:
         _flow_diagram(),
         eyebrow="가장 먼저 알아야 할 것",
         title="내 기억은 내 자리에 쌓입니다",
-        sub="나무는 회원님의 기억을 자기 것으로 갖지 않습니다. "
-        "회원님이 고른 저장소 <b>한 칸</b>에만 손이 닿습니다.",
+        sub="나무는 회원님의 기억을 소유하거나 영구 저장하지 않습니다. "
+        "회원님이 선택한 저장소 <b>한 칸</b>의 메모리 파일을 대신 전달할 뿐입니다.",
         band=True,
     )
 
     fork = ui.section(
         _fork(),
         eyebrow="시작하기 전에",
-        title="어디서 AI를 쓰시나요?",
-        sub="두 길은 설치 방법이 아예 다릅니다. 여기서 한 번만 갈라 두면 "
-        "나중에 기억이 두 곳으로 흩어지는 일이 없습니다.",
+        title="AI를 어디에서 사용하시나요?",
+        sub="AI를 웹에서 사용할 때 혹은 터미널에서 사용할 때, 나무의 설치 방법이 "
+        "다릅니다. 이곳에서는 웹에서 AI를 사용할 때 나무를 사용하기 위한 방법을 "
+        "안내해 드립니다.",
     )
 
     how = ui.section(
@@ -235,7 +239,7 @@ def home_page(logged_in: bool = False) -> str:
         '<div class="grid grid-2">'
         '<div class="claim"><span class="ic" aria-hidden="true">🔒</span>'
         "<p><b>원본은 회원님 것입니다</b>기억은 회원님 저장소에 쌓이고, 서버는 "
-        "그 사본을 두고 읽고 씁니다.</p></div>"
+        "그 사본을 임시로 읽고 씁니다.</p></div>"
         '<div class="claim"><span class="ic" aria-hidden="true">🎯</span>'
         "<p><b>저장소 하나만 봅니다</b>회원님이 고른 저장소 한 칸 밖으로는 "
         "손이 닿지 않습니다.</p></div>"
@@ -288,8 +292,10 @@ def start_page(logged_in: bool = False) -> str:
         '<p class="lead">화면이 시키는 대로만 따라오시면 됩니다. '
         "여기 적힌 것은 실제로 뜨는 화면 그대로입니다.</p>"
         + ui.notice(
-            "<b>터미널에서 AI를 쓰신다면 이 길이 아닙니다.</b> Claude Code·agy는 "
-            f'주소가 아니라 <a href="{ui.INSTALL_GUIDE_URL}" target="_blank" '
+            "이 단계는 웹 AI 사용 시 나무를 사용하기 위한 MCP 주소를 생성하고 "
+            "등록하는 곳입니다. 회원님이 터미널을 통해 Claude Code·Antigravity "
+            "CLI(agy)를 사용하면서 함께 나무를 사용하시겠다면 "
+            f'<a href="{ui.INSTALL_GUIDE_URL}" target="_blank" '
             'rel="noopener">플러그인 설치</a>가 맞습니다.',
             tone="warn",
         )
@@ -621,7 +627,7 @@ def faq_page(logged_in: bool = False) -> str:
                     "언제든 확인하실 수 있습니다.</p>",
                 ),
                 (
-                    "Claude Code나 agy를 쓰는데요?",
+                    "Claude Code·Antigravity CLI(agy)를 쓰는데요?",
                     "<p>그 경우에는 이 주소를 붙이지 마세요. 주소로 넘어가는 "
                     "것은 기억과 파일뿐이고, 세션 브리핑·작업 절차·마무리 "
                     "점검처럼 나무의 나머지 절반이 따라오지 않습니다. 게다가 "

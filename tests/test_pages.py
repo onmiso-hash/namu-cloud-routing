@@ -97,7 +97,7 @@ def test_home_tells_where_the_memory_actually_lives():
 def test_start_page_warns_the_terminal_user_before_the_first_step():
     out = pages.start_page(False)
 
-    warn_at = out.find("터미널에서 AI를 쓰신다면")
+    warn_at = out.find("회원님이 터미널을 통해")
     first_step_at = out.find("GitHub으로 로그인합니다")
     assert 0 < warn_at < first_step_at
 

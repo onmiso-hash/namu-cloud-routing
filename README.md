@@ -9,10 +9,10 @@ NAMU 공용 라우팅 MCP 서비스. 요청마다 사용자 키를 읽어 **포�
 - **코어는 복제하지 않는다.** 메모리 저장 로직(recall/record/search·스키마)은 namu-agent에
   단일 원본으로 남고, 이 repo는 그것을 **git submodule**(`vendor/namu-agent`, 태그 핀)로
   재사용한다. 코어에 라우팅 로직을 넣지 않고, 코어가 연 "데이터 루트 이음새"
-  (`config.data_paths_for(root)`)만 소비한다.
-- **저장소 모델**: 한 STORE repo(`namu-cloud-memory`) 안 `users/<사용자키>/` 하위디렉토리.
-  각 디렉토리는 개인용 `~/.namu`와 같은 구조(`memory/learnings.yaml`·`memory/profile.yaml`·
-  `db/namu.db`).
+  (`config.data_paths_for(root)`)만 가져다 쓴다.
+- **저장소 모델**: 사용자 데이터는 한 STORE repo(`namu-cloud-memory`) 안 `users/<사용자키>/`
+  하위디렉토리에 담는다. 각 디렉토리는 개인용 `~/.namu`와 같은 구조를 쓴다
+  (`memory/learnings.yaml`·`memory/profile.yaml`·`db/namu.db`).
 - **라우팅**: 요청 `.../mcp/<사용자키>` → 데이터 루트를 `<STORE clone>/users/<사용자키>`로
   갈아끼워 코어 호출.
 
@@ -40,5 +40,5 @@ git submodule update --init --recursive
 
 ## 범위 (현 단계)
 
-임시 사용자 1명 디렉토리 + 요청별 라우팅 동작까지. git 발급·사용자 write의 STORE
-push-back·동기화·동시성은 후속.
+지금까지 된 것: 임시 사용자 1명 디렉토리 생성 + 요청별 라우팅 동작. git 키 발급, 사용자가
+쓴 데이터를 STORE로 되밀어 넣기(push-back), 동기화, 동시성 처리는 다음 단계로 남겨 뒀다.

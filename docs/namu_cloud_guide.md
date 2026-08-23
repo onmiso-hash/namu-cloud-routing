@@ -21,11 +21,11 @@
 
 노출 도구는 개인용(경로 B)과 동일한 **10종**이다 — 기억 3종(`namu_recall`/`namu_record`/`namu_search`)과 첨부 7종(`namu_upload_file`/`namu_list_files`/`namu_download_file`/`namu_delete_file`/`namu_create_upload_ticket`/`namu_create_download_ticket`/`namu_check_ticket`). 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68).
 
-담을 수 있는 그릇은 **다섯 전부**다 — 교훈(learnings)·개인 사실(profile)·작업일지(tasks)·쪽지(memo)·첨부 기록(attachments). 노출되지 않는 것은 `namu_sync_setup`(서버의 저장소 배선을 바꾸는 도구라 원격에 열면 remote 탈취로 이어진다)과 쪽지 떼기·책갈피 2종(그 PC의 파일을 다루는 도구)뿐이다. 경로 B와 같은 기준이다 — [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고.
+담을 수 있는 그릇은 **다섯 전부**다 — 교훈(learnings)·개인 사실(profile)·작업일지(tasks)·쪽지(memo)·첨부 기록(attachments). 노출되지 않는 것은 `namu_sync_setup`(서버의 저장소 연결(git remote)을 바꾸는 도구라 이걸 원격에 열어두면 저장소 연결을 통째로 빼앗길 수 있다)과 쪽지 떼기·책갈피 2종(그 PC의 파일을 다루는 도구)뿐이다. 경로 B와 같은 기준이다 — [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고.
 
 > **개정 이력** — 최초본은 "그릇 셋(교훈·개인 사실·쪽지), tasks는 노출되지 않는다"고 적었다. 지금은 틀린 설명이다. 작업일지는 `routing_server.namu_record`의 `bowl == "tasks"` 분기로 기록되며(기록할 때 어느 프로젝트인지 함께 적어야 한다 — 웹에는 "지금 열어 둔 폴더"가 없기 때문), 첨부 기록 그릇은 `namu-file-upload-download`(2026-08-07)로 신설됐다.
 
-포트·이미지 태그·Cloudflare ingress 같은 인프라 세부는 onnamu-project/specs 관할이라 이 문서에서는 다루지 않는다(중복 관리 금지).
+포트·이미지 태그·Cloudflare ingress 같은 인프라 세부는 onnamu-project/specs에서 관리하므로 이 문서에서는 다루지 않는다(중복 관리 금지).
 
 ## 2. 연결법 — 이 주소는 **웹 AI 전용**이다
 
@@ -84,7 +84,7 @@ https://namu-cloud.onnamu.kr/mcp/<내-개인-열쇠>?client=<AI-이름>
 - `client` 값 — 영숫자·`.`·`_`·`-` 1~40자(`^[A-Za-z0-9._-]{1,40}$`).
 - **3개 도구(recall/record/search) 모두 `client`가 필수**다 — 없거나 형식이 틀리면 도구 호출이 한국어+영어 상세 에러로 거부된다(주소 끝에 `?client=<AI 이름>`을 붙여 다시 등록하면 된다).
 
-`client` 이름은 **정확한 모델명 예시(`claude` / `chatgpt` / `gemini` / `cursor` / `copilot`)로 넣기를 권장**한다. 애칭·변형도 형식만 맞으면 거부되지 않지만, **나중에 조회할 때 저장했던 값과 글자 그대로 똑같이 넣어야 찾힌다** — `claude`와 `cld`는 서로 다른 값으로 저장된다.
+`client` 이름은 **정확한 모델명(`claude` / `chatgpt` / `gemini` / `cursor` / `copilot`)을 그대로 넣기를 권장**한다. 애칭·변형도 형식만 맞으면 거부되지 않지만, **나중에 조회할 때 저장했던 값과 글자 그대로 똑같이 넣어야 찾힌다** — `claude`와 `cld`는 서로 다른 값으로 저장된다.
 
 ## 4. 저장소를 아직 연결하지 않았다면
 
