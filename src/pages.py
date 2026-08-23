@@ -160,7 +160,7 @@ def home_page(logged_in: bool = False) -> str:
         "<h1>대화가 끝나도<br>남는 AI 기억</h1>"
         '<p class="lead">오늘 알려준 것을 내일 또 설명하지 않아도 됩니다. '
         "기억은 회원님의 GitHub 저장소에 파일로 쌓이고, 어떤 AI든 저장소의 "
-        "같은 기억 공유해 꺼내 봅니다.</p>"
+        "같은 기억을 공유해 꺼내 봅니다.</p>"
         + _cta_row(logged_in)
         + "</div>"
         f'<div class="hero-art" aria-hidden="true">{_HERO_ART}</div>'
