@@ -519,7 +519,10 @@ def _html_onboarding_section(mcp_url: str) -> str:
         '<p style="margin-bottom:0">붙이고 나면 대화 중에 '
         "<code>namu_recall</code>(기억 꺼내기)·"
         "<code>namu_record</code>(기억 남기기)·<code>namu_search</code>"
-        "(기억 찾기) 세 가지를 쓸 수 있습니다.</p></div>"
+        "(기억 찾기)로 기억을 주고받으실 수 있습니다.</p>"
+        '<p style="margin-bottom:0">파일도 함께 오갑니다. 대화 중에 만든 글을 '
+        "파일로 올리거나, 예전에 올린 파일을 목록에서 찾아 다시 받으실 수 "
+        "있습니다.</p></div>"
         "<details>"
         "<summary>직접 서버를 운영하고 싶다면</summary>"
         "<p>나무는 회원님이 <b>직접 서버를 운영하는 길</b>도 있습니다. 차이는 "
