@@ -1275,10 +1275,16 @@ def test_ticket_prefix_never_leaks_into_the_mcp_side():
 
 def test_public_paths_and_menu_never_drift_apart():
     """문(디스패처)과 메뉴(화면)가 같은 목록을 봐야 한다 — 두 곳에 손으로
-    적으면 메뉴에는 있는데 눌러도 404가 나는 항목이 생긴다."""
+    적으면 메뉴에는 있는데 눌러도 404가 나는 항목이 생긴다.
+
+    영어판 메뉴(`ui.MENU_EN`, namu-83)도 같은 규칙을 받는다. 한국어 메뉴만
+    검사하면 영어 화면이 문 밖에 남아 로그인부터 요구받는다.
+    """
     import ui
 
-    assert rs._PUBLIC_PATHS == frozenset(path for path, _label in ui.MENU)
+    assert rs._PUBLIC_PATHS == frozenset(
+        path for path, _label in (*ui.MENU, *ui.MENU_EN)
+    )
 
 
 # ---------------------------------------------------------------------------

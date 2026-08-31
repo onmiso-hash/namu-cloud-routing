@@ -217,9 +217,12 @@ _CHROME_CSS = (
     # 여기서 따로 정하면 반드시 어긋난다(2026-08-15에 실제로 어긋났다).
     # 이 규칙이 더하는 것은 셋뿐이다: 줄어들지 않게, 글꼴을 물려받게(단추는
     # 기본으로 안 물려받는다), 좁은 화면에서 글자를 접게.
-    ".themebtn{flex:none;font-family:inherit;}"
-    ".themebtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}"
-    "@media (max-width:520px){.themebtn .lab{display:none;}}"
+    ".themebtn,.langbtn{flex:none;font-family:inherit;}"
+    ".themebtn:focus-visible,.langbtn:focus-visible"
+    "{outline:2px solid var(--accent);outline-offset:2px;}"
+    # 좁은 화면에서는 글자를 접고 그림글자만 남긴다. 언어 단추가 같이 접히지
+    # 않으면 휴대폰에서 머리줄이 두 줄로 터진다(단추가 셋이 되기 때문).
+    "@media (max-width:520px){.themebtn .lab,.langbtn .lab{display:none;}}"
     "@media (max-width:720px){.topbar-in{flex-wrap:wrap;gap:8px;padding:8px 16px;}"
     ".menu{order:3;width:100%;flex:none;margin:0 -16px;padding:0 16px 6px;}"
     ".brand{flex:1;}}"
@@ -484,7 +487,40 @@ MENU = (
     ("/faq", "자주 묻는 질문"),
 )
 
-PUBLIC_PATHS = tuple(path for path, _label in MENU)
+# 영어 공개 화면(namu-83). 한국어 경로 앞에 `/en`을 붙인 것이 짝이며, 홈만
+# `/en/`이 아니라 `/en`이다(끝의 빗금이 있고 없고로 주소가 갈리지 않게).
+#
+# **경로를 여기서 계산하지 않고 손으로 적는다.** `"/en" + path`로 만들면 홈이
+# `/en/`이 되어 위 규칙과 어긋나고, 나중에 한국어 경로가 늘 때 영어 쪽이 조용히
+# 따라 생겨 버린다 — 문구를 아직 옮기지 않았는데 문이 먼저 열리는 사고다.
+#
+# **이름표는 한국어판을 그대로 옮기지 않고 짧게 줄인다.** 영어는 같은 뜻을
+# 담는 데 글자가 훨씬 많이 들어서(`무엇을 기억하나` 7자 ↔ `What it remembers`
+# 17자), 곧이곧대로 옮기면 머리줄이 넘친다. 넘친 자리는 `.menu`의 가로 밀기가
+# 받아 주지만 스크롤 막대를 숨겨 두어서(201줄) **잘린 것처럼 보인다** —
+# 2026-09-01 사용자 실측으로 `Guide (Korean) ↗`가 잘려 나가는 것을 확인했다.
+# 화면 안의 제목과 `<title>`이 온전한 설명을 하므로, 메뉴는 짧은 이름이 맞다.
+MENU_EN = (
+    ("/en", "Home"),
+    ("/en/start", "Get started"),
+    ("/en/memory", "Memory"),
+    ("/en/safety", "Safety"),
+    ("/en/faq", "FAQ"),
+)
+
+# 같은 화면의 다른 언어판이 어디인지. 언어 단추가 이 짝을 보고 링크를 만든다.
+LANG_PAIRS = {
+    "/": "/en",
+    "/start": "/en/start",
+    "/memory": "/en/memory",
+    "/safety": "/en/safety",
+    "/faq": "/en/faq",
+}
+LANG_PAIRS_BACK = {en: ko for ko, en in LANG_PAIRS.items()}
+
+PUBLIC_PATHS = tuple(path for path, _label in MENU) + tuple(
+    path for path, _label in MENU_EN
+)
 
 GITHUB_URL = "https://github.com/onmiso-hash/namu-agent"
 
@@ -497,72 +533,151 @@ INSTALL_GUIDE_URL = f"{GUIDE_SITE}/install_guide.html"
 SELFHOST_GUIDE_URL = f"{GUIDE_SITE}/remote_mcp_guide.html"
 
 
-def topbar(current: str = "", cta: str = "me") -> str:
+def lang_button(current: str = "", lang: str = "ko") -> str:
+    """다른 언어판으로 건너가는 단추. 짝이 없는 화면에서는 아무것도 그리지 않는다.
+
+    **자바스크립트를 쓰지 않는다.** 밝게/어둡게와 달리 이것은 주소가 다른 별개의
+    화면이라 그냥 링크면 된다. 스크립트가 막힌 브라우저에서도 눌리고, 검색
+    엔진도 이 링크를 따라가 영어판을 찾아낸다.
+
+    단추에 적히는 글자는 **가려는 쪽의 언어**다 — 한국어 화면에는 `English`,
+    영어 화면에는 `한국어`. 지금 보고 있는 언어를 적으면 "이걸 누르면 뭐가
+    되는지"가 뒤집혀 읽힌다.
+
+    로그인 뒤 화면(`/auth/…`)에는 영어판이 없으므로 짝을 못 찾고, 그때는 빈
+    글자를 돌려준다. 눌러도 갈 곳이 없는 단추를 그리지 않는 것이 요점이다.
+    """
+    if lang == "en":
+        target = LANG_PAIRS_BACK.get(current)
+        label, code, aria = "한국어", "ko", "한국어로 보기"
+    else:
+        target = LANG_PAIRS.get(current)
+        label, code, aria = "English", "en", "View in English"
+    if not target:
+        return ""
+    return (
+        f'<a class="btn langbtn" href="{target}" hreflang="{code}" '
+        f'lang="{code}" aria-label="{html.escape(aria)}">'
+        '<span class="ico" aria-hidden="true">🌐</span>'
+        f'<span class="lab">{html.escape(label)}</span></a>'
+    )
+
+
+def topbar(current: str = "", cta: str = "me", lang: str = "ko") -> str:
     """모든 화면 맨 위의 메뉴 줄.
 
     `cta`는 오른쪽 끝 버튼이다 — 공개 페이지에서는 `start`(가입 유도), 로그인
     뒤 화면에서는 `me`(내 페이지로 돌아가기)가 맞다.
+
+    `lang`은 이 화면이 어느 언어판인지다. 메뉴 글자와 갈 곳이 통째로 갈리므로
+    화면마다 인자로 받는다 — 쿠키나 브라우저 설정으로 정하지 않는 이유는,
+    주소만 보고도 어느 언어판인지 알 수 있어야 링크를 남에게 건넬 수 있기
+    때문이다.
     """
+    en = lang == "en"
+    menu = MENU_EN if en else MENU
     items = "".join(
         '<li><a href="%s"%s>%s</a></li>'
         % (path, ' class="on"' if path == current else "", html.escape(label))
-        for path, label in MENU
+        for path, label in menu
     )
     # 안내서로 돌아가는 길. 안내서 쪽 머리줄에는 '나무 클라우드' 버튼이 늘 있는데
     # 이쪽에는 돌아갈 문이 없어 왕복이 한쪽만 열려 있었다(꼬리말에만 있고, 꼬리말은
     # 끝까지 내려야 보인다). **MENU에 넣지 않는다** — 그 튜플은 화면 메뉴이면서
     # 동시에 `PUBLIC_PATHS`(로그인 없이 열어 주는 경로 목록)의 원본이라, 바깥
     # 주소를 끼우면 문 목록에 사이트 밖 주소가 섞인다.
+    #
+    # 안내서는 한국어뿐이라 영어 화면에서도 같은 곳을 가리킨다. 이름표에 그
+    # 사실을 적어 두어야 눌러 보고 나서 알게 되는 일이 없다. 다만 머리줄에서는
+    # `(Korean)`을 다 적으면 메뉴가 넘치므로 국가 코드로 줄인다 — 본문 안의
+    # 링크들은 자리가 넉넉하니 `(Korean)`을 그대로 적는다.
+    guide_label = "Guide (KR) ↗" if en else "나무 안내서 ↗"
     items += (
-        f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">나무 안내서 ↗</a></li>'
+        f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">'
+        f"{guide_label}</a></li>"
     )
     if cta == "start":
-        button = '<a class="btn btn-primary" href="/auth/github/login">시작하기</a>'
+        cta_label = "Get started" if en else "시작하기"
+        button = f'<a class="btn btn-primary" href="/auth/github/login">{cta_label}</a>'
     elif cta == "none":
         button = ""
     else:
-        button = '<a class="btn" href="/auth/me">내 페이지</a>'
+        me_label = "My page" if en else "내 페이지"
+        button = f'<a class="btn" href="/auth/me">{me_label}</a>'
     # 처음엔 숨겨 둔다 — 자바스크립트가 살아 있을 때만 _THEME_TOGGLE_SCRIPT가
     # 꺼낸다. 눌러도 안 듣는 단추를 보여 주지 않는 것이 요점이다.
+    theme_aria = "View in dark mode" if en else "어둡게 보기"
+    theme_lab = "Dark" if en else "어둡게"
     theme_btn = (
         '<button type="button" class="btn themebtn" id="themebtn" hidden '
-        'aria-label="어둡게 보기">'
+        f'aria-label="{theme_aria}">'
         '<span class="ico" aria-hidden="true">🌙</span>'
-        '<span class="lab">어둡게</span></button>'
+        f'<span class="lab">{theme_lab}</span></button>'
     )
+    home = "/en" if en else "/"
+    # 서비스 이름은 영어 화면에서도 로마자로만 적는다 — 'NAMU'는 옮긴 말이
+    # 아니라 이름 그 자체다.
+    brand = "NAMU Cloud" if en else "나무 클라우드"
     return (
         '<header class="topbar"><div class="topbar-in">'
-        '<a class="brand" href="/"><span class="leaf">🌳</span>나무 클라우드</a>'
-        f'<ul class="menu">{items}</ul>{theme_btn}{button}'
+        f'<a class="brand" href="{home}"><span class="leaf">🌳</span>{brand}</a>'
+        f'<ul class="menu">{items}</ul>'
+        f"{lang_button(current, lang)}{theme_btn}{button}"
         "</div></header>"
     )
 
 
-def footer() -> str:
+def footer(lang: str = "ko") -> str:
     """모든 화면 맨 아래. 사이트 안의 페이지가 먼저, 바깥 문서가 나중이다."""
+    en = lang == "en"
     pages = "".join(
-        f'<li><a href="{path}">{html.escape(label)}</a></li>' for path, label in MENU
+        f'<li><a href="{path}">{html.escape(label)}</a></li>'
+        for path, label in (MENU_EN if en else MENU)
+    )
+    # 바깥 문서는 전부 한국어뿐이다. 영어 화면에서 이름표만 영어로 달면 눌러
+    # 들어간 뒤에야 알게 되므로, 이름표에 (Korean)을 함께 적는다.
+    if en:
+        browse_h, terminal_h, about_h = "Browse", "Using it in a terminal", "NAMU Cloud"
+        links = (
+            ("Plugin install guide (Korean) ↗", INSTALL_GUIDE_URL),
+            ("Running your own server (Korean) ↗", SELFHOST_GUIDE_URL),
+            ("NAMU guide (Korean) ↗", GUIDE_URL),
+            ("GitHub repository ↗", GITHUB_URL),
+        )
+        note = (
+            "The original of your memory lives in your own GitHub repository. "
+            "This server holds nothing but a working copy, and you can cut the "
+            "connection at any time."
+        )
+    else:
+        browse_h, terminal_h, about_h = "둘러보기", "터미널에서 쓰기", "나무 클라우드"
+        links = (
+            ("플러그인 설치 안내서 ↗", INSTALL_GUIDE_URL),
+            ("직접 서버 운영하기 ↗", SELFHOST_GUIDE_URL),
+            ("나무 안내서 ↗", GUIDE_URL),
+            ("GitHub 저장소 ↗", GITHUB_URL),
+        )
+        note = (
+            "기억의 원본은 회원님 GitHub 저장소에 있습니다. 이 서버가 가진 것은 "
+            "그 사본뿐이고, 언제든 연결을 끊을 수 있습니다."
+        )
+    outside = "".join(
+        f'<li><a href="{url}" target="_blank" rel="noopener">'
+        f"{html.escape(label)}</a></li>"
+        for label, url in links
     )
     return (
         '<footer class="sitefoot"><div class="sitefoot-in">'
         '<div class="col">'
-        '<h4>둘러보기</h4>'
+        f"<h4>{browse_h}</h4>"
         f"<ul>{pages}</ul>"
         "</div>"
-        '<div class="col"><h4>터미널에서 쓰기</h4><ul>'
-        f'<li><a href="{INSTALL_GUIDE_URL}" target="_blank" rel="noopener">'
-        "플러그인 설치 안내서 ↗</a></li>"
-        f'<li><a href="{SELFHOST_GUIDE_URL}" target="_blank" rel="noopener">'
-        "직접 서버 운영하기 ↗</a></li>"
-        f'<li><a href="{GUIDE_URL}" target="_blank" rel="noopener">'
-        "나무 안내서 ↗</a></li>"
-        f'<li><a href="{GITHUB_URL}" target="_blank" rel="noopener">'
-        "GitHub 저장소 ↗</a></li>"
+        f'<div class="col"><h4>{terminal_h}</h4><ul>'
+        f"{outside}"
         "</ul></div>"
         '<div class="col">'
-        "<h4>나무 클라우드</h4>"
-        '<p class="note">기억의 원본은 회원님 GitHub 저장소에 있습니다. '
-        "이 서버가 가진 것은 그 사본뿐이고, 언제든 연결을 끊을 수 있습니다.</p>"
+        f"<h4>{about_h}</h4>"
+        f'<p class="note">{note}</p>'
         "</div>"
         "</div></footer>"
     )
@@ -820,6 +935,7 @@ def page(
     reveal: bool = False,
     raw_body: bool = False,
     ask: bool = True,
+    lang: str = "ko",
 ) -> str:
     """모든 화면의 공통 껍데기. 외부 CSS/웹폰트/CDN 없이 인라인 <style> 하나다.
 
@@ -829,20 +945,34 @@ def page(
     `ask=False`면 AI 안내원 말풍선을 그 화면에만 빼 준다. 기본값이 참인 것은
     사용자 결정이다 — "모든 화면 구석에 말풍선"(설계서 2절). 화면 5장을 각각
     손대지 않고 여기 한 곳에서 붙는다.
+
+    `lang`은 이 화면의 언어다(namu-83). `<html lang>`을 정확히 적어야 브라우저의
+    번역 제안과 화면 낭독기의 발음이 맞고, 짝이 있는 화면이면 `<link
+    rel="alternate">`로 다른 언어판의 주소도 함께 알린다 — 검색 결과에서 영어
+    사용자에게 영어판이 걸리게 하는 것이 이 줄의 몫이다.
     """
     meta = (
         f'<meta name="description" content="{html.escape(description)}">'
         if description
         else ""
     )
+    # 짝이 있는 화면에서만 붙인다. 양쪽 모두 서로를 가리켜야 검색 엔진이
+    # 짝으로 인정하므로, 한 화면에 두 줄(ko·en)을 함께 적는다.
+    ko_path = current if lang == "ko" else LANG_PAIRS_BACK.get(current)
+    en_path = LANG_PAIRS.get(current) if lang == "ko" else current
+    if ko_path and en_path:
+        meta += (
+            f'<link rel="alternate" hreflang="ko" href="{ko_path}">'
+            f'<link rel="alternate" hreflang="en" href="{en_path}">'
+        )
     inner = body_html if raw_body else f'<div class="wrap">{body_html}</div>'
     return (
-        '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
+        f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)}</title>{meta}{_FAVICON}"
         f"{_THEME_BOOT_SCRIPT}"
         f"<style>{SITE_CSS}</style></head>"
-        f"<body>{topbar(current, cta)}{inner}{footer()}"
+        f"<body>{topbar(current, cta, lang)}{inner}{footer(lang)}"
         f"{_THEME_TOGGLE_SCRIPT}"
         f"{_REVEAL_SCRIPT if reveal else ''}"
         f"{ask_widget() if ask else ''}</body></html>"

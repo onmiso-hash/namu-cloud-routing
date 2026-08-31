@@ -2179,8 +2179,9 @@ class _PerUserSecretDispatcher:
         await self.app(scope, receive, send)
 
 
-# 로그인 없이 열리는 경로. 메뉴(ui.MENU)와 같은 목록이라 한쪽만 늘어날 수
-# 없다 — 메뉴에 없는 공개 경로도, 문이 안 열린 메뉴도 생기지 않는다.
+# 로그인 없이 열리는 경로. 메뉴(ui.MENU + ui.MENU_EN)와 같은 목록이라 한쪽만
+# 늘어날 수 없다 — 메뉴에 없는 공개 경로도, 문이 안 열린 메뉴도 생기지 않는다.
+# 영어판 화면(namu-83)도 같은 목록에 들어 있으므로 여기서 따로 열지 않는다.
 _PUBLIC_PATHS = frozenset(ui.PUBLIC_PATHS)
 
 # 화면이 아니라 파일(글꼴)을 내보내는 주소. 공개 페이지와 **따로 둔다** —

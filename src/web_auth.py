@@ -69,10 +69,17 @@ import ask
 import github_app as ga
 import identity
 import pages
+import pages_en
 import ui
 import user_repo
 
 logger = logging.getLogger("namu.web_auth")
+
+# 공개 화면 전체 — 한국어판과 영어판(namu-83). 라우트를 거는 쪽과 그리는 쪽이
+# **같은 사전 하나**를 보게 해서, 영어 화면을 늘릴 때 한쪽만 늘어나 404가 나는
+# 일이 없게 한다. `ui.PUBLIC_PATHS`(문지기가 보는 목록)와 짝이 맞는지는 아래
+# `_assert_public_pages_match`가 기동할 때 확인한다.
+_ALL_PUBLIC_PAGES = {**pages.PAGES, **pages_en.PAGES}
 
 # httpx는 매 요청의 URL을 INFO로 찍는다("HTTP Request: POST http://... 200 OK").
 # 연결 시험(`_http_probe`)은 URL 경로에 사용자 접속 열쇠를 실어 보내므로, 그대로
@@ -1486,13 +1493,15 @@ def _asset_file(path: str):
 
 
 def _public_page(path: str):
-    render = pages.PAGES[path]
+    # 한국어판과 영어판을 한 사전으로 합쳐서 찾는다(namu-83). 경로가 겹치지
+    # 않으므로 어느 쪽에서 왔는지 여기서 따질 필요가 없다.
+    render = _ALL_PUBLIC_PAGES[path]
 
     async def handler(request: Request) -> Response:
         logged_in = bool(_session_user_key(request))
         return HTMLResponse(render(logged_in))
 
-    handler.__name__ = f"public_page_{path.strip('/') or 'home'}"
+    handler.__name__ = f"public_page_{path.strip('/').replace('/', '_') or 'home'}"
     return handler
 
 
@@ -2678,6 +2687,24 @@ async def logout(request: Request) -> Response:
     return resp
 
 
+def _assert_public_pages_match() -> None:
+    """문(`ui.PUBLIC_PATHS`)과 화면(`_ALL_PUBLIC_PAGES`)의 경로가 정확히 같은지.
+
+    이 프로젝트에서 반복된 사고를 기동 시점에 잡는 장치다. 둘이 어긋나는 방향은
+    둘 다 나쁘다 — 문만 열려 있으면 방문자가 404를 만나고, 화면만 있으면
+    문지기가 로그인부터 요구해 공개 화면이 잠긴다. 어느 쪽이든 **배포 뒤에야**
+    드러나므로, 앱을 세울 때 그 자리에서 멈추는 편이 낫다.
+    """
+    doors = set(ui.PUBLIC_PATHS)
+    screens = set(_ALL_PUBLIC_PAGES)
+    if doors != screens:
+        raise RuntimeError(
+            "공개 경로가 어긋났습니다 — "
+            f"문에만 있음: {sorted(doors - screens)}, "
+            f"화면에만 있음: {sorted(screens - doors)}"
+        )
+
+
 def build_auth_app() -> Starlette:
     """로그인 라우트 + 공개 페이지를 담은 Starlette 앱(순수 ASGI callable)을 만든다.
 
@@ -2685,12 +2712,15 @@ def build_auth_app() -> Starlette:
     lifespan scope를 이 앱으로 보내지 않는다(FastMCP 세션 매니저를 기동하는
     쪽은 MCP 앱 하나뿐이어야 한다).
 
-    공개 페이지 목록을 여기 손으로 다시 적지 않고 `pages.PAGES`를 돌린다 —
-    routing_server의 공개 경로 목록도 같은 곳(`ui.PUBLIC_PATHS`)을 보므로,
-    메뉴를 하나 늘릴 때 한쪽만 늘어나 404가 나는 사고가 생기지 않는다.
+    공개 페이지 목록을 여기 손으로 다시 적지 않고 `_ALL_PUBLIC_PAGES`(한국어판 +
+    영어판)를 돌린다 — routing_server의 공개 경로 목록도 같은 곳
+    (`ui.PUBLIC_PATHS`)을 보므로, 메뉴를 하나 늘릴 때 한쪽만 늘어나 404가 나는
+    사고가 생기지 않는다.
     """
+    _assert_public_pages_match()
     public_routes = [
-        Route(path, _public_page(path), methods=["GET"]) for path in pages.PAGES
+        Route(path, _public_page(path), methods=["GET"])
+        for path in _ALL_PUBLIC_PAGES
     ]
     # 글꼴 파일도 같은 이유로 목록을 손으로 다시 적지 않는다 — routing_server의
     # 문(`ui.ASSET_PATHS`)과 여기가 어긋나면 글꼴만 조용히 404가 된다.

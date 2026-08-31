@@ -12,9 +12,15 @@ import re
 import pytest
 
 import pages
+import pages_en
 import ui
 
 ALL_PAGES = list(pages.PAGES.items())
+
+# 링크가 닿아도 되는 사이트 안의 주소 전부 — 한국어판과 영어판(namu-83).
+# 한국어 화면의 언어 단추가 `/en/…`을 가리키므로, 한국어 페이지만 아는 목록으로
+# 검사하면 멀쩡한 링크가 '없는 곳'으로 잡힌다.
+ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES)
 
 # 사이트가 걸어도 되는, 공개 목록 밖의 우리 주소. 로그인 왕복과 로그인 뒤
 # 화면들이라 여기 적어 둔다 — 이 목록에 없는 새 주소를 페이지가 걸면
@@ -49,7 +55,7 @@ def test_no_public_page_links_into_nowhere(path, render):
 
     for href in re.findall(r'href="(/[^"]*)"', out):
         target = href.split("?")[0].split("#")[0]
-        assert target in pages.PAGES or target in KNOWN_AUTH_PATHS, (
+        assert target in ALL_PUBLIC_PATHS or target in KNOWN_AUTH_PATHS, (
             f"{path} 페이지가 없는 곳으로 보낸다: {href}"
         )
 

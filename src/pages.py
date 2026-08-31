@@ -46,7 +46,7 @@ NEW_REPO_URL = "https://github.com/new?name=namu-memory&visibility=private"
 # 색을 그림 안에 적지 않고 CSS(`ui._PUBLIC_CSS`의 `.hero-art` 규칙)에 맡긴다.
 # SVG 태그에 색 변수를 직접 쓰는 방식은 브라우저마다 처리가 갈려, 실패하면
 # 도형이 통째로 검게 칠해진다 — 첫 화면에서 그 사고가 나면 손쓸 방법이 없다.
-_HERO_ART = """
+HERO_ART = """
 <svg viewBox="0 0 400 330" aria-hidden="true">
   <ellipse class="ha-shadow" cx="200" cy="292" rx="132" ry="15"/>
   <g class="ha-sheet">
@@ -163,7 +163,7 @@ def home_page(logged_in: bool = False) -> str:
         "같은 기억을 공유해 꺼내 봅니다.</p>"
         + _cta_row(logged_in)
         + "</div>"
-        f'<div class="hero-art" aria-hidden="true">{_HERO_ART}</div>'
+        f'<div class="hero-art" aria-hidden="true">{HERO_ART}</div>'
         "</div></div>"
     )
 
