@@ -1345,13 +1345,17 @@ def test_font_paths_are_matched_exactly_not_by_prefix():
 
 
 def test_font_paths_stay_out_of_the_public_page_list():
-    """파일 주소를 공개 페이지 목록에 섞지 않는다 — 섞으면 '메뉴 = 공개 경로'
-    라는 규칙이 흐려져, 메뉴에 없는 경로가 늘어나도 아무도 눈치채지 못한다."""
+    """파일 주소와 숫자 주소를 공개 페이지 목록에 섞지 않는다 — 섞으면
+    '메뉴 = 공개 경로'라는 규칙이 흐려져, 메뉴에 없는 경로가 늘어나도 아무도
+    눈치채지 못한다. 문을 여는 검사는 셋을 합쳐 쓰되 목록은 각자 산다."""
     import ui
 
     assert not (rs._PUBLIC_PATHS & rs._ASSET_PATHS)
-    assert rs._WEB_PATHS == rs._PUBLIC_PATHS | rs._ASSET_PATHS
+    assert not (rs._PUBLIC_PATHS & rs._API_PATHS)
+    assert not (rs._ASSET_PATHS & rs._API_PATHS)
+    assert rs._WEB_PATHS == rs._PUBLIC_PATHS | rs._ASSET_PATHS | rs._API_PATHS
     assert rs._ASSET_PATHS == frozenset(ui.ASSET_PATHS)
+    assert rs._API_PATHS == frozenset(ui.API_PATHS)
 
 
 def test_dispatcher_default_is_the_authenticated_side():

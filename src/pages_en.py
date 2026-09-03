@@ -221,6 +221,15 @@ def home_page(logged_in: bool = False) -> str:
         band=True,
     )
 
+    # 한국어 홈의 `numbers`와 같은 자리다 — 숫자는 언어와 무관하게 같은 두
+    # 자리에서 오고, 이름표만 영어로 바뀐다(`ui.live_stats`).
+    numbers = ui.section(
+        ui.live_stats("en"),
+        eyebrow="So far",
+        title="How many people have come by",
+        band=True,
+    )
+
     closing = ui.section(
         '<div class="card card-accent" style="text-align:center">'
         "<h3 style='margin-top:6px'>Ready to start?</h3>"
@@ -236,7 +245,7 @@ def home_page(logged_in: bool = False) -> str:
 
     return ui.page(
         "NAMU Cloud — AI memory that outlives the conversation",
-        hero + where + fork + how + gains + trust + closing,
+        hero + where + fork + how + gains + trust + numbers + closing,
         current="/en",
         cta="me" if logged_in else "start",
         description="A service that gives browser-based AI a memory. The "

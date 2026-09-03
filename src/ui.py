@@ -20,6 +20,7 @@
 하는 조각이라 인라인이 맞다.
 """
 import html
+import json
 
 # ---------------------------------------------------------------------------
 # 1. 디자인 값 — 색·모서리·그림자. 밝을 때와 어두울 때 한 쌍씩.
@@ -102,6 +103,20 @@ FONT_FAMILY = "Wanted Sans"
 # 글꼴 파일을 내보낼 주소. 디스패처가 웹 쪽으로 보내야 하므로 ui가 원본을 쥔다
 # (메뉴와 같은 이유 — 두 곳에 적으면 한쪽만 고쳐진다).
 ASSET_PATHS = ("/asset/wanted-sans-variable.woff2",)
+
+# 화면도 파일도 아닌, 숫자만 주고받는 주소. 공개 화면(`PUBLIC_PATHS`)·글꼴
+# (`ASSET_PATHS`)과 **따로 둔다** — 셋을 한 통에 담으면 "메뉴 = 공개 경로"라는
+# 규칙이 흐려져, 메뉴에 없는 경로가 슬금슬금 늘어나도 아무도 눈치채지 못한다.
+# 문을 여는 검사(`routing_server._WEB_PATHS`)는 셋을 합쳐 쓰되 목록은 각자 산다.
+#
+# **비밀값과 무관한 고정 경로여야 한다.** 이 서버의 다른 주소는 `/mcp/<열쇠>`
+# 처럼 경로 안에 비밀이 박혀 있지만, 이 셋은 누가 두드려도 같은 글자다 —
+# 그래서 로그·보관함에 그대로 남아도 새는 것이 없다.
+#
+#   POST /api/page           방문 신호 한 건 받기(로그인 불필요, visit_log.py)
+#   GET  /api/visits/summary 방문 집계 읽기(visit_view.py)
+#   GET  /api/members/count  가입한 사람 수(identity.count_users)
+API_PATHS = ("/api/page", "/api/visits/summary", "/api/members/count")
 
 _FONT_CSS = (
     "@font-face{"
@@ -461,6 +476,21 @@ _ASK_CSS = (
     ".ask-panel{width:100%;max-width:100%;height:min(80vh,calc(100vh - 84px));}}"
 )
 
+# ---------------------------------------------------------------------------
+# 5c. 살아 있는 숫자 넷(방문자·방문 횟수·본 화면·가입한 사람)의 차림새.
+# 왜 이 숫자를 그렇게 세는지는 파일 아래쪽 "10. 살아 있는 숫자"에 있다.
+# ---------------------------------------------------------------------------
+_STATS_CSS = (
+    ".stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}"
+    "@media (max-width:720px){.stats{grid-template-columns:repeat(2,1fr);}}"
+    ".stat{background:var(--bg-card);border:1px solid var(--border);"
+    "border-radius:var(--radius);padding:20px 18px;text-align:center;}"
+    ".stat b{display:block;font-size:2rem;line-height:1.2;font-weight:800;"
+    "color:var(--accent-deep);font-variant-numeric:tabular-nums;}"
+    ".stat span{display:block;margin-top:6px;font-size:.88rem;color:var(--fg-soft);}"
+    ".stat-note{margin-top:16px;font-size:.83rem;line-height:1.7;color:var(--fg-faint);}"
+)
+
 SITE_CSS = (
     _FONT_CSS
     + _TOKENS_CSS
@@ -469,6 +499,7 @@ SITE_CSS = (
     + _COMPONENT_CSS
     + _PUBLIC_CSS
     + _ASK_CSS
+    + _STATS_CSS
 )
 
 
@@ -762,6 +793,55 @@ _FAVICON = (
 
 
 # ---------------------------------------------------------------------------
+# 5c. 방문 신호 — 화면이 사람 앞에 그려졌을 때 딱 한 번 알린다.
+#
+# 접속 기록(traffic_log.py)이 세는 것은 '서버가 받은 두드림'이라, 화면 한 장을
+# 열 때 딸려 오는 부속 호출과 훑기 도구가 함께 섞인다. 이 조각이 보내는 신호는
+# **화면 한 장 = 정확히 한 건**이다 — 자동 갱신은 신호를 보내지 않고, 훑기
+# 도구는 자바스크립트를 돌리지 않으므로 저절로 빠진다. 받는 쪽은
+# `web_auth.page_beacon` → `visit_log.record`이고, 왜 이렇게 세는지는
+# `visit_log.py` 머리말에 있다.
+#
+# **경로를 브라우저가 정하지 않는다.** 온나무 포털의 같은 조각은
+# `location.pathname`을 실어 보내지만, 이 서버의 주소에는 사용자 열쇠와 티켓
+# 번호가 박혀 있어서(`/mcp/…`·`/u/…`) 그러면 보관함 파일이 곧 비밀 유출 경로가
+# 된다. 여기서는 **서버가 아는 공개 경로 글자를 그릴 때 박아 넣는다** — 그래서
+# 이 조각은 자기가 어느 화면에 붙었는지 물어볼 필요가 없다. 받는 자리도
+# 아는 경로가 아니면 버리므로 방어가 두 겹이다.
+#
+# **한 번만 보낸다.** setInterval을 붙이지 않는다. 붙이는 순간 화면을 열어 둔
+# 사람이 시간에 비례해 조회 수를 올려, 세는 화면이 제 숫자를 밀어 올린다
+# (2026-09-04 도메인 조회에서 실제로 났던 결함의 재발 경로다).
+# ---------------------------------------------------------------------------
+_VISIT_KEY = "namu-vid"
+
+
+def visit_beacon(path: str) -> str:
+    """이 화면이 그려졌다고 알리는 조각. `path`는 서버가 아는 공개 경로다."""
+    return (
+        "<script>"
+        "(function(){try{"
+        f"var K='{_VISIT_KEY}';"
+        "function id(){try{if(window.crypto&&crypto.randomUUID)"
+        "return crypto.randomUUID();}catch(e){}"
+        "return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,12);}"
+        "var v=null;"
+        "try{v=localStorage.getItem(K);if(!v){v=id();localStorage.setItem(K,v);}}"
+        "catch(e){v=null;}"
+        # 저장이 막힌 브라우저(사생활 보호 모드 등)는 이번 한 번만 쓰는 임시 표를
+        # 붙인다. 조회 수는 제대로 세어지고 방문자 수만 그만큼 부풀 수 있어,
+        # 읽는 쪽(visit_view)이 그 수를 따로 세어 함께 알린다.
+        "if(!v){v='t-'+id();}"
+        f"fetch('{API_PATHS[0]}',{{method:'POST',"
+        "headers:{'Content-Type':'application/json'},"
+        f"body:JSON.stringify({{vid:v,p:{json.dumps(path)}}}),"
+        "keepalive:true}).catch(function(){});"
+        "}catch(e){}})();"
+        "</script>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 6b. AI 안내원 말풍선 — 화면 오른쪽 아래 (설계서 8절)
 # ---------------------------------------------------------------------------
 ASK_NOTICE = (
@@ -950,6 +1030,13 @@ def page(
     번역 제안과 화면 낭독기의 발음이 맞고, 짝이 있는 화면이면 `<link
     rel="alternate">`로 다른 언어판의 주소도 함께 알린다 — 검색 결과에서 영어
     사용자에게 영어판이 걸리게 하는 것이 이 줄의 몫이다.
+
+    **방문 신호는 공개 화면에만 붙는다**(`current`가 `PUBLIC_PATHS`에 있을 때).
+    이 껍데기는 로그인 뒤 화면과 티켓 주소(`/u/<번호>`)에도 쓰이는데, 그쪽까지
+    세면 두 가지가 나빠진다 — (1) "홈페이지 방문자"에 회원의 작업 화면이 섞이고,
+    (2) 신호에 실어 보낼 경로가 곧 비밀값이 된다. 붙일지 말지를 화면마다 인자로
+    받지 않고 경로로 판단하는 것은, 공개 화면을 늘릴 때 신호 붙이는 것을 잊는
+    실수를 없애기 위해서다.
     """
     meta = (
         f'<meta name="description" content="{html.escape(description)}">'
@@ -975,6 +1062,7 @@ def page(
         f"<body>{topbar(current, cta, lang)}{inner}{footer(lang)}"
         f"{_THEME_TOGGLE_SCRIPT}"
         f"{_REVEAL_SCRIPT if reveal else ''}"
+        f"{visit_beacon(current) if current in PUBLIC_PATHS else ''}"
         f"{ask_widget() if ask else ''}</body></html>"
     )
 
@@ -1078,3 +1166,111 @@ def faq(items: "list[tuple[str, str]]") -> str:
     return "".join(
         f"<details><summary>{html.escape(q)}</summary>{a}</details>" for q, a in items
     )
+
+
+# ---------------------------------------------------------------------------
+# 10. 살아 있는 숫자 — 방문자 통계와 가입한 사람 수
+#
+# ## 이 숫자를 무엇으로 세나
+#
+# 접속 기록(`traffic_log.py`, 관리자 '접속자 지도')이 아니라 **방문 신호**
+# (`visit_log.py`)로 센다. 접속 기록은 서버가 받은 두드림이라 화면 한 장에
+# 여러 건이 붙고 훑기 도구까지 섞인다 — 그 숫자를 화면에 그대로 걸면 새로고침
+# 한 번에 제 숫자가 2~3씩 오른다(2026-09-04 도메인 조회에서 실측된 결함).
+# 방문 신호는 화면이 그려졌을 때 브라우저가 딱 한 번 보내므로 새로고침 한 번이
+# 정확히 한 건이다.
+#
+# ## 세는 화면이 자기를 센다는 문제
+#
+# 이 조각이 붙은 홈은 자기 자신도 한 장으로 세어진다. 그것 자체는 맞는 일이다 —
+# 사람이 정말로 홈을 한 번 봤기 때문이다. 나쁜 것은 **숫자가 저절로 자라는
+# 것**이고, 그 길은 둘뿐이라 둘 다 막았다.
+#
+#   1. 신호를 되풀이 보내는 길 — `visit_beacon`에 setInterval을 붙이지 않는다.
+#      화면을 하루 열어 둬도 신호는 한 건이다.
+#   2. 숫자를 되풀이 읽는 길 — 아래 조각도 한 번만 읽고 새로 고치지 않는다.
+#      읽기(`/api/visits/summary`)는 신호를 보내지 않으므로 몇 번을 읽어도
+#      숫자에 영향이 없지만, 자동 갱신을 붙이면 "보고 있으면 오른다"는 착각을
+#      주고 CPU 하나짜리 미니PC에 사람 수만큼의 집계가 되풀이된다.
+#
+# 그래서 화면에 뜨는 숫자는 **이 방문이 반영되기 직전의 값**인 경우가 많다
+# (신호는 최대 5초까지 모였다가 파일에 붙는다 — `visit_log._FLUSH_SECONDS`).
+# 내 방문은 다음에 열 때 숫자에 들어 있다. 숨기는 것이 아니라 순서의 문제다.
+# ---------------------------------------------------------------------------
+# (차림새는 `_STATS_CSS` — SITE_CSS를 짓는 자리 바로 위에 있다. 여기 두면
+#  SITE_CSS가 아직 없는 이름을 부른다.)
+
+# 화면에 그릴 칸 넷. (칸 이름, 한국어 이름표, 영어 이름표) 차례이며, 칸 이름은
+# `/api/visits/summary`의 `합계` 안 열쇠와 같아야 한다 — 마지막 `회원`만
+# 방문 집계가 아니라 가입자 장부(`/api/members/count`)에서 온다.
+_STAT_FIELDS = (
+    ("방문자", "방문자", "Visitors"),
+    ("방문", "방문 횟수", "Visits"),
+    ("조회", "본 화면", "Pages viewed"),
+    ("회원", "가입한 사람", "Members"),
+)
+
+# 방문 집계를 며칠치로 보여 줄지. 보관 기간(`visit_log.KEEP_DAYS`)과 같은 값이라
+# "보관된 전부"와 뜻이 같다 — 더 긴 값을 물어도 없는 파일을 읽을 뿐이다.
+STATS_DAYS = 30
+
+
+def live_stats(lang: str = "ko") -> str:
+    """방문자 통계 네 칸 + 그 숫자가 무엇인지 설명하는 한 줄.
+
+    서버가 그릴 때는 숫자를 모른다 — 화면이 뜬 뒤 브라우저가 두 자리를 읽어
+    채운다. 서버에서 채우지 않는 이유는 이 화면이 `pages.PAGES`의 순수한
+    함수(로그인 여부 하나만 받는다)라서, 여기에 보관함 읽기를 끌어들이면
+    화면을 그리는 일이 파일 읽기에 묶이기 때문이다(느려지고, 보관함이 없으면
+    홈이 통째로 안 뜬다).
+
+    **두 자리를 따로 읽는다.** 한쪽이 실패해도 다른 쪽 숫자는 그대로 떠야
+    한다 — 재료가 아예 다르기 때문이다(보관함 파일 ↔ 가입자 장부).
+    못 읽은 칸은 처음의 `—`로 남는다. 0으로 채우지 않는다: 0은 "아무도 안 왔다"는
+    뜻이고 `—`는 "모른다"는 뜻이라, 둘을 섞으면 화면이 거짓말을 한다.
+    """
+    en = lang == "en"
+    cells = "".join(
+        f'<div class="stat"><b data-stat="{key}">—</b>'
+        f"<span>{html.escape(en_label if en else ko_label)}</span></div>"
+        for key, ko_label, en_label in _STAT_FIELDS
+    )
+    note = (
+        f"Visits over the last {STATS_DAYS} days, counted from a signal each "
+        "browser sends once per screen it actually draws — a reload is exactly "
+        "one. Members is the number of GitHub accounts connected so far; who "
+        "they are never leaves the server."
+        if en
+        else f"방문 숫자는 최근 {STATS_DAYS}일치입니다. 브라우저가 화면을 실제로 "
+        "그렸을 때 한 번 보내오는 신호만 세므로, 새로고침 한 번이 정확히 한 "
+        "건입니다. 가입한 사람은 지금까지 GitHub으로 연결한 계정의 수이고, "
+        "<b>그게 누구인지는 서버 밖으로 나가지 않습니다.</b>"
+    )
+    return (
+        f'<div class="stats" id="namu-stats">{cells}</div>'
+        f'<p class="stat-note">{note}</p>'
+        + _STATS_SCRIPT
+    )
+
+
+# 숫자를 채우는 조각. 한 번만 읽고 새로 고치지 않는다(위 머리말 2번).
+_STATS_SCRIPT = (
+    "<script>"
+    "(function(){"
+    "var box=document.getElementById('namu-stats');if(!box)return;"
+    "function put(k,v){var el=box.querySelector('[data-stat=\"'+k+'\"]');"
+    "if(el&&typeof v==='number')el.textContent=v.toLocaleString();}"
+    f"fetch('{API_PATHS[1]}?days={STATS_DAYS}')"
+    ".then(function(r){if(!r.ok)throw 0;return r.json();})"
+    ".then(function(d){var t=(d&&d['\\ud569\\uacc4'])||{};"
+    "put('\\ubc29\\ubb38\\uc790',t['\\ubc29\\ubb38\\uc790']);"
+    "put('\\ubc29\\ubb38',t['\\ubc29\\ubb38']);"
+    "put('\\uc870\\ud68c',t['\\uc870\\ud68c']);})"
+    ".catch(function(){});"
+    f"fetch('{API_PATHS[2]}')"
+    ".then(function(r){if(!r.ok)throw 0;return r.json();})"
+    ".then(function(d){put('\\ud68c\\uc6d0',d&&d['\\ud68c\\uc6d0']);})"
+    ".catch(function(){});"
+    "})();"
+    "</script>"
+)

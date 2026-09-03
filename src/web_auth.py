@@ -72,8 +72,21 @@ import pages
 import pages_en
 import ui
 import user_repo
+import visit_log
+import visit_view
 
 logger = logging.getLogger("namu.web_auth")
+
+# 이 서비스가 접속·방문 보관함에 적을 때 쓰는 이름. 포털은 "portal", 도메인
+# 조회는 "rdap", 스튜디오는 "studio"로 적고 이 서버는 "cloud"로 적는다.
+# 보관함 폴더(`/traffic`·`/traffic/visits`)를 네 서비스가 함께 쓰고, 읽는 쪽은
+# 목록을 들고 있지 않고 파일 이름에서 이 글자를 읽어 서비스를 가른다.
+#
+# **한 곳에만 적는다.** `routing_server._TRAFFIC_SERVICE`(접속 기록)와 아래
+# 방문 집계가 같은 글자여야 한다 — 어긋나면 한 서비스가 보관함에 두 이름으로
+# 쌓여, 화면마다 다른 숫자가 뜨는데 어느 쪽도 틀렸다고 말해 주지 않는다.
+# routing_server가 web_auth를 import하므로(반대 방향은 순환) 원본이 여기 있다.
+SERVICE = "cloud"
 
 # 공개 화면 전체 — 한국어판과 영어판(namu-83). 라우트를 거는 쪽과 그리는 쪽이
 # **같은 사전 하나**를 보게 해서, 영어 화면을 늘릴 때 한쪽만 늘어나 404가 나는
@@ -2687,6 +2700,144 @@ async def logout(request: Request) -> Response:
     return resp
 
 
+# ---------------------------------------------------------------------------
+# 방문 집계 — 화면이 사람 앞에 그려졌을 때 세는 자리 (2026-09-04)
+#
+# 접속 기록(`traffic_log.py`, 관리자 '접속자 지도')이 세는 것은 **서버가 받은
+# 두드림**이다. 화면 한 장이 열릴 때 브라우저는 서버를 여러 번 두드리고(글꼴·
+# 화면 속 호출), 훑기 도구도 똑같이 두드린다. 그 숫자를 화면에 그대로 걸면
+# 새로고침 한 번에 제 숫자가 2~3씩 오른다 — 2026-09-04 온나무 도메인 조회에서
+# 실측된 결함이고, 고친 방식이 바로 이 두 자리다.
+#
+# 이 아래 세 자리는 **누구나 두드릴 수 있다**(로그인 없음). 방문 신호는 로그인
+# 하지 않은 사람도 세야 하기 때문이고, 나머지 둘은 접속 주소도 명단도 담지 않는
+# 순수한 합계라 홈페이지에 그대로 걸린다.
+# ---------------------------------------------------------------------------
+
+# 브라우저가 신호에 실어 보낸 경로 중 **우리가 인정하는 것**. 신호를 심는 자리
+# (`ui.page`)가 공개 화면에만 붙이므로 정상 신호의 경로는 항상 이 안에 있다.
+_BEACON_PATHS = frozenset(ui.PUBLIC_PATHS)
+
+# 그 밖의 경로가 실려 왔을 때 대신 적는 글자.
+#
+# **왜 그대로 적지 않나.** 이 서버의 주소에는 사용자 열쇠와 티켓 번호가 박혀
+# 있다(`/mcp/<열쇠>`·`/u/<번호>`). 이 자리는 로그인 없이 누구나 아무 글자나
+# 보낼 수 있고, 보낸 글자는 보관함 파일에 그대로 남는다 — 관리자 화면이 읽는
+# 곳이라 컨테이너 로그보다 오히려 손이 더 많이 닿는 자리다. 목록에 없는 경로를
+# 버리면 (1) 열쇠가 실려 와도 적히지 않고, (2) 남이 고른 글자가 통계 화면의
+# '화면별' 표를 채우는 일도 없다. 신호 자체는 버리지 않는다 — 사람이 온 것은
+# 사실이므로 방문자·조회 수에는 들어가야 한다.
+_BEACON_OTHER = "기타"
+
+# 방문 집계를 물을 수 있는 최대 기간. 보관 기간(`visit_log.KEEP_DAYS`)과 같다.
+_VISITS_MAX_DAYS = 30
+
+# 숫자를 중간에 끼워 두면 "새로고침해도 안 변한다"는 신고가 들어온다.
+_NO_STORE = {"Cache-Control": "no-store", "Pragma": "no-cache", "Expires": "0"}
+
+
+def _beacon_path(raw: object) -> str:
+    """신호에 실려 온 경로를 보관함에 적어도 되는 글자로."""
+    return raw if raw in _BEACON_PATHS else _BEACON_OTHER
+
+
+async def page_beacon(request: Request) -> Response:
+    """화면이 사람 앞에 그려졌을 때 브라우저가 보내오는 신호 한 건.
+
+    답으로 아무것도 돌려주지 않는다(204). 화면이 기다릴 것이 없고, 기록이
+    실패해도 방문자가 그것을 알 이유가 없다.
+
+    **어떤 실패도 요청 처리로 새어 나가지 않는다.** 본문이 JSON이 아니어도,
+    칸이 비어 있어도 조용히 넘긴다 — `visit_log.record`가 안에서 다 삼키지만
+    그 앞의 본문 읽기도 같은 이유로 감싼다. 글자 수 자르기와 한 주소의 분당
+    상한(40건/분)은 `visit_log`가 세 벌 모두 같은 기준으로 한다.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    visit_log.record(
+        SERVICE,
+        data.get("vid"),
+        _beacon_path(data.get("p")),
+        request.headers.get,
+        request.client.host if request.client else None,
+    )
+    return Response(status_code=204)
+
+
+async def visits_summary(request: Request) -> Response:
+    """사람이 실제로 연 화면의 수 — 접속 기록과는 재료가 다르다.
+
+    **이 서비스의 숫자만 돌려준다**(`only_service`). 보관함 폴더는 포털·도메인
+    조회와 함께 쓰는 미니PC의 실제 폴더 하나라, 거르지 않으면 남의 방문자를
+    우리 홈페이지 숫자로 보여 준다.
+
+    파일을 읽는 일이라 딴 일꾼에게 맡긴다 — 30일치면 파일이 서른 장이고, 그동안
+    이 서버의 다른 요청(MCP 도구 호출 포함)이 통째로 멈추면 안 된다.
+    """
+    try:
+        days = int(request.query_params.get("days", 1))
+    except (TypeError, ValueError):
+        days = 1
+    days = max(1, min(days, _VISITS_MAX_DAYS))
+    summary = await run_in_threadpool(visit_view.summarize, days, SERVICE)
+    return JSONResponse(summary, headers=_NO_STORE)
+
+
+def _member_count() -> int:
+    with closing(identity.connect()) as conn:
+        return identity.count_users(conn)
+
+
+async def members_count(request: Request) -> Response:
+    """지금까지 GitHub으로 연결한 사람의 수. **누구인지는 나가지 않는다.**
+
+    세는 근거는 `identity.count_users`의 머리말에 있다 — 요약하면, 사용자
+    데이터 폴더가 아니라 가입자 장부를 센다. 폴더에는 신원 계층이 생기기 전에
+    손으로 만든 시험용 칸이 남아 있고 장부에는 없기 때문이다.
+
+    장부를 못 열면 숫자 대신 503을 돌려준다. 0을 돌려주지 않는 이유: 0은
+    "아직 아무도 없다"는 뜻이고, 그것과 "지금 셀 수 없다"를 같은 값으로
+    보내면 화면이 거짓말을 한다(화면은 못 읽은 칸을 `—`로 남긴다).
+    """
+    try:
+        count = await run_in_threadpool(_member_count)
+    except Exception:
+        logger.exception("가입자 수를 세지 못했습니다")
+        return JSONResponse({"회원": None}, status_code=503, headers=_NO_STORE)
+    return JSONResponse({"회원": count}, headers=_NO_STORE)
+
+
+# 숫자만 주고받는 주소 셋. 목록의 원본은 `ui.API_PATHS`이고(문지기가 보는
+# 곳과 같아야 한다), 여기서는 그 경로에 무엇이 붙는지를 정한다.
+_API_ROUTES = [
+    Route(ui.API_PATHS[0], page_beacon, methods=["POST"]),
+    Route(ui.API_PATHS[1], visits_summary, methods=["GET"]),
+    Route(ui.API_PATHS[2], members_count, methods=["GET"]),
+]
+
+
+def _assert_api_paths_match() -> None:
+    """문(`ui.API_PATHS`)과 실제로 건 라우트가 정확히 같은지.
+
+    `_assert_public_pages_match`와 같은 이유의 장치다. 이 셋은 메뉴에 없어
+    사람이 눌러 볼 일이 없으므로, 어긋나도 **배포한 뒤 숫자가 안 뜨는 것**으로만
+    드러난다 — 그런데 화면은 못 읽은 칸을 조용히 `—`로 두므로 오류도 안 난다.
+    앱을 세울 때 그 자리에서 멈추는 편이 낫다.
+    """
+    doors = set(ui.API_PATHS)
+    handlers = {route.path for route in _API_ROUTES}
+    if doors != handlers:
+        raise RuntimeError(
+            "숫자 주소가 어긋났습니다 — "
+            f"문에만 있음: {sorted(doors - handlers)}, "
+            f"자리에만 있음: {sorted(handlers - doors)}"
+        )
+
+
 def _assert_public_pages_match() -> None:
     """문(`ui.PUBLIC_PATHS`)과 화면(`_ALL_PUBLIC_PAGES`)의 경로가 정확히 같은지.
 
@@ -2718,6 +2869,7 @@ def build_auth_app() -> Starlette:
     사고가 생기지 않는다.
     """
     _assert_public_pages_match()
+    _assert_api_paths_match()
     public_routes = [
         Route(path, _public_page(path), methods=["GET"])
         for path in _ALL_PUBLIC_PAGES
@@ -2755,4 +2907,5 @@ def build_auth_app() -> Starlette:
             Route("/auth/ask", ask_endpoint, methods=["POST"]),
             Route("/auth/logout", logout, methods=["GET"]),
         ]
+        + _API_ROUTES
     )

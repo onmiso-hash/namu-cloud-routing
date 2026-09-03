@@ -257,6 +257,17 @@ def home_page(logged_in: bool = False) -> str:
         band=True,
     )
 
+    # 살아 있는 숫자. 서버가 그릴 때는 값을 모르고, 화면이 뜬 뒤 브라우저가
+    # 두 자리를 읽어 채운다(`ui.live_stats`의 머리말에 왜 그렇게 하는지 있다).
+    # 자랑하려고 거는 자리가 아니라, 처음 온 사람이 "이거 돌아가고 있는
+    # 서비스인가"를 확인하는 자리다 — 그래서 숫자가 작아도 그대로 보인다.
+    numbers = ui.section(
+        ui.live_stats("ko"),
+        eyebrow="지금까지",
+        title="이만큼 다녀가셨습니다",
+        band=True,
+    )
+
     closing = ui.section(
         '<div class="card card-accent" style="text-align:center">'
         "<h3 style='margin-top:6px'>지금 시작하시겠어요?</h3>"
@@ -272,7 +283,7 @@ def home_page(logged_in: bool = False) -> str:
 
     return ui.page(
         "나무 클라우드 — 대화가 끝나도 남는 AI 기억",
-        hero + where + fork + how + gains + trust + closing,
+        hero + where + fork + how + gains + trust + numbers + closing,
         current="/",
         cta="me" if logged_in else "start",
         description="웹에서 쓰는 AI에 기억을 붙여 주는 서비스. 기억의 원본은 "
