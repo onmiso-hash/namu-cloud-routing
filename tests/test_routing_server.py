@@ -1134,20 +1134,44 @@ def test_resolve_streamable_path_ignores_shared_path_secret():
     assert rs.resolve_streamable_path(_settings(path_secret="s3cr3t")) == "/mcp"
 
 
+def _captured_mount_path(monkeypatch) -> dict:
+    """build_app이 MCP 앱을 만들 때 실제로 넘기는 인자를 받아 적는다.
+
+    mcp SDK 2.x에서 마운트 경로는 인스턴스 settings가 아니라
+    `streamable_http_app(streamable_http_path=...)` 인자로 들어간다(1.x는
+    `mcp.settings.streamable_http_path`에 미리 대입하는 방식이라 이 두 시험도
+    그 속성을 읽었다). 그래서 "무엇이 남았나"가 아니라 **"무엇을 넘겼나"**를 본다 —
+    실제로 쓰이는 값을 직접 보므로 판정이 오히려 세졌다.
+    """
+    recorded: dict = {}
+
+    async def _dummy_app(scope, receive, send):  # pragma: no cover - 호출되지 않는다
+        raise AssertionError("이 시험은 앱을 실행하지 않는다")
+
+    def _fake(**kwargs):
+        recorded.update(kwargs)
+        return _dummy_app
+
+    monkeypatch.setattr(rs.mcp, "streamable_http_app", _fake)
+    return recorded
+
+
 def test_build_app_ignores_shared_path_secret(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
     monkeypatch.setenv("NAMU_HTTP_PATH_SECRET", "s3cr3t")
+    recorded = _captured_mount_path(monkeypatch)
     rs.build_app()
-    assert rs.mcp.settings.streamable_http_path == "/mcp"
+    assert recorded["streamable_http_path"] == "/mcp"
 
 
 def test_build_app_without_path_secret_keeps_mcp(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMU_STORE_ROOT", str(tmp_path))
     monkeypatch.setenv("NAMU_HTTP_ALLOW_NOAUTH", "1")
     monkeypatch.delenv("NAMU_HTTP_PATH_SECRET", raising=False)
+    recorded = _captured_mount_path(monkeypatch)
     rs.build_app()
-    assert rs.mcp.settings.streamable_http_path == "/mcp"
+    assert recorded["streamable_http_path"] == "/mcp"
 
 
 def test_build_app_actually_wires_the_ticket_addresses(monkeypatch, tmp_path):

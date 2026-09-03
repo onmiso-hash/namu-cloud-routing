@@ -74,7 +74,7 @@ import traffic_log  # noqa: E402
 import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
-from mcp.server.fastmcp import Context, FastMCP  # noqa: E402
+from mcp.server.mcpserver import Context, MCPServer  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
 # 이 서버가 내주는 도구. **소개문도 이 목록에서 만든다** — 목록과 소개문이 갈라지면
@@ -91,7 +91,7 @@ EXPOSED_TOOLS = frozenset({
     "namu_task_move",
 })
 
-mcp = FastMCP(
+mcp = MCPServer(
     "namu-cloud-routing",
     # upload_takes_path=False — 이 서버의 namu_upload_file에는 파일 경로 칸이 없다
     # (글자 원문 하나만 받는다). 소개문이 "디스크의 파일을 올린다"고 말하면 파일을
@@ -157,6 +157,24 @@ _VIA_ERROR_MSG = (
 )
 
 
+def _http_request(ctx: "Context | None"):
+    """ctx에 실린 HTTP 요청 객체를 꺼낸다(없으면 None) — 개인용
+    mcp_server._http_request를 그대로 미러.
+
+    mcp SDK 2.x에서 `Context.request_context`는 **요청 밖에서 읽으면 ValueError를
+    던지는 property**로 바뀌었다(1.x는 None을 돌려줬다). `getattr(..., None)`은
+    AttributeError만 삼키므로 그대로 두면 요청 밖 호출(테스트·직접 호출)이 예외로
+    죽는다. 접근을 이 한 곳에 모아 ValueError를 없음으로 읽는다.
+    """
+    if ctx is None:
+        return None
+    try:
+        request_context = ctx.request_context
+    except (ValueError, AttributeError):
+        return None
+    return getattr(request_context, "request", None)
+
+
 def _resolve_via(ctx: "Context | None") -> str | None:
     """URL 쿼리(`?client=`)에서 출처(via) 태그를 읽어 검증한다 — 개인용
     mcp_server._resolve_via(namu-50)를 그대로 미러. '어느 AI가 남긴 기억인지'를
@@ -166,9 +184,7 @@ def _resolve_via(ctx: "Context | None") -> str | None:
     `?client=`가 없거나 형식이 틀리면 거부한다(개인용의 웹 경로 동작과 동일).
     ctx/req가 없는 경우(테스트/직접 호출)만 면제하고 None을 반환한다.
     """
-    if ctx is None:
-        return None
-    req = getattr(getattr(ctx, "request_context", None), "request", None)
+    req = _http_request(ctx)
     if req is None:
         return None
     client = (req.query_params.get("client") or "").strip()
@@ -184,7 +200,7 @@ def _resolve_user(ctx: "Context | None") -> str:
     태그)와 달리 ctx/request가 없으면 면제하지 않고 곧바로 거부한다 — 라우팅
     대상 자체를 판별할 수 없기 때문이다.
     """
-    req = getattr(getattr(ctx, "request_context", None), "request", None) if ctx is not None else None
+    req = _http_request(ctx)
     if req is None:
         raise ValueError(_USER_KEY_ERROR_MSG)
     raw = (req.query_params.get("user") or "").strip()
@@ -1755,7 +1771,7 @@ def namu_download_file(
 # ---------------------------------------------------------------------------
 def _origin_for(ctx: "Context | None") -> str:
     """이 서비스의 바깥 주소(`https://호스트`). 요청이 없으면 빈 문자열."""
-    req = getattr(getattr(ctx, "request_context", None), "request", None) if ctx else None
+    req = _http_request(ctx)
     if req is None:
         return ""
     return web_auth._public_origin(req)
@@ -2042,7 +2058,7 @@ class AuthMiddleware:
         await self.app(scope, receive, send)
 
 
-# FastMCP가 host in (127.0.0.1/localhost/::1)일 때 자동 적용하는 기본값. 터널 경유
+# SDK가 host in (127.0.0.1/localhost/::1)일 때 자동 적용하는 기본값. 터널 경유
 # 요청 허용을 위해 NAMU_HTTP_ALLOWED_HOSTS를 넣더라도 로컬 curl 스모크가 계속
 # 동작해야 하므로, 이 기본값을 "대체"가 아니라 사용자 항목에 "합쳐서" 쓴다.
 _LOCALHOST_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
@@ -2054,9 +2070,9 @@ def _build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySett
     TransportSecuritySettings를 만든다.
 
     - allowed_hosts == ["*"]: DNS rebinding 보호 자체를 끈다.
-    - 그 외 비어있지 않은 값: 보호는 유지한 채 FastMCP localhost 기본 3종에
+    - 그 외 비어있지 않은 값: 보호는 유지한 채 SDK localhost 기본 3종에
       사용자 항목을 더한다(대체 금지).
-    - 빈 리스트(미설정): None을 반환해 FastMCP 자동 기본값을 그대로 둔다.
+    - 빈 리스트(미설정): None을 반환해 SDK 자동 기본값을 그대로 둔다.
     """
     if not allowed_hosts:
         return None
@@ -2071,7 +2087,7 @@ def _build_transport_security(allowed_hosts: list[str]) -> TransportSecuritySett
 
 # MCP 앱이 실제로 마운트되는 고정 경로. 바깥에서 들어오는 주소는 항상
 # `/mcp/<사용자별 열쇠>`이고, _PerUserSecretDispatcher가 열쇠를 떼어내 신원을
-# 판정한 뒤 경로를 이 값으로 바꿔 넘긴다 — FastMCP는 마운트 경로가 고정이라
+# 판정한 뒤 경로를 이 값으로 바꿔 넘긴다 — MCP 앱은 마운트 경로가 고정이라
 # "주소마다 다른 경로"를 직접 받을 수 없기 때문이다.
 _MCP_MOUNT_PATH = "/mcp"
 
@@ -2199,7 +2215,7 @@ class _AuthOrMcpDispatcher:
     """`/auth/`(웹 로그인) vs 그 외 전부(MCP+Auth)를 가르는 순수 ASGI 3-인자
     디스패처(AuthMiddleware와 같은 관례).
 
-    Starlette `Mount`로 감싸지 않는 이유: FastMCP의 streamable HTTP 앱은
+    Starlette `Mount`로 감싸지 않는 이유: MCP의 streamable HTTP 앱은
     lifespan 이벤트에서 세션 매니저(StreamableHTTPSessionManager)를 기동한다.
     Mount 경유는 하위 앱까지 lifespan을 전달하는 라우팅 규칙에 기대야 해서
     실수하기 쉽다 — 여기서는 scope 자체를 직접 봐서 실수의 여지를 없앤다.
@@ -2207,7 +2223,7 @@ class _AuthOrMcpDispatcher:
     "path" 키가 없어 아래 `path.startswith("/auth/")` 검사가 항상 거짓이 되고,
     그 결과 자연히 mcp_app(=AuthMiddleware) 쪽으로 넘어간다. AuthMiddleware는
     http가 아닌 scope를 무조건 통과시키므로(92~130줄 참고), lifespan은 결국
-    FastMCP의 streamable_http_app()에만 전달된다 — "lifespan은 MCP 앱에만"
+    MCP의 streamable_http_app()에만 전달된다 — "lifespan은 MCP 앱에만"
     요구사항이 이 else 분기 하나로 충족된다.
 
     보안 회귀 방지: 기본값(else 분기)이 "인증 있는 쪽"이다 — 어떤 경로 조작
@@ -2551,12 +2567,19 @@ def build_ticket_app():
 def build_app():
     settings = cfg.http_settings()
     validate_settings(settings)
-    mcp.settings.stateless_http = True
-    mcp.settings.streamable_http_path = resolve_streamable_path(settings)
+    # mcp SDK 2.x에서 경로·무상태·전송 보안은 인스턴스 settings가 아니라
+    # streamable_http_app()의 키워드 인자로 들어간다(1.x는 앱을 만들기 전에
+    # `mcp.settings.*`에 대입해야 반영되는 구조였다). `host`는 일부러 넘기지
+    # 않는다 — 기본값 127.0.0.1이 DNS rebinding 자동 보호를 켜는 조건이라,
+    # 넘기지 않는 것이 1.x 때의 동작을 그대로 유지하는 길이다.
+    app_options: dict = {
+        "stateless_http": True,
+        "streamable_http_path": resolve_streamable_path(settings),
+    }
     ts = _build_transport_security(settings.get("allowed_hosts", []))
     if ts is not None:
-        mcp.settings.transport_security = ts
-    mcp_app = AuthMiddleware(mcp.streamable_http_app(), settings["token"])
+        app_options["transport_security"] = ts
+    mcp_app = AuthMiddleware(mcp.streamable_http_app(**app_options), settings["token"])
     # 사용자별 열쇠 판정이 토큰 검사보다 **바깥**이다 — 열쇠가 없는 요청은
     # 토큰 로직에 닿기 전에 404로 끊는다.
     mcp_app = _PerUserSecretDispatcher(mcp_app)

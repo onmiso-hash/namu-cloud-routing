@@ -57,7 +57,7 @@ COPY vendor/namu-agent/docs/*.html ./vendor/namu-agent/docs/
 # mcp[cli]의 전이 의존으로 우연히 들어와 있지만, 그 패키지가 의존을 바꾸면 배포
 # 빌드가 조용히 깨지므로 pyproject.toml과 동일하게 명시 선언한다.
 RUN uv pip install --system \
-    "mcp[cli]>=1.28,<2" \
+    "mcp[cli]>=2.1,<3" \
     "python-ulid>=3.0.0" \
     "PyYAML>=6.0" \
     "python-dotenv>=1.0.0" \

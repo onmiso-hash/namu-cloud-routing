@@ -38,8 +38,9 @@ def test_instructions_come_from_the_core():
 
 
 def _tool_schema(name: str) -> dict:
+    # 칸 이름은 mcp SDK 2.x에서 `inputSchema` → `input_schema`로 바뀌었다.
     tools = {t.name: t for t in asyncio.run(rs.mcp.list_tools())}
-    return tools[name].inputSchema
+    return tools[name].input_schema
 
 
 def _tool_line(name: str) -> str:

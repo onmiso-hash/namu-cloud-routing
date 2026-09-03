@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "NAMU 공용 라우팅 MCP 서비스 — 요청별 사용자 디렉토리로 포터블 메모리 코어(namu-agent)를 라우팅한다"
 requires-python = ">=3.12"
 # 코어(vendor/namu-agent/namu-plugin의 config/db/profile)가 요구하는 의존성과 동일 집합 +
-# 라우팅 서버 자체(FastMCP stateless HTTP). 코어는 submodule로 재사용하므로 여기 deps에
+# 라우팅 서버 자체(MCPServer stateless HTTP). 코어는 submodule로 재사용하므로 여기 deps에
 # 코어를 넣지 않는다(sys.path로 import).
 # pyjwt[crypto]/httpx는 신원 계층(github_app.py)이 **직접** 쓰므로 명시 선언한다.
 # 현재 venv에는 다른 패키지의 전이 의존으로 이미 들어와 있지만, 그 패키지가 의존을
 # 바꾸면 배포 빌드가 조용히 깨진다.
 dependencies = [
-    "mcp[cli]>=1.28,<2",
+    "mcp[cli]>=2.1,<3",
     "python-ulid>=3.0.0",
     "PyYAML>=6.0",
     "python-dotenv>=1.0.0",
