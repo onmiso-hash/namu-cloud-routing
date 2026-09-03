@@ -2286,6 +2286,13 @@ class _AuthOrMcpDispatcher:
 # 어느 쪽도 틀렸다고 말해 주지 않는다.
 _TRAFFIC_SERVICE = web_auth.SERVICE
 
+# 홈페이지가 숫자를 채우려고 스스로 부르는 자리는 방문자 접속으로 세지 않는다.
+# 방문자가 홈을 한 번 열면 /·/api/page 말고 이 둘도 함께 불려서, 접속자 지도의
+# 그 사람 IP 요청 수가 화면 한 장에 세 건씩 오르던 것을 2026-09-04에 확인했다
+# (포털·도메인 조회도 같은 날 같은 방식으로 고침). 방문 신호(/api/page)는 화면
+# 한 장과 1:1이라 그대로 남긴다.
+_TRAFFIC_SKIP_PATHS = frozenset({"/api/visits/summary", "/api/members/count"})
+
 # 티켓 주소(`/u/<번호>`·`/d/<번호>`)의 번호는 32바이트 난수이고, **그 번호를 아는
 # 것이 곧 그 파일을 올리고 받을 권한**이다(tickets.new_ticket_id). 코어도 로그에는
 # 앞 8자만 적는다(tickets.short). 여기서는 앞자락조차 남기지 않고 access_log의
@@ -2524,6 +2531,8 @@ class _TrafficRecorder:
             if written:
                 return
             written = True
+            if (scope.get("path") or "") in _TRAFFIC_SKIP_PATHS:
+                return
             try:
                 client = scope.get("client")
                 traffic_log.record(

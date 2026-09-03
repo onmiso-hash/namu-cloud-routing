@@ -255,6 +255,21 @@ def test_요청이_지나가면_한_줄이_남는다(_traffic_dir):
     assert line["st"] == 200
 
 
+def test_홈이_숫자를_채우려_부르는_자리는_접속으로_안_센다(_traffic_dir):
+    """방문자가 홈을 한 번 열면 /api/visits/summary·/api/members/count 도 함께
+    불린다. 이것까지 세면 그 사람 IP 요청 수가 화면 한 장에 여러 건씩 오른다
+    (2026-09-04 사용자 확인). /api/page 는 화면 한 장과 1:1이라 그대로 센다."""
+    client = TestClient(rs._TrafficRecorder(_대역앱([])))
+
+    for 경로 in ("/api/visits/summary", "/api/members/count"):
+        client.get(경로, headers={"cf-connecting-ip": "203.0.113.9"})
+    client.post("/api/page", headers={"cf-connecting-ip": "203.0.113.9"})
+    traffic_log.flush()
+
+    남은경로 = [line["path"] for line in _lines(_traffic_dir)]
+    assert 남은경로 == ["/api/page"]
+
+
 def test_열쇠가_틀려_404로_끊긴_요청도_남는다(monkeypatch, tmp_path, _traffic_dir):
     """남의 열쇠를 찍어 보는 두드림이야말로 이 화면으로 봐야 할 것이다.
     기록을 안쪽에 붙였다면 이런 요청은 통째로 안 보인다."""
