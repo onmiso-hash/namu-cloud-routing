@@ -46,6 +46,7 @@ import sqlite3
 import sys
 import time
 from contextlib import closing
+from functools import wraps
 from pathlib import Path
 
 # vendor/namu-agent/namu-plugin을 sys.path에 얹는다 (이 파일 위치 기준 절대경로).
@@ -75,6 +76,7 @@ import ui  # noqa: E402
 import user_repo  # noqa: E402
 import web_auth  # noqa: E402
 from mcp.server.mcpserver import Context, MCPServer  # noqa: E402
+from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
 
 # 이 서버가 내주는 도구. **소개문도 이 목록에서 만든다** — 목록과 소개문이 갈라지면
@@ -103,6 +105,41 @@ mcp = MCPServer(
 )
 
 logger = logging.getLogger("namu.routing_server")
+
+
+def tool(*d_args, **d_kwargs):
+    """`mcp.tool()` 대신 쓴다 — 거절 사유가 AI에게 실제로 닿게 하는 껍데기.
+
+    개인용 서버의 `mcp_server.tool()`과 같은 물건이며, 그쪽에 붙은 설명이
+    이 자리에도 그대로 적용된다(namu-tool-error-visibility, 2026-09-04).
+    코어를 얹어 쓰는 다른 것들과 달리 **도구를 등록하는 자리는 이 파일에만
+    있어서**, 코어 판을 올리는 것만으로는 이쪽이 따라오지 않는다.
+
+    SDK 2.x는 도구가 던진 예외를 두 갈래로 나눈다. `ToolError`는 "예상한
+    실패"라 문구가 그대로 AI에게 전달되고, 그 밖의 예외는 "고장"으로 취급되어
+    `Error executing tool <이름>` 한 줄로 바뀐다 — 원래 문구는 서버 로그에만
+    남는다. 이 서버는 거절 사유를 전부 `ValueError`로 던지므로, 정성껏 써 둔
+    안내문이 웹에서 나무를 쓰는 AI에게 한 줄도 닿지 않았다.
+
+    **`ValueError`만 바꾼다.** 이름을 잘못 부르거나 없는 칸을 읽는 진짜 고장은
+    지금처럼 감싸인 채 두어야, 안내문과 결함이 섞이지 않는다.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        def guarded(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
+
+        mcp.tool(*d_args, **d_kwargs)(guarded)
+        # 등록하는 것은 감싼 쪽이지만, 모듈에 남기는 이름은 **원본**이다. 파이썬으로
+        # 직접 부르는 자리(tests/test_routing_server.py의 `rs.namu_record(...)` 등
+        # 37곳이 `ValueError`를 기대한다)는 지금처럼 `ValueError`를 받아야 한다.
+        return fn
+
+    return decorator
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +483,7 @@ def _push_and_collect_warning(conn: sqlite3.Connection, user_key: str) -> "str |
 # ---------------------------------------------------------------------------
 # 3도구 — 이름·파라미터는 개인용 mcp_server.py와 동일(claude.ai 커넥터 호환).
 # ---------------------------------------------------------------------------
-@mcp.tool()
+@tool()
 def namu_recall(
     query: str | None = None,
     task_type: str | None = None,
@@ -497,7 +534,7 @@ def namu_recall(
         }
 
 
-@mcp.tool()
+@tool()
 def namu_search(
     query: str | None = None,
     bowl: str = "learnings",
@@ -1112,7 +1149,7 @@ _RECORD_TOOL_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_RECORD_TOOL_DESCRIPTION)
+@tool(description=_RECORD_TOOL_DESCRIPTION)
 def namu_record(
     # ── 새 이름 (namu-65 3층 스키마) — 개인용 mcp_server.namu_record와 같은 순서
     bowl: str | None = None,
@@ -1324,7 +1361,7 @@ _TASK_MOVE_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_TASK_MOVE_DESCRIPTION)
+@tool(description=_TASK_MOVE_DESCRIPTION)
 def namu_task_move(
     task: str,
     to: str,
@@ -1597,7 +1634,7 @@ def _text_to_bytes(content_text: str) -> bytes:
     return content
 
 
-@mcp.tool(description=_UPLOAD_DESCRIPTION)
+@tool(description=_UPLOAD_DESCRIPTION)
 def namu_upload_file(
     name: str,
     content_text: str,
@@ -1640,7 +1677,7 @@ _LIST_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_LIST_DESCRIPTION)
+@tool(description=_LIST_DESCRIPTION)
 def namu_list_files(
     include_removed: bool = False,
     ctx: Context | None = None,
@@ -1723,7 +1760,7 @@ def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:
     return attach_files.download(conn, user_key, name)
 
 
-@mcp.tool(description=_DOWNLOAD_DESCRIPTION)
+@tool(description=_DOWNLOAD_DESCRIPTION)
 def namu_download_file(
     name: str,
     force_base64: bool = False,
@@ -1796,7 +1833,7 @@ _CREATE_UPLOAD_TICKET_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_CREATE_UPLOAD_TICKET_DESCRIPTION)
+@tool(description=_CREATE_UPLOAD_TICKET_DESCRIPTION)
 def namu_create_upload_ticket(
     name: str,
     summary: str,
@@ -1858,7 +1895,7 @@ _CREATE_DOWNLOAD_TICKET_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_CREATE_DOWNLOAD_TICKET_DESCRIPTION)
+@tool(description=_CREATE_DOWNLOAD_TICKET_DESCRIPTION)
 def namu_create_download_ticket(name: str, ctx: Context | None = None) -> dict:
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)
@@ -1903,7 +1940,7 @@ _CHECK_TICKET_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_CHECK_TICKET_DESCRIPTION)
+@tool(description=_CHECK_TICKET_DESCRIPTION)
 def namu_check_ticket(ticket_id: str, ctx: Context | None = None) -> dict:
     key = _resolve_user(ctx)
     _resolve_via(ctx)
@@ -1938,7 +1975,7 @@ _DELETE_DESCRIPTION = (
 )
 
 
-@mcp.tool(description=_DELETE_DESCRIPTION)
+@tool(description=_DELETE_DESCRIPTION)
 def namu_delete_file(
     name: str,
     reason: str,
