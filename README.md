@@ -10,9 +10,12 @@ NAMU 공용 라우팅 MCP 서비스. 요청마다 사용자 키를 읽어 **포�
   단일 원본으로 남고, 이 repo는 그것을 **git submodule**(`vendor/namu-agent`, 태그 핀)로
   재사용한다. 코어에 라우팅 로직을 넣지 않고, 코어가 연 "데이터 루트 이음새"
   (`config.data_paths_for(root)`)만 가져다 쓴다.
-- **저장소 모델**: 사용자 데이터는 한 STORE repo(`namu-cloud-memory`) 안 `users/<사용자키>/`
-  하위디렉토리에 담는다. 각 디렉토리는 개인용 `~/.namu`와 같은 구조를 쓴다
-  (`memory/learnings.yaml`·`memory/profile.yaml`·`db/namu.db`).
+- **저장소 모델(namu-58로 변경)**: 기억의 원본은 단일 공용 STORE repo가 아니라 **사용자 본인이
+  연결한 GitHub 저장소**다. `STORE_ROOT/users/<사용자키>/`는 그 저장소의 순수 캐시(`user_repo.py`가
+  단명 토큰으로 clone/fetch/push)일 뿐이며, 지워도 원본은 사용자 GitHub에 남는다. 각 캐시 디렉토리는
+  개인용 `~/.namu`와 같은 구조를 쓴다(`memory/learnings.yaml`·`memory/profile.yaml`·`db/namu.db`).
+  (예전에는 `namu-cloud-memory` 하나에 사용자별 하위디렉토리를 두는 단일 STORE 모델이었으나,
+  namu-58에서 사용자별 개인 저장소 연결로 대체되며 폐기됐다.)
 - **라우팅**: 요청 `.../mcp/<사용자키>` → 데이터 루트를 `<STORE clone>/users/<사용자키>`로
   갈아끼워 코어 호출.
 
