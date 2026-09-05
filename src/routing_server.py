@@ -1168,19 +1168,11 @@ def namu_record(
     # ── 첨부 기록 전용 2칸 (namu-file-upload-download 4단계)
     path: str | None = None,
     bytes: int | None = None,
-    # ── 옛 이름 (그대로 불러도 새 칸으로 옮겨 저장하고 어디로 옮겼는지 알린다)
-    task: str | None = None,
-    outcome: str | None = None,
-    task_type: str | None = None,
-    verified_by: str | None = None,
-    kind: str | None = None,
-    subject: str | None = None,
-    statement: str | None = None,
-    source: str | None = None,
-    text: str | None = None,
-    tag: str | None = None,
-    title: str | None = None,
-    purpose: str | None = None,
+    # 옛 이름 12개는 2026-09-05에 뺐다(개인용 mcp_server와 같은 조치). 한 달간
+    # 실측에서 옛 이름'만'으로 부른 호출이 0건인데, 목록에 보인다는 이유로 새 이름과
+    # 함께 채워져 거절을 불렀다 — 기록 거절 113건 중 36건으로 1위였다. 코어의
+    # record_input.normalize는 이관 로직을 그대로 갖고 있으므로 감춘 것이지 없앤 것이
+    # 아니다. 두 서버가 같은 칸을 내주어야 하니 한쪽만 고치지 않는다.
     ctx: Context | None = None,
 ):
     """Record one memory into this user's own bowl (append-only), routed via
@@ -1226,10 +1218,6 @@ def namu_record(
         "project": project, "confidence": confidence, "supersedes": supersedes,
         "create": create, "done_when": done_when,
         "path": path, "bytes": bytes,
-        "task": task, "outcome": outcome, "task_type": task_type,
-        "verified_by": verified_by, "kind": kind, "subject": subject,
-        "statement": statement, "source": source, "text": text, "tag": tag,
-        "title": title, "purpose": purpose,
     })
 
     v = parsed.values
