@@ -195,7 +195,7 @@ def test_no_ctx_at_all_rejected():
 def test_record_missing_user_key_rejected(tmp_path):
     with pytest.raises(ValueError):
         rs.namu_record(
-            task="t", outcome="success", reason="r", ctx=_ctx(None),
+            bowl="learnings", topic="t", status="success", summary="s", reason="r", body="생략", ctx=_ctx(None),
         )
     # STORE_ROOT/users 자체가 생기지 않았어야 함
     assert not (tmp_path / "users").exists()
@@ -217,8 +217,8 @@ def test_invalid_client_rejected():
 def test_record_missing_client_rejected(tmp_path):
     with pytest.raises(ValueError):
         rs.namu_record(
-            task="t", outcome="success", reason="r",
-            ctx=_ctx("alice", client=None),
+            bowl="learnings", topic="t", status="success", summary="s",
+            reason="r", body="생략", ctx=_ctx("alice", client=None),
         )
 
 
@@ -256,7 +256,7 @@ def test_via_stored_on_record(tmp_path):
 def test_unsafe_user_key_rejected(tmp_path, bad_key):
     with pytest.raises(ValueError):
         rs.namu_record(
-            task="t", outcome="success", reason="r", ctx=_ctx(bad_key),
+            bowl="learnings", topic="t", status="success", summary="s", reason="r", body="생략", ctx=_ctx(bad_key),
         )
     # STORE_ROOT/users 밖에 아무 파일도 생기지 않았어야 함
     users_root = tmp_path / "users"
@@ -950,24 +950,25 @@ def test_search_rejects_project_on_learnings_bowl(_fake_home):
     assert "전용 축" in str(exc.value)
 
 
-def test_old_field_names_still_work_and_say_where_they_went(tmp_path):
-    """옛 이름(kind/subject/statement/source)으로 부르는 호출자가 이미 돌고 있다 —
-    거절하지 않고 새 칸으로 옮겨 저장하되, 어디로 옮겼는지 반드시 알린다(옮겨놓고
-    알리지 않으면 그것도 조용한 유실이다).
+def test_profile_record_roundtrips_with_the_current_field_names(tmp_path):
+    """개인 사실 한 건이 새 이름 3층으로 저장되어 파일까지 닿는가.
 
-    3층이 다 필요하다는 규칙 자체는 옛 이름으로 불러도 그대로 적용된다(원문 칸이
-    비면 '생략' 한 단어를 넣어야 한다) — 개인용 서버와 같은 판정이다."""
+    이 시험은 원래 옛 이름(kind/subject/statement/source) 호출을 확인했다. 그
+    이름들은 2026-09-05에 칸 목록에서 뺐다 — 한 달 실측에서 옛 이름'만'으로 부른
+    호출이 0건인데, 목록에 보인다는 이유로 새 이름과 나란히 채워져 거절만 불렀기
+    때문이다(기록 거절 113건 중 36건, 1위). 이관 로직 자체는 코어에 그대로 살아
+    있고 코어 시험이 지키므로, 여기서는 지금 쓰는 이름의 왕복만 확인한다."""
     result = rs.namu_record(
-        kind="fact", subject="alice", statement="한국어 선호", source="본인 발화",
+        bowl="profile", topic="alice", summary="한국어 선호", reason="본인 발화",
         body="생략", ctx=_ctx("alice"),
     )
-    assert isinstance(result, dict), "옛 이름 호출에는 옮긴 내역이 함께 와야 한다"
-    assert isinstance(result["id"], str) and result["id"]
-    assert result["notices"], "어디로 옮겼는지 알리지 않았다"
+    # 옮길 옛 이름이 없으면 반환은 id 문자열 하나다(옮긴 내역이 있을 때만 묶음).
+    record_id = result["id"] if isinstance(result, dict) else result
+    assert isinstance(record_id, str) and record_id
 
     text = _yaml_text(tmp_path, "alice", "profile.yaml")
-    assert "한국어 선호" in text  # statement → summary
-    assert "본인 발화" in text     # source → reason
+    assert "한국어 선호" in text
+    assert "본인 발화" in text
 
 
 def test_stale_cache_from_old_core_is_rebuilt_not_crashed(tmp_path):
@@ -2416,3 +2417,40 @@ def test_upload_reports_how_long_each_step_took(fake_github):
         "기록_올리기", "합계",
     }
     assert all(isinstance(v, float) for v in out["seconds"].values())
+
+
+# ---------------------------------------------------------------------------
+# 두 서버가 같은 칸을 내주는가 — 옛 이름 재유입 방지 (2026-09-05)
+#
+# 옛 이름 12개는 "그대로 불러도 받아 준다"는 다리였는데, 한 달 실측에서 그 다리를
+# 건넌 호출이 0건이고 목록에 보인다는 이유로 새 이름과 함께 채워져 거절만 불렀다
+# (기록 거절 113건 중 36건, 1위). 개인용과 클라우드 중 한쪽만 빼면 같은 도구가
+# 창구마다 다른 칸을 내주게 되므로, 여기서 둘을 함께 못 박는다.
+# ---------------------------------------------------------------------------
+import ast as _ast
+
+import config as _cfg
+
+
+def _tool_parameters(path, func_name):
+    tree = _ast.parse(Path(path).read_text(encoding="utf-8"))
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name == func_name:
+            a = node.args
+            return {x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+    raise AssertionError(f"{func_name}을 찾지 못했습니다: {path}")
+
+
+def test_cloud_record_hides_every_dead_field_name():
+    exposed = _tool_parameters(Path(rs.__file__), "namu_record")
+    leaked = sorted(exposed & {e.old for e in _cfg.FIELD_ALIASES})
+    assert not leaked, f"옛 이름 {leaked}가 클라우드 칸 목록에 다시 보입니다."
+
+
+def test_cloud_and_core_expose_the_same_record_fields():
+    core = Path(rs.__file__).parent.parent / "vendor" / "namu-agent" / "namu-plugin" / "mcp_server.py"
+    if not core.exists():
+        pytest.skip("코어 사본이 없는 환경")
+    assert _tool_parameters(Path(rs.__file__), "namu_record") == _tool_parameters(
+        core, "namu_record"
+    )
