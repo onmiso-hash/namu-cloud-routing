@@ -542,7 +542,7 @@ def test_long_text_is_allowed_on_other_tags(tmp_path, _fake_home):
 def test_cloud_next_line_limit_matches_the_core(tmp_path):
     """상한 값이 개인용과 어긋나면 한쪽에서 쓴 줄이 다른 쪽 규칙을 넘는다 — 두 숫자를
     나란히 놓고 대조한다(미러 코드가 조용히 갈라지는 것을 여기서 막는다)."""
-    core = Path(__file__).resolve().parents[1] / "vendor" / "namu-agent" / "namu-plugin" / "mcp_server.py"
+    core = Path(__file__).resolve().parents[1] / "vendor" / "namu-agent" / "namu-plugin" / "task_resolve.py"
     text = core.read_text(encoding="utf-8")
     m = re.search(r"^NEXT_LINE_LIMIT = (\d+)$", text, re.MULTILINE)
     assert m, "본체에서 NEXT_LINE_LIMIT 선언을 찾지 못했다"
