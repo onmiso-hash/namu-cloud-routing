@@ -872,8 +872,9 @@ def _validate_task_tag_text(tag: "str | None", text: "str | None") -> tuple:
             f"[다음] 줄이 너무 깁니다({len(text)}자 > {NEXT_LINE_LIMIT}자) — 이 줄은 "
             "그 작업이 열려 있는 동안 브리핑에 전문 그대로 실려 매번 컨텍스트를 "
             "씁니다. 여기에는 다음 세션이 무엇부터 할지만 요약해서 적고, 그날의 "
-            "경위·측정값·설계 내용은 작업 폴더 안의 파일(예: 인계-YYYYMMDD.md)에 "
-            "넣은 뒤 그 파일 이름을 이 줄에서 가리키세요."
+            "경위·측정값·설계 내용은 같은 작업에 status='기록'으로 한 건 더 남겨 그 "
+            "body 칸에 넣으세요 — body는 브리핑에 실리지 않고 namu_search로 꺼내므로 "
+            "길이 제한이 없습니다."
         )
     return tag, text
 
