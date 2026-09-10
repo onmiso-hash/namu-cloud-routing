@@ -574,6 +574,43 @@ def test_recall_returns_open_tasks(_fake_home):
     assert result["tasks"][0]["project"] == _WEB
 
 
+def test_recall_points_at_the_record_that_holds_the_background(_fake_home):
+    """열린 작업마다 "경위는 이 작업의 <날짜> `기록`에 있다"는 줄이 함께 온다.
+
+    웹에는 세션 훅이 없어 이 반환이 곧 브리핑이다. `next`는 300자 상한이 걸린
+    요약이므로, 경위가 어느 기록에 있는지까지 실어야 "이어서 하자"를 받은 모델이
+    착수 전에 그것을 꺼내 읽을 수 있다(본체 v0.1.83의 `상세:` 줄과 같은 역할).
+    문장은 코어의 것을 그대로 쓴다 — 여기서 지어내면 웹과 CLI가 갈린다.
+    """
+    _make_task()
+    rs.namu_record(
+        bowl="tasks", project=_WEB, topic="namu-99-demo",
+        summary="오늘 경위를 남긴다", status="기록",
+        reason="생략", body="기준선과 측정값", ctx=_ctx("alice"),
+    )
+
+    row = rs.namu_recall(ctx=_ctx("alice"))["tasks"][0]
+
+    assert row["record_date"], "마지막 `기록`의 날짜가 실리지 않았다"
+    assert row["record_date"] in row["detail"]
+    assert "상세 칸" in row["detail"] and "namu_search" in row["detail"]
+    # 문장을 여기서 짓지 않고 코어에서 가져오는지까지 본다 — 지어내면 웹과 CLI의
+    # 안내가 서로 다른 말이 된다(미러가 조용히 갈라지는 자리).
+    assert row["detail"] == rs.web_auth._core_session_context()._detail_pointer(
+        row["record_date"]
+    )
+
+
+def test_recall_omits_the_pointer_when_there_is_no_record(_fake_home):
+    """가리킬 `기록`이 하나도 없으면 가리키는 줄도 없다 — 없는 곳을 가리키면 거짓말이다."""
+    _make_task()  # 작업 생성만 하면 log에는 [시작]·[다음]뿐이다
+
+    row = rs.namu_recall(ctx=_ctx("alice"))["tasks"][0]
+
+    assert row["record_date"] is None
+    assert row["detail"] is None
+
+
 def test_search_tasks_bowl_finds_log_line(_fake_home):
     _make_task()
     rs.namu_record(

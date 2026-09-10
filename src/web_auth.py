@@ -1800,6 +1800,40 @@ def _core_tasks():
     return task_resolve
 
 
+def _core_session_context():
+    """`상세:` 줄 문장을 만드는 코어 모듈(`session_context`).
+
+    `_core_tasks`와 같은 방식으로 지연 로드한다. 이 모듈은 import만으로는 아무것도
+    쓰지 않는다(모듈 수준에 상수와 정규식뿐) — 컨테이너 홈에 개인용 데이터를 만드는
+    `mcp_server`와 다르므로 그대로 불러다 쓸 수 있다.
+    """
+    _core()
+    import session_context
+
+    return session_context
+
+
+def _detail_pointer(record_date: str) -> str:
+    """"경위는 저기 있다"고 가리키는 한 문장 — 코어의 것을 그대로 쓴다.
+
+    CLI 브리핑이 `상세:` 줄에 싣는 문장과 **글자까지 같아야** 한다. 여기 베껴 두면
+    본체에서 문장을 다듬는 날 웹만 옛 문장을 계속 보여주게 된다(이 파일이 판정 규칙을
+    베끼지 않는 것과 같은 이유).
+    """
+    return _core_session_context()._detail_pointer(record_date)
+
+
+def _detail_pointer_for_humans(record_date: str) -> str:
+    """같은 뜻을 **사람이 읽는 말**로 적은 한 문장 — 웹 화면(HTML) 전용.
+
+    위의 `_detail_pointer`는 모델이 읽는 자리(브리핑·도구 반환)에 쓰이므로 도구 이름
+    `namu_search`와 마크다운 물결표가 들어 있다. 웹 화면은 회원이 눈으로 읽는 자리라
+    그대로 내보내면 읽는 사람이 쓸 수 없는 낱말을 보게 된다(2026-09-10 사용자 결정).
+    가리키는 날짜는 두 문장이 같은 값을 쓰므로, 갈라지는 것은 말투뿐이다.
+    """
+    return f"{record_date}에 남긴 기록의 상세 칸에 적어 두었습니다."
+
+
 def _core_attachments():
     """첨부 기록 읽기용 코어 모듈(`attachments`).
 
@@ -2057,6 +2091,10 @@ def _open_task_rows(user_key: str, query: str = "") -> list:
                     "title": tr.task_title(task_dir),
                     "next": tr.next_note(task_dir),
                     "why": tr.next_why(task_dir),
+                    # 그날의 경위가 들어 있는 `기록` 항목의 날짜(없으면 None) —
+                    # 화면과 도구가 "상세는 이 작업의 <날짜> 기록에 있다"고 가리키는
+                    # 데 쓴다. 고르는 규칙(마지막 `[기록]` 줄)은 코어에 맡긴다.
+                    "record_date": tr.latest_record_date(task_dir),
                     "last_ts": _task_last_ts(task_dir),
                     "pin_machine": pin["machine"] if pin else None,
                     "pin_ts": pin["ts"] if pin else None,
@@ -2084,6 +2122,10 @@ def _html_task_board(rows: list) -> str:
     브리핑에서 이 화면을 보는 목적이 "어디서부터 이어서 하지?"이기 때문에, 다음
     줄은 접지 않고 자르지도 않는다(잘리면 재진입 지점의 의미가 없어진다). 대신
     분량이 들쭉날쭉한 '왜' 한 줄만 접어 둔다.
+
+    `상세:` 줄은 그 다음 줄에 붙는다(2026-09-10, 본체 v0.1.83과 같은 차례) —
+    `다음:`은 요약만 실리므로, 경위가 어느 `기록`에 있는지까지 알려야 이 화면만
+    보고도 이어서 할 수 있다.
     """
     if not rows:
         return ""
@@ -2110,6 +2152,21 @@ def _html_task_board(rows: list) -> str:
                 f'<pre class="m-body">{html.escape(row["why"].strip())}</pre></details>'
             )
 
+        # `다음:` 칸은 300자 상한(routing_server.NEXT_LINE_LIMIT)이 걸린 요약이라,
+        # 그날의 경위·측정값은 같은 작업의 `기록` 항목 `상세` 칸에 있다. 어디를
+        # 펴 보면 되는지 화면에서도 짚어 준다 — 줄 차례(다음→왜→상세)는 CLI
+        # 브리핑(`session_context._build_next_block`)과 맞춘다. 가리킬 `기록`이
+        # 하나도 없으면 줄 자체를 붙이지 않는다(없는 곳을 가리키면 거짓말이 된다).
+        # 문장은 사람이 읽는 말로 적은 쪽(`_detail_pointer_for_humans`)을 쓴다 —
+        # 모델용 문장에는 도구 이름이 들어 있어 회원이 읽을 말이 아니다.
+        detail_html = ""
+        if row.get("record_date"):
+            detail_html = (
+                '<p class="m-why"><b>상세:</b> '
+                + html.escape(_detail_pointer_for_humans(row["record_date"]))
+                + "</p>"
+            )
+
         meta_bits = [html.escape(row["project"]), f"<code>{html.escape(row['slug'])}</code>"]
         if row["last_ts"]:
             meta_bits.append("마지막 기록 " + html.escape(row["last_ts"]))
@@ -2121,6 +2178,7 @@ def _html_task_board(rows: list) -> str:
             f'<p class="m-sum"><b>{head}</b></p>'
             + next_html
             + why_html
+            + detail_html
             + f'<p class="m-meta"><small>{" · ".join(meta_bits)}</small></p>'
             + "</li>"
         )
