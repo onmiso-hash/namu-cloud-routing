@@ -8,6 +8,7 @@ config/db/profile 자체가 import 시 side-effect 없음 — mcp_server.py의
 """
 import asyncio
 import os
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -495,6 +496,57 @@ def test_task_create_writes_into_user_folder_not_container_home(tmp_path, _fake_
     assert "namu-99-demo" in result
     # 컨테이너 홈은 손대지 않는다 — 이게 namu-68이 걱정했던 바로 그 지점이다.
     assert not (_fake_home / ".namu").exists()
+
+
+def test_next_line_over_the_limit_is_rejected(tmp_path, _fake_home):
+    """`[다음]` 줄은 상한(NEXT_LINE_LIMIT)을 넘으면 거절한다 — 개인용과 같은 규칙이다.
+
+    이 상한을 개인용에만 두면, 같은 log.md를 웹은 제한 없이 쓰고 내 PC는 제한을 지켜
+    두 경로가 서로 다른 규칙으로 쓰게 된다. 그 줄은 작업이 열려 있는 동안 브리핑에
+    전문 그대로 실리므로, 어느 쪽에서 적었든 길면 매 세션 그만큼을 다시 읽는다.
+    """
+    _make_task()
+    long_text = "가" * (rs.NEXT_LINE_LIMIT + 1)
+
+    with pytest.raises(ValueError) as e:
+        rs.namu_record(
+            bowl="tasks", project=_WEB, topic="namu-99-demo", status="다음",
+            summary=long_text, reason="생략", body="생략", ctx=_ctx("alice"),
+        )
+    # 어떻게 고치면 되는지를 함께 알려준다 — 거절만 하면 같은 길이로 다시 시도한다.
+    assert "요약" in str(e.value) and "작업 폴더" in str(e.value)
+
+    log = (tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo" / "log.md").read_text(
+        encoding="utf-8"
+    )
+    assert long_text not in log  # 거절했으면 줄도 남지 않아야 한다
+
+
+def test_long_text_is_allowed_on_other_tags(tmp_path, _fake_home):
+    """상한은 `[다음]`에만 걸린다 — 다른 태그는 브리핑에 최근 몇 건만 실리고 작업이
+    닫히면 사라지므로 같은 이유가 성립하지 않는다."""
+    _make_task()
+    long_text = "가" * (rs.NEXT_LINE_LIMIT + 1)
+
+    rs.namu_record(
+        bowl="tasks", project=_WEB, topic="namu-99-demo", status="progress",
+        summary=long_text, reason="생략", body="생략", ctx=_ctx("alice"),
+    )
+
+    log = (tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo" / "log.md").read_text(
+        encoding="utf-8"
+    )
+    assert long_text in log
+
+
+def test_cloud_next_line_limit_matches_the_core(tmp_path):
+    """상한 값이 개인용과 어긋나면 한쪽에서 쓴 줄이 다른 쪽 규칙을 넘는다 — 두 숫자를
+    나란히 놓고 대조한다(미러 코드가 조용히 갈라지는 것을 여기서 막는다)."""
+    core = Path(__file__).resolve().parents[1] / "vendor" / "namu-agent" / "namu-plugin" / "mcp_server.py"
+    text = core.read_text(encoding="utf-8")
+    m = re.search(r"^NEXT_LINE_LIMIT = (\d+)$", text, re.MULTILINE)
+    assert m, "본체에서 NEXT_LINE_LIMIT 선언을 찾지 못했다"
+    assert int(m.group(1)) == rs.NEXT_LINE_LIMIT
 
 
 def test_task_log_line_is_appended(tmp_path, _fake_home):

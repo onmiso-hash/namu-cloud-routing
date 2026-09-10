@@ -830,6 +830,14 @@ _CLOSING_SYNONYMS = (
     "종료", "마무리", "끝", "종결", "완결", "닫음", "닫기", "done", "close", "closed", "finish",
 )
 
+# `[다음]` 줄만 갖는 상한 — 개인용 `mcp_server.NEXT_LINE_LIMIT` 미러. 그 줄은 열린
+# 작업 브리핑의 `다음:` 칸으로 전문 그대로 실려, 그 작업이 열려 있는 동안 세션마다
+# 다시 컨텍스트로 들어간다. 2026-09-10 실측: 1,550자짜리 줄 하나가 브리핑 71줄 중
+# 30줄을 차지했다. 개인용에만 넣으면 웹에서 남긴 기록은 상한 없이 들어와 같은 log.md
+# 안에서 두 경로가 서로 다른 규칙으로 쓰게 된다.
+NEXT_LINE_LIMIT = 300
+_NEXT_TAG = "다음"
+
 _LOG_INDENT = "    "
 _LOG_REASON_LABEL = "왜: "
 _LOG_BODY_LABEL = "상세: "
@@ -858,7 +866,16 @@ def _validate_task_tag_text(tag: "str | None", text: "str | None") -> tuple:
         )
     if not text:
         raise ValueError("text는 필수입니다(빈 값 불가)")
-    return tag, " ".join(text.split())
+    text = " ".join(text.split())
+    if tag == _NEXT_TAG and len(text) > NEXT_LINE_LIMIT:
+        raise ValueError(
+            f"[다음] 줄이 너무 깁니다({len(text)}자 > {NEXT_LINE_LIMIT}자) — 이 줄은 "
+            "그 작업이 열려 있는 동안 브리핑에 전문 그대로 실려 매번 컨텍스트를 "
+            "씁니다. 여기에는 다음 세션이 무엇부터 할지만 요약해서 적고, 그날의 "
+            "경위·측정값·설계 내용은 작업 폴더 안의 파일(예: 인계-YYYYMMDD.md)에 "
+            "넣은 뒤 그 파일 이름을 이 줄에서 가리키세요."
+        )
+    return tag, text
 
 
 def _validate_new_task_slug(task: "str | None") -> str:
