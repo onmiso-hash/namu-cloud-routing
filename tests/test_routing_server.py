@@ -514,7 +514,7 @@ def test_next_line_over_the_limit_is_rejected(tmp_path, _fake_home):
             summary=long_text, reason="생략", body="생략", ctx=_ctx("alice"),
         )
     # 어떻게 고치면 되는지를 함께 알려준다 — 거절만 하면 같은 길이로 다시 시도한다.
-    assert "요약" in str(e.value) and "작업 폴더" in str(e.value)
+    assert "요약" in str(e.value) and "body" in str(e.value)
 
     log = (tmp_path / "users" / "alice" / "tasks" / _WEB / "namu-99-demo" / "log.md").read_text(
         encoding="utf-8"
