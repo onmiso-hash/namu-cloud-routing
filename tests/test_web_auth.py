@@ -2261,6 +2261,65 @@ def test_task_board_shows_open_tasks_with_next_line_and_omits_closed_ones(
     assert "닫힌작업제목마커" not in r.text
 
 
+def test_task_board_points_at_the_record_that_holds_the_background(
+    client, monkeypatch, tmp_path
+):
+    """`다음:` 밑에 `상세:` 줄이 선다 — 경위가 어느 `기록`에 있는지 화면에서 짚어 준다.
+
+    `다음:`은 300자 상한이 걸린 요약이라 그 줄만 보고는 기준선·측정값을 모른다.
+    본체 v0.1.83이 CLI 브리핑에 붙이기 시작한 줄이며, 웹만 빠지면 같은 회원이
+    보는 곳마다 안내가 달라진다. 다만 문장은 사람이 읽는 말로 적은 쪽을 쓴다 —
+    모델용 문장에 들어 있는 도구 이름은 회원이 읽을 말이 아니다(2026-09-10 결정).
+    """
+    row = _connect_via_login(client, monkeypatch, github_id=41015, repo="fay/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-with-record",
+        title="경위있는작업마커",
+        log_lines=[
+            "[기록] 2026-09-09 10:00:00 hp · 어제 경위",
+            "    상세: 어제의 경위",
+            "[기록] 2026-09-10 09:00:00 hp · 오늘 경위",
+            "    상세: 기준선과 측정값",
+            "[다음] 2026-09-10 09:10:00 hp · 다음할일마커부터",
+        ],
+    )
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert r.status_code == 200
+    assert "<b>상세:</b>" in r.text
+    # 마지막 `기록`의 날짜를 짚고, 그 기록의 어느 칸을 펴면 되는지까지 말한다.
+    assert "2026-09-10" in r.text and "상세 칸" in r.text
+    assert "2026-09-09" not in r.text, "더 오래된 기록을 가리키고 있다"
+    # 사람이 읽는 자리이므로 모델에게 거는 도구 이름은 화면에 나오지 않는다.
+    assert "namu_search" not in r.text
+
+
+def test_task_board_omits_the_pointer_when_there_is_no_record(
+    client, monkeypatch, tmp_path
+):
+    """가리킬 `기록`이 하나도 없으면 `상세:` 줄 자체를 붙이지 않는다 — 없는 곳을
+    가리키면 회원은 있지도 않은 기록을 찾아 헤맨다."""
+    row = _connect_via_login(client, monkeypatch, github_id=41016, repo="gus/board")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _make_task(
+        row["user_key"],
+        "myproj",
+        "task-no-record",
+        title="경위없는작업마커",
+        log_lines=["[다음] 2026-09-10 09:10:00 hp · 다음할일마커부터"],
+    )
+
+    r = client.get("/auth/memory?bowl=tasks")
+
+    assert r.status_code == 200
+    assert "경위없는작업마커" in r.text
+    assert "<b>상세:</b>" not in r.text
+
+
 def test_task_board_puts_pinned_task_first(client, monkeypatch, tmp_path):
     """책갈피가 꽂힌 작업이 맨 위에 선다 — 최근 활동순 하나로만 세우면 만든
     순서가 곧 중요도가 된다(코어 namu-70이 흡수한 규칙과 같은 결과여야 한다)."""

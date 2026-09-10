@@ -512,7 +512,11 @@ def namu_recall(
       "profile": [...active facts...], "learnings": [...lesson/note dicts...],
       "tasks": [...every OPEN task, bookmarked first then most-recent-activity
       first: {"project", "slug", "title", "last_ts", "next", "why",
-      "pin_machine", "pin_ts"}, where `next` is the full re-entry point...]}.
+      "record_date", "detail", "pin_machine", "pin_ts"}, where `next` is the
+      full re-entry point (a summary only — 300 chars max), and `detail` says
+      where the background for it lives (the '상세' field of that task's
+      '기록' entry dated `record_date`; pull it with namu_search before you
+      start). Both are null when that task has no '기록' entry yet...]}.
     Raises: ValueError if this user has not logged in and connected a GitHub
       repository yet (onboarding incomplete) — the message explains where to
       go, in Korean and English.
@@ -704,11 +708,21 @@ def _open_tasks_for_user(user_key: str, project: "str | None") -> list:
     쪽이 맞는지 사용자가 알 수 없다). 비공개 이름을 부르는 것은 web_auth가 코어의
     `_latest_log_ts`를 부르는 것과 같은 관례이고, 이름이 사라지면 시험이 먼저
     실패한다.
+
+    `detail` 칸을 여기서 붙인다(2026-09-10, 본체 v0.1.83과 맞춤) — 웹에는 세션 훅이
+    없어 이 반환 자체가 브리핑이므로, CLI 브리핑의 `상세:` 줄에 해당하는 문장이
+    여기 실려야 "이어서 하자"를 받은 모델이 경위를 어디서 꺼낼지 안다. 문장은
+    코어(`session_context._detail_pointer`)의 것을 그대로 쓰고, 가리킬 `기록`이
+    없는 작업(`record_date`가 None)에는 붙이지 않는다.
     """
     rows = web_auth._open_task_rows(user_key)
     if project is not None:
         name = _validate_project_name(project)
         rows = [r for r in rows if r["project"] == name]
+    for row in rows:
+        row["detail"] = (
+            web_auth._detail_pointer(row["record_date"]) if row.get("record_date") else None
+        )
     return rows
 
 
@@ -874,7 +888,12 @@ def _validate_task_tag_text(tag: "str | None", text: "str | None") -> tuple:
             "씁니다. 여기에는 다음 세션이 무엇부터 할지만 요약해서 적고, 그날의 "
             "경위·측정값·설계 내용은 같은 작업에 status='기록'으로 한 건 더 남겨 그 "
             "body 칸에 넣으세요 — body는 브리핑에 실리지 않고 namu_search로 꺼내므로 "
-            "길이 제한이 없습니다."
+            "길이 제한이 없고, 다른 PC와 웹에서도 그대로 읽힙니다. "
+            "'경위는 그 기록에 있다'고 가리키는 문장은 직접 쓰지 마세요 — 나무가 "
+            "브리핑에 '상세:' 줄로 붙이므로, 직접 쓰면 그 글자만큼 요약이 쓸 자리가 "
+            "줄어듭니다. "
+            "받은 글자 수를 줄이려고 문장 성분을 빼지는 마세요 — 다루는 항목의 수를 "
+            "줄이고, 남긴 문장은 그 자체로 완결되게 씁니다."
         )
     return tag, text
 
