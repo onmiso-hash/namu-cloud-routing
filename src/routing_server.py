@@ -67,6 +67,7 @@ import memo  # noqa: E402
 import profile  # noqa: E402
 import project_policy  # noqa: E402
 import record_input  # noqa: E402
+import sessions  # noqa: E402
 import task_move  # noqa: E402
 import task_resolve  # noqa: E402
 import ticket_web  # noqa: E402
@@ -91,6 +92,7 @@ EXPOSED_TOOLS = frozenset({
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
     "namu_task_move",
+    "namu_record_session",
 })
 
 mcp = MCPServer(
@@ -1437,6 +1439,105 @@ def namu_task_move(
     if warning:
         return {"summary": summary, "warning": warning}
     return summary
+
+
+# ---------------------------------------------------------------------------
+# 세션 측정 한 도구 (namu-self-improvement-loop — 웹 몫)
+#
+# CLI에는 세션 종료 훅이 있어 대화가 끝나면 기계가 알아서 잰다. 웹 대화창에는 훅이
+# 없고(2026-09-12 공식 문서 확인 — 훅은 클로드 코드에서만 돈다), 앤트로픽 서버에
+# 있는 대화를 이 서버가 가져올 길도 없다(같은 날 공식 지원 문서 확인 — 사람이
+# 설정에서 요청해 이메일로 받는 길뿐이고 프로그램용 창구가 없다). 이 서버에
+# 도착하는 것은 도구를 부를 때 실어 준 값과 주소의 출처 표시뿐이다.
+#
+# 그래서 웹에서는 **대화 안에 있는 AI가** 이 도구를 부르며 대화를 넘긴다. 넘어온
+# 뒤의 일은 훅과 완전히 같다 — 같은 나이테로 재고 같은 그릇에 같은 모양으로
+# 남긴다. 그래야 주간 점검이 두 곳에서 온 값을 고치는 곳 없이 합산한다.
+#
+# 훅과 다른 점은 값의 정확도뿐이다. AI가 옮겨 적으므로 빠질 수 있고, "요청 중단"
+# 표지는 웹에 아예 없다. 그래도 판정은 여전히 기계가 하므로, 이 그릇이 지키려던
+# 것(사람이 판단해 적은 숫자를 섞지 않는다)은 그대로 지켜진다.
+# ---------------------------------------------------------------------------
+@tool()
+def namu_record_session(
+    session_id: str,
+    utterances: list,
+    project: str | None = None,
+    title: str | None = None,
+    interrupts: list | None = None,
+    denials: list | None = None,
+    end_reason: str | None = None,
+    ctx: Context | None = None,
+):
+    """Measure THIS conversation for misalignments and store the result.
+
+    CALL THIS ONCE when the conversation is wrapping up — the user says goodbye,
+    thanks you, says the work is done, or asks you to save/finish. On Claude Code
+    a hook does this automatically at session end; in a web chat there is no hook,
+    so you must call it yourself. If you never call it, this conversation is
+    invisible to the user's weekly self-improvement review.
+
+    You do NOT judge anything. Hand over what the user actually said, verbatim,
+    and the server runs the measurement. Never summarize, paraphrase, translate,
+    or leave out a message — a shortened transcript produces a wrong count.
+
+    Args:
+      session_id: A stable id for this conversation. Reuse the SAME value if you
+        call this twice in one conversation (only the last call is counted).
+      utterances: Every user message, oldest first, as
+        [{"at": "<timestamp>", "text": "<verbatim message>"}, ...].
+        Include ALL of them, including short ones like "ok" or "no".
+        `at` should be the time that message was sent; pass "" if unknown.
+      project: Which project/room this conversation belongs to, if known.
+      title: A short title for this conversation.
+      interrupts: Timestamps where the user cut you off mid-response, if known.
+      denials: Timestamps where the user rejected a tool call, if known.
+      end_reason: Why the conversation ended (e.g. "user said goodbye").
+
+    Returns: dict with the stored id and the counts, or `skipped` explaining why
+      nothing was stored (no user messages, or this conversation was already
+      recorded with the same number of messages).
+    """
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)  # ?client= 출처 태그 검증
+
+    session_id = (session_id or "").strip()
+    if not session_id:
+        raise ValueError("session_id는 필수입니다 / session_id is required")
+
+    잰값 = sessions.measure(
+        session_id=session_id,
+        utterances=utterances,
+        interrupts=interrupts,
+        denials=denials,
+        project=project,
+        title=title,
+        end_reason=end_reason,
+    )
+    if 잰값 is None:
+        return {"skipped": "사람이 한 마디도 없어 남기지 않았습니다 / no user messages"}
+
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부
+    paths = _paths_for_user(key)
+
+    if sessions.already_recorded(session_id, len(잰값["utterances"]), paths):
+        return {"skipped": "이미 같은 값이 남아 있습니다 / already recorded"}
+
+    new_id = sessions.record_session(**잰값, paths=paths)
+
+    with closing(identity.connect()) as conn:
+        warning = _push_and_collect_warning(conn, key)
+
+    결과 = {
+        "id": new_id,
+        "misalignments": 잰값["misalignments"],
+        "structural_marks": 잰값["structural_marks"],
+        "utterance_count": len(잰값["utterances"]),
+    }
+    if warning:
+        결과["warning"] = warning
+    return 결과
 
 
 # ---------------------------------------------------------------------------

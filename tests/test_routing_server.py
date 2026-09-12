@@ -14,6 +14,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+import yaml
 from starlette.testclient import TestClient
 
 import identity
@@ -2543,3 +2544,91 @@ def test_cloud_and_core_expose_the_same_record_fields():
     assert _tool_parameters(Path(rs.__file__), "namu_record") == _tool_parameters(
         core, "namu_record"
     )
+
+
+# ---------------------------------------------------------------------------
+# 세션 측정 — 웹 대화창 몫 (namu-self-improvement-loop)
+#
+# 클로드 코드에는 세션 종료 훅이 있어 대화가 끝나면 기계가 잰다. 웹 대화창에는
+# 훅이 없고 이 서버가 대화를 가져올 길도 없어서, 대화 안의 AI가 발화를 넘겨야
+# 그 대화가 측정에 들어온다. 여기서 지킬 것은 셋이다 — 실제로 재서 남기는가,
+# 회원별로 갈라지는가, 같은 대화를 두 번 쌓지 않는가.
+# ---------------------------------------------------------------------------
+def _한마디(글, 시각):
+    return {"at": 시각, "text": 글}
+
+
+def test_웹에서_넘긴_대화를_재서_남긴다(tmp_path):
+    결과 = rs.namu_record_session(
+        session_id="web-1",
+        utterances=[
+            _한마디("나이테 고쳐줘", "2026-09-12T01:00:00.000Z"),
+            _한마디("아니지 그게 아니야", "2026-09-12T01:01:00.000Z"),
+            _한마디("고마워", "2026-09-12T01:02:00.000Z"),
+        ],
+        project="namu-agent",
+        title="나이테 손보기",
+        ctx=_ctx("alice"),
+    )
+
+    assert 결과["misalignments"] == 1      # "아니지 그게 아니야" 한 건
+    assert 결과["utterance_count"] == 3
+
+    남은파일 = tmp_path / "users" / "alice" / "memory" / "sessions.yaml"
+    assert 남은파일.exists()
+    남은값 = list(yaml.safe_load_all(남은파일.read_text(encoding="utf-8")))
+    assert 남은값[-1]["session_id"] == "web-1"
+    # 사람이 한 말이 원문 그대로 남아야 판정 규칙을 고친 뒤 다시 잴 수 있다.
+    assert [u["text"] for u in 남은값[-1]["utterances"]] == [
+        "나이테 고쳐줘", "아니지 그게 아니야", "고마워",
+    ]
+
+
+def test_세션_측정은_회원끼리_섞이지_않는다(tmp_path):
+    rs.namu_record_session(
+        session_id="s-alice", utterances=[_한마디("가", "t1")], ctx=_ctx("alice"),
+    )
+    rs.namu_record_session(
+        session_id="s-bob", utterances=[_한마디("나", "t1")], ctx=_ctx("bob"),
+    )
+
+    for 회원, 것 in (("alice", "s-alice"), ("bob", "s-bob")):
+        파일 = tmp_path / "users" / 회원 / "memory" / "sessions.yaml"
+        담긴것 = [d["session_id"] for d in yaml.safe_load_all(파일.read_text(encoding="utf-8"))]
+        assert 담긴것 == [것]
+
+
+def test_같은_대화를_두_번_넘겨도_한_번만_쌓인다(tmp_path):
+    말들 = [_한마디("가", "t1"), _한마디("나", "t2")]
+    첫번 = rs.namu_record_session(session_id="web-2", utterances=말들, ctx=_ctx("alice"))
+    두번 = rs.namu_record_session(session_id="web-2", utterances=말들, ctx=_ctx("alice"))
+
+    assert "id" in 첫번
+    assert "skipped" in 두번
+
+    파일 = tmp_path / "users" / "alice" / "memory" / "sessions.yaml"
+    assert len(list(yaml.safe_load_all(파일.read_text(encoding="utf-8")))) == 1
+
+
+def test_말이_늘었으면_다시_남긴다(tmp_path):
+    rs.namu_record_session(
+        session_id="web-3", utterances=[_한마디("가", "t1")], ctx=_ctx("alice"),
+    )
+    rs.namu_record_session(
+        session_id="web-3",
+        utterances=[_한마디("가", "t1"), _한마디("아니 그게 아니고", "t2")],
+        ctx=_ctx("alice"),
+    )
+
+    파일 = tmp_path / "users" / "alice" / "memory" / "sessions.yaml"
+    담긴것 = list(yaml.safe_load_all(파일.read_text(encoding="utf-8")))
+    assert len(담긴것) == 2
+    # 합산하는 쪽이 대화마다 마지막 항목만 세므로, 두 건이 쌓여도 겹쳐 세지 않는다.
+    assert 담긴것[-1]["utterance_count"] == 2
+
+
+def test_사람_말이_없으면_남기지_않는다(tmp_path):
+    결과 = rs.namu_record_session(session_id="web-4", utterances=[], ctx=_ctx("alice"))
+
+    assert "skipped" in 결과
+    assert not (tmp_path / "users" / "alice" / "memory" / "sessions.yaml").exists()
