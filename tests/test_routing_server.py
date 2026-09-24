@@ -973,6 +973,59 @@ def test_task_move_normal(tmp_path, _fake_home):
     assert _WEB in log and "onnamu-project" in log
 
 
+def test_task_move_reports_pin_error_after_success(tmp_path, _fake_home, monkeypatch):
+    """코어 move_task가 책갈피 정리 실패를 `pin_error`로 돌려주면(2026-09-25 코어 변경)
+    옮기기 자체는 성공으로 알리되 그 사유를 문장 끝에 붙인다 — 조용히 버리면 회원은
+    책갈피가 남았는지 모르고, 실패로 돌려주면 AI가 이미 옮긴 작업을 다시 옮기려 든다."""
+    _make_task(user="alice", slug="alice-one")
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "placeholder")
+
+    real_move = rs.task_move.move_task
+
+    def _move_with_pin_error(**kw):
+        result = real_move(**kw)
+        result["pin_error"] = "책갈피를 정리하지 못했습니다(작업은 옮겨졌습니다): 시험"
+        return result
+
+    monkeypatch.setattr(rs.task_move, "move_task", _move_with_pin_error)
+    result = rs.namu_task_move(
+        task="alice-one", to="onnamu-project", project=_WEB, ctx=_ctx("alice")
+    )
+    text = result["summary"] if isinstance(result, dict) else result
+    assert "옮겼습니다" in text
+    assert "다만 책갈피 정리는 실패했습니다: 책갈피를 정리하지 못했습니다" in text
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "   ", "..", "a..b", "../x", "a/b", "a\\b", ".hidden", "-lead", "a\nb"]
+)
+def test_project_name_validation_rejects_path_tricks(bad):
+    """`_tasks_root_for`가 폴더 이름으로 쓰는 값 — 빈 이름·`..`·구분자·점으로 시작하는
+    이름은 전부 거절한다(회원 폴더 밖이나 숨은 폴더로 새는 입구를 막는다)."""
+    with pytest.raises(ValueError):
+        rs._tasks_root_for("alice", bad)
+
+
+def test_task_journal_accepts_space_and_iso_bounds(tmp_path, _fake_home):
+    """since/until은 log.md 형식(`YYYY-MM-DD HH:MM:SS`)과 다른 그릇의 ISO 형식
+    (`YYYY-MM-DDTHH:MM:SS`) 둘 다 받아야 한다. 경계 해석은 코어
+    `task_resolve._normalize_bound`를 그대로 부르므로 이 시험은 그 계약을 고정한다
+    — `T`가 공백보다 커서, 옛 코어에서는 ISO 형식 since가 그날 기록을 전부 잘라냈다."""
+    import task_resolve
+
+    if task_resolve._normalize_bound("2026-08-01T00:00:00", end=False) != "2026-08-01 00:00:00":
+        pytest.skip("품은 코어가 ISO 형식 경계(2026-09-25 수정) 이전 판이다 — 서브모듈을 올리면 돈다")
+
+    _seed_task_folder(tmp_path, "alice", "onnamu-project", "seeded")  # 09:00:00 한 줄
+
+    def _count(**kw):
+        return len(rs._task_journal_for_user("alice", project="onnamu-project", **kw))
+
+    assert _count(since="2026-08-01 00:00:00") == _count(since="2026-08-01T00:00:00") >= 1
+    assert _count(until="2026-08-01 08:59:59") == _count(until="2026-08-01T08:59:59") == 0
+    assert _count(since="2026-08-01T09:00", until="2026-08-01T09:00") >= 1
+
+
 def test_task_move_without_source_project_rejected(_fake_home):
     """원본 방(project)을 안 주면 거절된다 — 웹에는 '지금 이 폴더'가 없다."""
     with pytest.raises(ValueError) as exc:

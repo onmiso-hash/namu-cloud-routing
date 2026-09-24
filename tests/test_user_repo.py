@@ -368,6 +368,79 @@ def test_push_untracks_previously_committed_db_namu_db(
 
 
 # ---------------------------------------------------------------------------
+# push — memory/.memo.lock(코어 memo.py의 프로세스 간 잠금 파일)도 db/namu.db와
+# 똑같이 로컬 전용이다. 빈 파일이라 눈에 안 띄지만, 빠지면 쪽지를 붙인 모든 회원
+# 저장소에 잠금 파일이 커밋돼 올라간다(2026-09-25 코어 변경 뒤따르기).
+# ---------------------------------------------------------------------------
+def test_push_never_commits_memo_lock_file(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    key = _connect_user(conn, 64, "memolock")
+    target = ur.ensure_ready(conn, key)
+    (target / "memory").mkdir(parents=True, exist_ok=True)
+    (target / "memory" / ".memo.lock").write_bytes(b"")
+    (target / "memory" / "memo.yaml").write_text("- id: m1\n", encoding="utf-8")
+
+    assert ur.push(conn, key, message="memo with lock") is True
+
+    exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+    assert "memory/.memo.lock" in exclude
+    assert (target / "memory" / ".memo.lock").exists(), "로컬 잠금 파일이 지워지면 안 된다"
+    check = tmp_path / "_check_memo_lock"
+    _git(["clone", "-q", f"file://{bare_repo}", str(check)], cwd=tmp_path)
+    assert (check / "memory" / "memo.yaml").exists()
+    assert not (check / "memory" / ".memo.lock").exists(), "잠금 파일이 원격에 실렸다"
+
+
+def test_push_untracks_previously_committed_memo_lock_file(
+    conn, fake_token, local_remote, bare_repo, tmp_path
+):
+    """이 배선 전에 이미 커밋된 잠금 파일도 다음 push에서 인덱스에서만 빠져야 한다
+    (`rm --cached` 경로가 db/namu.db 외의 항목에도 도는지 확인)."""
+    seed = tmp_path / "_seed_memo_lock"
+    _git(["clone", "-q", f"file://{bare_repo}", str(seed)], cwd=tmp_path)
+    _git(["config", "user.email", "legacy@example.com"], cwd=seed)
+    _git(["config", "user.name", "Legacy"], cwd=seed)
+    (seed / "memory").mkdir()
+    (seed / "memory" / ".memo.lock").write_bytes(b"")
+    _git(["add", "-A"], cwd=seed)
+    _git(["commit", "-q", "-m", "legacy: committed memo lock"], cwd=seed)
+    _git(["push", "-q", "origin", "main"], cwd=seed)
+
+    key = _connect_user(conn, 65, "memolocklegacy")
+    target = ur.ensure_ready(conn, key)
+    assert _git(["ls-files", "--", "memory/.memo.lock"], cwd=target).strip() == "memory/.memo.lock"
+
+    (target / "real.txt").write_text("after legacy lock\n")
+    assert ur.push(conn, key, message="untrack memo lock") is True
+
+    assert not _git(["ls-files", "--", "memory/.memo.lock"], cwd=target).strip()
+    assert (target / "memory" / ".memo.lock").exists(), "--cached 없이 지워졌다"
+    check = tmp_path / "_check_memo_lock_legacy"
+    _git(["clone", "-q", f"file://{bare_repo}", str(check)], cwd=tmp_path)
+    assert not (check / "memory" / ".memo.lock").exists()
+
+
+def test_local_only_paths_cover_core_local_exclude_lines():
+    """로컬 전용 목록 계약 — 코어 개인용 동기화(memory_sync.LOCAL_EXCLUDE_LINES)가
+    로컬에만 두는 파일은 클라우드도 회원 저장소에 올리지 않아야 한다. 코어는 `db/`
+    폴더째, 이 방은 `db/namu.db` 파일 하나를 적으므로 폴더 항목은 그 아래 파일로
+    맞춰 본다. 품은 코어에 목록이 아직 없으면 건너뛴다(서브모듈을 올리면 돈다)."""
+    import routing_server  # noqa: F401 — vendor/namu-plugin을 sys.path에 얹는다
+    import memory_sync
+
+    core_lines = getattr(memory_sync, "LOCAL_EXCLUDE_LINES", None)
+    if core_lines is None:
+        pytest.skip("품은 코어에 LOCAL_EXCLUDE_LINES가 없다 — 서브모듈을 올리면 돈다")
+    ours = set(ur._LOCAL_ONLY_CACHE_RELATIVE_PATHS)
+    for line in core_lines:
+        if line.endswith("/"):
+            assert any(p.startswith(line) for p in ours), f"코어의 {line!r}가 빠졌다"
+        else:
+            assert line in ours, f"코어가 로컬 전용으로 두는 {line!r}가 클라우드 목록에 없다"
+
+
+# ---------------------------------------------------------------------------
 # push — non-fast-forward 거부, 강제 push 절대 금지 (뮤테이션 타깃 2: --force로 교체)
 # ---------------------------------------------------------------------------
 def test_push_rejects_non_fast_forward_without_overwriting_other_pc(

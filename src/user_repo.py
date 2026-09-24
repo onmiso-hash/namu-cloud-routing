@@ -686,7 +686,14 @@ _COMMIT_AUTHOR_EMAIL = "namu-cloud-routing@users.noreply.github.com"
 # 상단 §3 주석의 실측(약 1.8MB)대로, 기존 `push()`가 그대로 `git add -A`만 했다면
 # namu_record를 부를 때마다 1.8MB 이진 파일이 사용자 저장소 히스토리에 매번 새
 # 커밋으로 쌓인다.
-_LOCAL_ONLY_CACHE_RELATIVE_PATHS = ("db/namu.db",)
+#
+# memory/.memo.lock은 코어 memo.py가 쪽지 파일(memo.yaml)을 "전부 읽기 → 고치기 →
+# 전부 쓰기" 하는 동안 잡는 프로세스 간 잠금 파일이다(2026-09 코어 추가). 내용 없는
+# 빈 파일이고 코어가 일부러 지우지 않고 남겨 두므로(지우면 잠금 경쟁이 생긴다), 여기
+# 넣지 않으면 쪽지를 한 번이라도 붙인 회원의 저장소에 다음 push의 `git add -A`가
+# 의미 없는 잠금 파일을 커밋해 올린다. 코어 개인용 동기화(memory_sync.LOCAL_EXCLUDE_LINES)
+# 도 같은 이유로 이 파일을 로컬 제외 목록에 넣는다 — 두 쪽이 같은 목록을 가져야 한다.
+_LOCAL_ONLY_CACHE_RELATIVE_PATHS = ("db/namu.db", "memory/.memo.lock")
 
 
 def _exclude_local_only_cache_paths(target: Path) -> None:

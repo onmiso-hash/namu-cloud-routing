@@ -70,6 +70,75 @@ def test_names_that_escape_the_folder_are_rejected(bad):
         attach_files.normalize_name(bad)
 
 
+# 2026-09-25 코어(attach_local.normalize_name) 검수 뒤따르기 — 이름은 올리기 화면·
+# 받기 응답 헤더·첨부 기록에 그대로 실리므로 제어 문자와 < > " 를 막고, git이 자기
+# 것으로 읽는 이름(`.`·`.git…`)도 막는다. 앞에 폴더를 붙여 들어와도 같은 판정이어야 한다.
+_UNSAFE_NAMES = [
+    "줄\n바꿈.txt",
+    "캐리지\r리턴.txt",
+    "탭\t이름.txt",
+    "지움\x7f.txt",
+    "널\x00.txt",
+    "<script>.txt",
+    "a>b.txt",
+    'say"hi".txt',
+    ".",
+    "attach_file/.",
+    ".git",
+    ".gitignore",
+    ".gitattributes",
+    ".GITattributes",
+    "attach_file/.gitignore",
+]
+
+
+@pytest.mark.parametrize("bad", _UNSAFE_NAMES)
+def test_unsafe_names_are_rejected(bad):
+    with pytest.raises(attach_files.AttachError):
+        attach_files.normalize_name(bad)
+
+
+def test_unsafe_character_message_is_korean_and_names_the_rule():
+    with pytest.raises(attach_files.AttachError, match="제어 문자"):
+        attach_files.normalize_name("a\nb.txt")
+    with pytest.raises(attach_files.AttachError, match="git이 쓰는 이름"):
+        attach_files.normalize_name(".gitignore")
+
+
+@pytest.mark.parametrize("ok", ["보고서.pdf", ".env.sample", "my.git.txt", "gitignore.md", "a'b.txt"])
+def test_names_that_only_look_similar_are_still_accepted(ok):
+    """`.git`으로 **시작하는** 이름만 막는다 — 중간에 git이 들어간 이름이나 점으로
+    시작하는 다른 이름까지 막으면 회원 파일을 괜히 거절한다."""
+    assert attach_files.normalize_name(ok) == f"attach_file/{ok}"
+
+
+def test_name_rules_match_core():
+    """이름 규칙 계약 — 클라우드 복제본과 코어(attach_local.normalize_name)가 같은
+    이름에 같은 판정을 해야 한다(어긋나면 두 경로가 다른 파일을 받아들이거나 다른
+    자리에 놓는다). 품은 코어가 아직 새 규칙 전 판이면 건너뛴다 — 서브모듈을 올린
+    뒤에는 반드시 돈다."""
+    import routing_server  # noqa: F401 — vendor/namu-plugin을 sys.path에 얹는다
+    import attach_local
+
+    if not hasattr(attach_local, "_BAD_NAME_CHARS"):
+        pytest.skip("품은 코어가 2026-09-25 이름 규칙 이전 판이다 — 서브모듈을 올리면 돈다")
+
+    samples = _UNSAFE_NAMES + [
+        "보고서.pdf", "attach_file/보고서.pdf", ".env.sample", "my.git.txt",
+        "../밖.txt", "하위/폴더.txt", "a\\b.txt", "", "   ",
+    ]
+    for name in samples:
+        try:
+            mine = attach_files.normalize_name(name)
+        except attach_files.AttachError:
+            mine = None
+        try:
+            core = attach_local.normalize_name(name)
+        except attach_local.AttachError:
+            core = None
+        assert mine == core, f"{name!r}: 클라우드={mine!r} 코어={core!r}"
+
+
 # ---------------------------------------------------------------------------
 # 올리기
 # ---------------------------------------------------------------------------

@@ -36,6 +36,12 @@ ATTACH_DIR_NAME = user_repo.ATTACH_DIR_NAME
 # 파일 이름에 허용하지 않는 것 — 경로를 거슬러 올라가 저장소의 다른 폴더에 쓰는
 # 것을 막는다. 첨부는 반드시 attach_file/ 안에만 놓인다.
 _BAD_NAME_PARTS = ("..", "\\")
+# HTML·헤더에 섞이면 위험한 글자 — 코어 attach_local._BAD_NAME_CHARS와 같은 목록이다
+# (2026-09-25 코어 검수 뒤따르기). 이름은 올리기 화면·받기 응답 헤더
+# (Content-Disposition)·첨부 기록에 그대로 실린다 — `<`/`>`/`"`는 화면에 태그로,
+# 줄바꿈은 응답 헤더를 쪼개는 데 쓰일 수 있다. 화면·헤더 쪽도 따로 막지만, 애초에
+# 회원 저장소에 그런 이름이 생기지 않게 입구에서 한 번 더 막는다.
+_BAD_NAME_CHARS = ("<", ">", '"')
 
 _MAX_BYTES_ENV = "NAMU_ATTACH_MAX_BYTES"
 # 기본 상한 20 MiB — 2026-08-07 운영 서버에 실제 파일을 올려 재고 그대로 뒀다.
@@ -105,8 +111,25 @@ def normalize_name(name: str) -> str:
             f"파일 이름에 쓸 수 없는 글자가 있습니다: {raw!r} — "
             "첨부는 attach_file/ 안에만 놓입니다."
         )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw) or any(
+        bad in raw for bad in _BAD_NAME_CHARS
+    ):
+        raise AttachError(
+            f"파일 이름에 쓸 수 없는 글자가 있습니다: {raw!r} — "
+            "제어 문자(줄바꿈 포함)와 < > \" 는 쓸 수 없습니다."
+        )
     prefix = f"{ATTACH_DIR_NAME}/"
     path = raw if raw.startswith(prefix) else prefix + raw
+    # 폴더 이름을 뗀 맨 이름으로 본다 — `attach_file/.gitignore`처럼 앞에 폴더를 붙여
+    # 들어와도 같은 판정이어야 한다. `.`은 폴더 자신, `.git…`은 git이 자기 것으로 읽는
+    # 이름이다(`.git`·`.gitattributes`·`.gitignore`를 첨부 폴더에 두면 그 폴더의
+    # 병합·무시 규칙이 바뀐다). 대소문자를 가리지 않는 파일 시스템(윈도우·맥)에서는
+    # `.GIT`도 같은 이름이므로 소문자로 바꿔 본다 — 코어와 같은 규칙.
+    bare = path[len(prefix):]
+    if bare == "." or bare.lower().startswith(".git"):
+        raise AttachError(
+            f"이 이름은 쓸 수 없습니다: {raw!r} — git이 쓰는 이름과 겹칩니다."
+        )
     # 정규화 후에도 폴더를 벗어나면 거절한다(예: attach_file/./../x).
     normalized = posixpath.normpath(path)
     if normalized != path or not normalized.startswith(prefix):

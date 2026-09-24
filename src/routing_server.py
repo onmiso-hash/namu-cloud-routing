@@ -1434,6 +1434,12 @@ def namu_task_move(
             f" {dest_project!r}에 이미 책갈피가 있던 기기({machines})는 원본 책갈피만 "
             "뗐습니다(덮어쓰지 않았습니다)."
         )
+    # 옮기기와 이관 기록은 끝났고 책갈피 정리만 실패한 경우다(코어 move_task가
+    # 2026-09-25부터 이 실패를 삼키고 `pin_error`로 돌려준다 — 옛 코어에는 이 칸이
+    # 없으므로 .get). 실패로 돌려주면 AI가 다시 옮기려 들므로 코어 mcp_server와 같이
+    # 성공 문장 뒤에 사유만 붙인다.
+    if result.get("pin_error"):
+        note += f" 다만 책갈피 정리는 실패했습니다: {result['pin_error']}"
 
     summary = f"작업 {slug!r}를 {project!r}에서 {dest_project!r}로 옮겼습니다.{note}"
     if warning:
