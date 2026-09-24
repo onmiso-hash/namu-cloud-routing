@@ -12,7 +12,7 @@
 쿠키를 지운다.
 
 이 서비스가 발급하는 MCP 접속 주소는 **웹 AI(claude.ai 등) 전용**이다 —
-Claude Code·agy 사용자는 이 주소를 붙이는 것이 아니라 나무를 플러그인으로
+Claude Code·agy·Grok 사용자는 이 주소를 붙이는 것이 아니라 나무를 플러그인으로
 설치한다(주소로 넘어가는 것은 기억 3종과 첨부 7종뿐이고 세션 브리핑·작업 절차·
 마무리 훅이 따라오지 않는다). 그 구분을 화면에서 알리는 곳이
 `_html_onboarding_section`이다.
@@ -521,7 +521,7 @@ def _html_onboarding_section(mcp_url: str) -> str:
     다시 볼 방법이 없고, 두 곳에 따로 적으면 한쪽만 고쳐지는 사고가 난다
     (`_html_mcp_url_section`을 공통으로 뽑은 것과 같은 이유).
 
-    3·4번(셀프호스팅 / Claude Code·agy)은 대부분의 사용자에게 해당되지 않아
+    3·4번(셀프호스팅 / Claude Code·agy·Grok)은 대부분의 사용자에게 해당되지 않아
     본문을 길게 만들면 정작 읽어야 할 2번을 밀어낸다 — `<details>`로 접어 둔다.
     2번은 접지 않는다(이 화면에 온 사람이 지금 당장 해야 할 일이다).
     """
@@ -552,7 +552,7 @@ def _html_onboarding_section(mcp_url: str) -> str:
         "직접 서버 운영하기 안내서 열기</a></p>"
         "</details>"
         "<details>"
-        "<summary>Claude Code·agy를 쓰신다면</summary>"
+        "<summary>Claude Code·agy·Grok을 쓰신다면</summary>"
         "<p>그 경우에는 <b>이 주소를 붙이는 것이 아니라 나무를 플러그인으로 "
         "설치</b>하셔야 합니다. 이 주소로 넘어가는 것은 기억과 파일뿐이고, 세션 "
         "브리핑·작업 절차(<code>/namu-task</code>)·마무리 점검처럼 나무의 나머지 "

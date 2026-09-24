@@ -75,7 +75,7 @@ def _fork() -> str:
         '<a class="btn btn-primary" href="/en/start">See how to start</a></div>'
         '<div class="opt"><span class="tag">This is not for you</span>'
         "<h4>I use AI in a terminal</h4>"
-        "<p>If you work in Claude Code or Antigravity CLI (agy), you should "
+        "<p>If you work in Claude Code, Antigravity CLI (agy) or Grok, you should "
         "<b>install NAMU as a plugin</b> rather than paste an MCP address. The "
         "plugin gives you the workflow features alongside the memory and "
         "learning core.</p>"
@@ -270,8 +270,8 @@ def start_page(logged_in: bool = False) -> str:
         + ui.notice(_KOREAN_AHEAD, tone="info")
         + ui.notice(
             "This walkthrough is for creating and registering an MCP address so "
-            "you can use NAMU with a browser AI. If you work in Claude Code or "
-            "Antigravity CLI (agy) and want NAMU there, the "
+            "you can use NAMU with a browser AI. If you work in Claude Code, "
+            "Antigravity CLI (agy) or Grok and want NAMU there, the "
             f'<a href="{ui.INSTALL_GUIDE_URL}" target="_blank" '
             'rel="noopener">plugin install guide (Korean)</a> is what you want '
             "instead.",
@@ -629,7 +629,7 @@ def faq_page(logged_in: bool = False) -> str:
                     "screen.</p>",
                 ),
                 (
-                    "I use Claude Code or Antigravity CLI (agy).",
+                    "I use Claude Code, Antigravity CLI (agy) or Grok.",
                     "<p>Then do not paste this address. Only memory and files "
                     "travel through it; the other half of NAMU — session "
                     "briefings, work procedures, closing checks — does not come "

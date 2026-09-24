@@ -1406,7 +1406,7 @@ def _assert_onboarding_guide(body: str) -> None:
         assert step in body, f"웹 AI 연결 절차 안내에 '{step}'가 없다"
     assert _SELF_HOST_GUIDE_URL in body, "셀프호스팅 안내서 링크가 없다"
     assert _PLUGIN_GUIDE_URL in body, "플러그인 설치 안내서 링크가 없다"
-    assert "플러그인" in body, "Claude Code·agy는 플러그인 설치라는 안내가 없다"
+    assert "플러그인" in body, "Claude Code·agy·Grok은 플러그인 설치라는 안내가 없다"
 
 
 def test_connected_page_shows_onboarding_guide(client, monkeypatch):

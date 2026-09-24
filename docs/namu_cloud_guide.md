@@ -34,9 +34,9 @@
 | 무엇을 쓰시나요 | 어떻게 하나요 |
 |---|---|
 | **웹 AI**(claude.ai, ChatGPT 등 브라우저에서 쓰는 AI) | 이 문서대로 **접속 주소를 커넥터에 붙인다** |
-| **Claude Code · agy**(터미널에서 쓰는 AI) | 주소를 붙이는 게 아니라 **나무를 플러그인으로 설치**한다 → [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md) |
+| **Claude Code · agy · Grok**(터미널에서 쓰는 AI) | 주소를 붙이는 게 아니라 **나무를 플러그인으로 설치**한다 → [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md) |
 
-왜 Claude Code·agy는 주소를 붙이면 안 되나 — 이 주소로 넘어가는 것은 **기억과 파일뿐**이다. 세션 시작 브리핑, `/namu-task` 작업 절차, 워커 호출, 마무리 훅처럼 나무의 나머지 절반은 플러그인에만 들어 있고 주소로는 따라오지 않는다. 게다가 기억이 쌓이는 자리도 갈라진다(플러그인은 그 PC의 `~/.namu`, 이 주소는 사용자 GitHub 저장소). 반쪽짜리 나무를 쓰면서 기억까지 두 곳으로 흩어지는 셈이라, 터미널 사용자에게는 권하지 않는다.
+왜 Claude Code·agy·Grok은 주소를 붙이면 안 되나 — 이 주소로 넘어가는 것은 **기억과 파일뿐**이다. 세션 시작 브리핑, `/namu-task` 작업 절차, 워커 호출, 마무리 훅처럼 나무의 나머지 절반은 플러그인에만 들어 있고 주소로는 따라오지 않는다. 게다가 기억이 쌓이는 자리도 갈라진다(플러그인은 그 PC의 `~/.namu`, 이 주소는 사용자 GitHub 저장소). 반쪽짜리 나무를 쓰면서 기억까지 두 곳으로 흩어지는 셈이라, 터미널 사용자에게는 권하지 않는다.
 
 ### 2-2. 접속 주소 받기 — 절차는 사이트가 안내한다
 
@@ -120,6 +120,6 @@ https://namu-cloud.onnamu.kr/mcp/<내-개인-열쇠>?client=<AI-이름>
 
 ## 관련 문서
 
-- [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md) — Claude Code·agy용 플러그인 설치 가이드(터미널 사용자는 이쪽)
+- [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md) — Claude Code·agy·Grok용 플러그인 설치 가이드(터미널 사용자는 이쪽)
 - [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) — 경로 B(셀프호스팅) 사용 가이드
 - [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md) — 설계 원본
