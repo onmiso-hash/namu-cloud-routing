@@ -1472,6 +1472,19 @@ def test_dispatcher_opens_the_font_files_to_the_web_app():
         assert client.get(path).text == "auth", f"글꼴 주소 {path!r}가 안 열렸다"
 
 
+def test_dispatcher_opens_the_icon_files_to_the_web_app():
+    """아이콘 주소가 MCP 쪽으로 가면 커넥터 아이콘이 401로 깨진다."""
+    import ui
+
+    auth_app = _make_labelled_app("auth")
+    mcp_app = _make_labelled_app("mcp")
+    client = TestClient(rs._AuthOrMcpDispatcher(auth_app, mcp_app, _make_labelled_app("ticket")))
+
+    assert ui.ICON_PATHS, "내보낼 아이콘 목록이 비었다"
+    for path in ui.ICON_PATHS:
+        assert client.get(path).text == "auth", f"아이콘 주소 {path!r}가 안 열렸다"
+
+
 def test_font_paths_are_matched_exactly_not_by_prefix():
     """파일 주소도 접두어로 열면 안 된다 — 한 글자라도 다르면 닫히는 쪽으로."""
     auth_app = _make_labelled_app("auth")
@@ -1498,8 +1511,12 @@ def test_font_paths_stay_out_of_the_public_page_list():
     assert not (rs._PUBLIC_PATHS & rs._ASSET_PATHS)
     assert not (rs._PUBLIC_PATHS & rs._API_PATHS)
     assert not (rs._ASSET_PATHS & rs._API_PATHS)
-    assert rs._WEB_PATHS == rs._PUBLIC_PATHS | rs._ASSET_PATHS | rs._API_PATHS
+    assert not (rs._ICON_PATHS & (rs._PUBLIC_PATHS | rs._ASSET_PATHS | rs._API_PATHS))
+    assert rs._WEB_PATHS == (
+        rs._PUBLIC_PATHS | rs._ASSET_PATHS | rs._ICON_PATHS | rs._API_PATHS
+    )
     assert rs._ASSET_PATHS == frozenset(ui.ASSET_PATHS)
+    assert rs._ICON_PATHS == frozenset(ui.ICON_PATHS)
     assert rs._API_PATHS == frozenset(ui.API_PATHS)
 
 

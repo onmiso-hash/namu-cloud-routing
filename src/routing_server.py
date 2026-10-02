@@ -2375,6 +2375,9 @@ _PUBLIC_PATHS = frozenset(ui.PUBLIC_PATHS)
 # 목록 자체는 각자의 이유를 갖고 따로 산다.
 _ASSET_PATHS = frozenset(ui.ASSET_PATHS)
 
+# 나무 클라우드 아이콘(PNG·SVG). 글꼴과 캐시 규칙이 달라 목록을 따로 산다.
+_ICON_PATHS = frozenset(ui.ICON_PATHS)
+
 # 화면도 파일도 아니고 숫자만 주고받는 주소(방문 신호 받기·방문 집계·가입자 수).
 # 위의 둘과 **따로 두는 이유도 같다** — 한 통에 담으면 "메뉴 = 공개 경로"라는
 # 규칙이 흐려진다. 이 셋은 비밀값이 박히지 않은 고정 경로라 `==`로 열어도
@@ -2383,7 +2386,7 @@ _API_PATHS = frozenset(ui.API_PATHS)
 
 # 웹 앱으로 보낼 정확한 주소 전부. `startswith`가 아니라 `in`으로 보는 성질은
 # 그대로다 — 목록에 적힌 그 글자가 아니면 종전대로 닫히는 쪽(MCP+인증)으로 간다.
-_WEB_PATHS = _PUBLIC_PATHS | _ASSET_PATHS | _API_PATHS
+_WEB_PATHS = _PUBLIC_PATHS | _ASSET_PATHS | _ICON_PATHS | _API_PATHS
 
 
 class _AuthOrMcpDispatcher:

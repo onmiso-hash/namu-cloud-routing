@@ -1505,6 +1505,36 @@ def _asset_file(path: str):
     return handler
 
 
+# ---------------------------------------------------------------------------
+# 아이콘 파일 내보내기
+#
+# 글꼴과 같은 방식(목록에 적은 이름만 연다)이되 캐시는 하루로 짧게 둔다. 이
+# 주소는 커넥터 등록의 아이콘 칸처럼 바깥에 박히므로 그림을 바꿔도 이름이
+# 그대로다 — immutable을 걸면 바꾼 그림이 1년 동안 안 보인다.
+# ---------------------------------------------------------------------------
+_ICON_DIR = Path(__file__).resolve().parent / "assets" / "icons"
+_ICON_CACHE = "public, max-age=86400"
+_ICON_TYPES = {".png": "image/png", ".svg": "image/svg+xml"}
+
+
+def _icon_file(path: str):
+    # 글꼴과 같은 이유로 파일 이름만 떼어 쓴다.
+    target = _ICON_DIR / Path(path).name
+    media_type = _ICON_TYPES[target.suffix]
+
+    async def handler(request: Request) -> Response:
+        if not target.is_file():
+            return PlainTextResponse("not found", status_code=404)
+        return FileResponse(
+            target,
+            media_type=media_type,
+            headers={"Cache-Control": _ICON_CACHE},
+        )
+
+    handler.__name__ = f"icon_{target.name.replace('.', '_')}"
+    return handler
+
+
 def _public_page(path: str):
     # 한국어판과 영어판을 한 사전으로 합쳐서 찾는다(namu-83). 경로가 겹치지
     # 않으므로 어느 쪽에서 왔는지 여기서 따질 필요가 없다.
@@ -2937,9 +2967,13 @@ def build_auth_app() -> Starlette:
     asset_routes = [
         Route(path, _asset_file(path), methods=["GET"]) for path in ui.ASSET_PATHS
     ]
+    icon_routes = [
+        Route(path, _icon_file(path), methods=["GET"]) for path in ui.ICON_PATHS
+    ]
     return Starlette(
         routes=public_routes
         + asset_routes
+        + icon_routes
         + [
             Route("/auth/github/login", login, methods=["GET"]),
             Route("/auth/github/install", install, methods=["GET"]),

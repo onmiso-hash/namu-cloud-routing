@@ -104,6 +104,12 @@ FONT_FAMILY = "Wanted Sans"
 # (메뉴와 같은 이유 — 두 곳에 적으면 한쪽만 고쳐진다).
 ASSET_PATHS = ("/asset/wanted-sans-variable.woff2",)
 
+# 나무 클라우드 아이콘을 내보낼 주소. 글꼴(`ASSET_PATHS`)과 **따로 둔다** —
+# 글꼴은 이름이 곧 내용이라 1년 캐시를 걸지만, 아이콘 주소는 바깥(커넥터 등록의
+# 아이콘 칸)에 박혀 그림을 바꿔도 이름이 그대로라 같은 캐시를 걸 수 없다.
+# 첫 칸(PNG 512×512)이 바깥에 알려 주는 주소, 둘째 칸(SVG)이 이름표 아이콘이다.
+ICON_PATHS = ("/icon.png", "/icon.svg")
+
 # 화면도 파일도 아닌, 숫자만 주고받는 주소. 공개 화면(`PUBLIC_PATHS`)·글꼴
 # (`ASSET_PATHS`)과 **따로 둔다** — 셋을 한 통에 담으면 "메뉴 = 공개 경로"라는
 # 규칙이 흐려져, 메뉴에 없는 경로가 슬금슬금 늘어나도 아무도 눈치채지 못한다.
@@ -800,13 +806,10 @@ _REVEAL_SCRIPT = (
     "</script>"
 )
 
-# 이름표 아이콘. 바깥 파일을 받아오지 않도록 data URI로 심는다 — 이것이 없으면
-# 브라우저가 /favicon.ico를 찾아 나서고, 그 요청은 우리 MCP 쪽으로 흘러간다.
-_FAVICON = (
-    '<link rel="icon" href="data:image/svg+xml,'
-    "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E"
-    "%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%B3%3C/text%3E%3C/svg%3E\">"
-)
+# 이름표 아이콘. 이것이 없으면 브라우저가 /favicon.ico를 찾아 나서고, 그 요청은
+# 우리 MCP 쪽으로 흘러간다. 웹 앱이 내보내는 `ICON_PATHS`의 SVG를 가리키므로
+# 그 요청은 MCP로 가지 않고, 커넥터 아이콘과 같은 그림이 탭에도 뜬다.
+_FAVICON = f'<link rel="icon" type="image/svg+xml" href="{ICON_PATHS[1]}">'
 
 
 # ---------------------------------------------------------------------------

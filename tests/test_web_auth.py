@@ -2576,6 +2576,26 @@ def test_font_files_exist_in_the_repo(client):
         assert (wa._ASSET_DIR / Path(path).name).is_file(), f"{path} 파일이 없다"
 
 
+def test_every_listed_icon_file_is_actually_served(client):
+    """아이콘 주소는 커넥터 등록 칸에 박히므로 404가 되면 바깥에서 그림이 깨진다."""
+    signatures = {".png": b"\x89PNG", ".svg": b"<svg"}
+    types = {".png": "image/png", ".svg": "image/svg+xml"}
+    assert ui.ICON_PATHS, "내보낼 아이콘 목록이 비었다"
+    for path in ui.ICON_PATHS:
+        r = client.get(path)
+        suffix = Path(path).suffix
+        assert r.status_code == 200, f"{path}가 안 나온다"
+        assert r.headers["content-type"].startswith(types[suffix])
+        # 이름이 그대로인 채 그림이 바뀔 수 있으므로 영구 캐시를 걸지 않는다.
+        assert "immutable" not in r.headers["cache-control"]
+        assert r.content.startswith(signatures[suffix]), f"{path}가 엉뚱한 파일이다"
+
+
+def test_icon_route_does_not_open_the_folder_underneath(client):
+    for path in ["/icon.ico", "/icons/icon.png", "/icon.png/../web_auth.py"]:
+        assert client.get(path).status_code == 404, f"{path}가 열렸다"
+
+
 def test_font_route_does_not_open_the_folder_underneath(client):
     """폴더를 통째로 여는 것(StaticFiles)이 아니라 목록에 적은 것만 연다 —
     같은 폴더의 사용 조건 파일조차 주소로는 나가지 않아야 한다."""

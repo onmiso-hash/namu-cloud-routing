@@ -26,6 +26,8 @@ ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES)
 # 화면들이라 여기 적어 둔다 — 이 목록에 없는 새 주소를 페이지가 걸면
 # 아래 시험이 먼저 실패해, 아직 없는 화면으로 사람을 보내는 일이 없다.
 KNOWN_AUTH_PATHS = {"/auth/github/login", "/auth/me", "/auth/memory"}
+# 이름표 아이콘(`ui.ICON_PATHS`)도 웹 앱이 내보내는 우리 주소다.
+KNOWN_AUTH_PATHS |= set(ui.ICON_PATHS)
 
 
 @pytest.mark.parametrize("path,render", ALL_PAGES)

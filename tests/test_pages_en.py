@@ -22,6 +22,8 @@ ALL_PAGES = list(pages_en.PAGES.items())
 
 ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES)
 KNOWN_AUTH_PATHS = {"/auth/github/login", "/auth/me", "/auth/memory"}
+# 이름표 아이콘(`ui.ICON_PATHS`)도 웹 앱이 내보내는 우리 주소다.
+KNOWN_AUTH_PATHS |= set(ui.ICON_PATHS)
 
 _HANGUL = re.compile("[가-힣]")
 
