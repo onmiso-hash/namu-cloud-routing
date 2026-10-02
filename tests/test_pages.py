@@ -183,5 +183,15 @@ def test_faq_does_not_promise_prices_or_dates():
 
 
 def test_menu_and_pages_are_the_same_set():
-    """메뉴에 있는데 안 열리는 항목도, 메뉴에 없는 떠돌이 페이지도 없어야 한다."""
-    assert set(pages.PAGES) == {path for path, _label in ui.MENU}
+    """메뉴에 있는데 안 열리는 항목도, 메뉴에 없는 떠돌이 페이지도 없어야 한다.
+    발에만 걸리는 화면(`ui.FOOT_ONLY`, 개인정보 처리방침)도 목록에 이름이 있다."""
+    assert set(pages.PAGES) == {path for path, _label in (*ui.MENU, *ui.FOOT_ONLY)}
+
+
+def test_privacy_page_is_linked_from_every_footer():
+    """커넥터 등록 화면이 요구하는 주소라, 어느 화면에서든 찾아 들어갈 수 있어야 한다."""
+    for render in pages.PAGES.values():
+        assert '<a href="/privacy">개인정보 처리방침</a>' in render(False)
+    out = pages.privacy_page(False)
+    assert "시행일: 2026년 10월 2일" in out
+    assert "mailto:" in out

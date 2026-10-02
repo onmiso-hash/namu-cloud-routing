@@ -686,6 +686,220 @@ def faq_page(logged_in: bool = False) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Privacy policy — 한국어판 `pages.privacy_page`의 짝(2026-10-02).
+#
+# 근거 자리 목록은 한국어판 머리 주석에 있다. 문장을 고칠 때는 두 벌을 함께
+# 고칠 것(이 파일 첫머리의 '두 벌 관리'). 법령 이름은 한글 없이 영어로 적는다 —
+# 영어 화면에 한글이 남으면 `test_english_pages_carry_no_leftover_korean`이 잡는다.
+# ---------------------------------------------------------------------------
+PRIVACY_EFFECTIVE_EN = "October 2, 2026"
+
+
+def privacy_page(logged_in: bool = False) -> str:
+    email = pages.CONTACT_EMAIL
+    body = (
+        '<span class="eyebrow">Privacy policy</span>'
+        "<h1>What information we handle, and how</h1>"
+        '<p class="lead">NAMU Cloud (the "Service") complies with the Personal '
+        "Information Protection Act of the Republic of Korea and other applicable "
+        "laws. This policy explains what information the Service uses, for what, "
+        "and for how long.</p>"
+        "<p>You sign up with a GitHub account only. We do not ask for your email "
+        "address, phone number, real name, or anything else that identifies you "
+        "directly.</p>"
+        # 1 ------------------------------------------------------------------
+        "<h2>1. What we collect and how</h2>"
+        "<h3>a. From GitHub sign-in</h3>"
+        "<ul>"
+        "<li>The only things we receive from GitHub and keep are your account's "
+        "<b>numeric ID and username</b>.</li>"
+        "<li>The user token GitHub issues during sign-in is used only while that "
+        "request is handled and is <b>never stored</b>.</li>"
+        "</ul>"
+        "<h3>b. Member record</h3>"
+        "<p>When you connect a repository, we also record:</p>"
+        "<ul>"
+        "<li>the installation number of the NAMU app and the name of the "
+        "connected repository (<code>owner/repo</code>)</li>"
+        "<li>when you signed up and when you were last active</li>"
+        "<li>the personal key inside your connection address, and when you "
+        "revoked the address, if you did</li>"
+        "</ul>"
+        "<h3>c. Memory and attachments</h3>"
+        "<ul>"
+        "<li>The <b>original of your memory</b> (learnings, profile, task log, "
+        "memos, attachment records) is stored as files in <b>your own GitHub "
+        "repository</b>.</li>"
+        "<li>To read and write memory, the server keeps a <b>working copy</b> of "
+        "that repository. The copy is capped at 50 MB per member, and the "
+        "contents of attached files are never pulled into it.</li>"
+        "<li>Attached files travel directly between GitHub and the "
+        "<code>attach_file</code> folder of your repository and are not kept on "
+        "the server's disk. One-time links for sending and receiving files expire "
+        "after 2 hours (upload) and 1 hour (download).</li>"
+        "</ul>"
+        "<h3>d. Access logs</h3>"
+        "<ul>"
+        "<li>Each request to the server is logged automatically with its time, "
+        "IP address, the country, city and location (latitude and longitude) "
+        "estimated from that IP, the requested path, and the response status "
+        "code.</li>"
+        "<li>Connection keys and one-time sign-in values in the path are replaced "
+        "with an <b>irreversible fingerprint</b> before they are written.</li>"
+        "<li>When an AI calls one of NAMU's tools, we also record <b>the tool's "
+        "name</b> and nothing else. What was passed to the tool (your memory "
+        "text) is not logged.</li>"
+        "</ul>"
+        "<h3>e. Visit signal</h3>"
+        "<ul>"
+        "<li>To count how many pages real people open, we store one random "
+        "identifier named <code>namu-vid</code> in your browser's storage "
+        "(localStorage). It is not linked to your GitHub account.</li>"
+        "<li>The signal carries only the time of the visit, the page path, and "
+        "the country. Your IP address is not recorded.</li>"
+        "<li>Clearing site data in your browser removes the identifier as "
+        "well.</li>"
+        "</ul>"
+        '<h3 id="ai">f. Questions to the AI assistant</h3>'
+        "<ul>"
+        "<li>The AI assistant in the corner of the Korean pages sends your "
+        "question, together with up to three previous exchanges, to "
+        "<b>Google's AI (Gemini)</b>. Your memory is never sent.</li>"
+        "<li>Conversations are not saved to any file or database. To avoid asking "
+        "the same question twice, recent answers are held briefly in server "
+        "memory and disappear when the server restarts.</li>"
+        "<li>To count daily questions we use an assistant-only cookie and your IP "
+        "address, but both are turned into irreversible fingerprints and only "
+        "that day's count is kept.</li>"
+        "</ul>"
+        "<h3>g. What we do not collect</h3>"
+        "<ul>"
+        "<li>We do not receive your email address, phone number, real name, or "
+        "payment information.</li>"
+        "<li>NAMU can see only the repository you chose when granting access. We "
+        "receive nothing from your other repositories.</li>"
+        "</ul>"
+        # 2 ------------------------------------------------------------------
+        "<h2>2. Why we use it</h2>"
+        "<ul>"
+        "<li>To confirm who has signed in, and to read and write your memory in "
+        "your repository</li>"
+        "<li>To keep the Service running reliably and to find the cause of "
+        "failures</li>"
+        "<li>To detect and block abnormal bulk requests and attacks</li>"
+        "<li>To produce usage statistics, aggregated only in a form that cannot "
+        "identify individuals</li>"
+        "</ul>"
+        # 3 ------------------------------------------------------------------
+        "<h2>3. How long we keep it</h2>"
+        "<ul>"
+        "<li><b>Access logs and visit signals</b> are deleted automatically 30 "
+        "days after they are created.</li>"
+        "<li><b>Assistant question counts</b> are kept for the current day only "
+        "and start over when the date changes.</li>"
+        "<li><b>The member record and the server's working copy</b> are kept until "
+        "you ask us to delete them. Revoking your connection address or removing "
+        "the NAMU app's access in GitHub does not delete them automatically. "
+        "Contact us at the address below and we will delete them without "
+        "delay.</li>"
+        "<li>The original of your memory in your repository belongs to you, so "
+        "the Service never deletes it. Keep it or delete it yourself as you "
+        "wish.</li>"
+        "</ul>"
+        "<p>Where the law requires information to be kept, we follow that "
+        "period.</p>"
+        # 4 ------------------------------------------------------------------
+        "<h2>4. Cookies and browser storage</h2>"
+        "<p>The Service shows no ads and uses no third-party tracking scripts. "
+        "This is the complete list of what it uses:</p>"
+        "<ul>"
+        "<li><code>namu_session</code> — keeps you signed in. Expires after 30 "
+        "minutes.</li>"
+        "<li><code>namu_oauth_state</code> — checks that a sign-in request was "
+        "not forged. Expires after 10 minutes.</li>"
+        "<li><code>namu_repo_hint</code> — carries the name of the repository you "
+        "just created to the next step. Expires after 30 minutes.</li>"
+        "<li><code>namu_ask_id</code> — counts daily questions to the assistant. "
+        "Expires after 30 days.</li>"
+        "<li><code>namu-theme</code> (light or dark) and <code>namu-vid</code> "
+        "(visit signal) in browser storage — only <code>namu-vid</code> is sent "
+        "to the server.</li>"
+        "</ul>"
+        "<p>You may block cookies in your browser settings, but you will then be "
+        "unable to sign in or use My page.</p>"
+        # 5 ------------------------------------------------------------------
+        "<h2>5. Third parties and processors</h2>"
+        "<p>The Service does not hand over or sell your information to third "
+        "parties. Because of how the Service works, please note the "
+        "following.</p>"
+        "<ul>"
+        "<li><b>GitHub</b> — sign-in and your memory repository live on GitHub, "
+        "and that part is governed by GitHub's policies.</li>"
+        "<li><b>Google</b> — questions to the assistant go to Google's AI. The "
+        "Service uses the free tier, so under Google's terms the text sent and "
+        "the answers returned may be used to improve Google's products and may be "
+        "read by people. Please do not type personal information or your "
+        "connection address into the assistant.</li>"
+        "<li><b>Cloudflare</b> — the Service is delivered through Cloudflare's "
+        "network, and that part is governed by Cloudflare's policies.</li>"
+        "<li><b>The AI you connect</b> — when an AI such as claude.ai pulls up "
+        "your memory during a conversation, that content becomes part of the "
+        "conversation and is then governed by that AI company's policies.</li>"
+        "</ul>"
+        # 6 ------------------------------------------------------------------
+        "<h2>6. Your rights</h2>"
+        "<ul>"
+        "<li>You can see what is stored at any time on the <b>My memory</b> page "
+        "or in your repository.</li>"
+        "<li>You can reissue or revoke your connection address on <b>My page</b>, "
+        "and remove the NAMU app's access in your GitHub settings at any "
+        "time.</li>"
+        "<li>You may also ask to see, correct or delete your information, or ask "
+        "us to stop processing it. Contact us at the address below and we will "
+        "act without delay.</li>"
+        "</ul>"
+        # 7 ------------------------------------------------------------------
+        "<h2>7. Security measures</h2>"
+        "<ul>"
+        "<li>All traffic is encrypted with HTTPS.</li>"
+        "<li>Your repository is reached only with one-hour tokens issued on "
+        "demand; no lasting key is stored, and those tokens live only in server "
+        "memory.</li>"
+        "<li>The sign-in cookie is signed so it cannot be forged, and page "
+        "scripts cannot read it.</li>"
+        "<li>The member record is stored separately from the memory copies, so it "
+        "is never pushed to your repository.</li>"
+        "</ul>"
+        # 8 ------------------------------------------------------------------
+        "<h2>8. Children under 14</h2>"
+        "<p>The Service is not intended for children under 14, and we do not "
+        "knowingly collect their personal information.</p>"
+        # 9 ------------------------------------------------------------------
+        "<h2>9. Privacy officer and contact</h2>"
+        "<ul>"
+        "<li>Service: NAMU Cloud (namu-cloud.onnamu.kr)</li>"
+        "<li>Operator: onnamu Project (individually operated)</li>"
+        f'<li>Contact: <a href="mailto:{email}">{email}</a></li>'
+        "</ul>"
+        # 10 -----------------------------------------------------------------
+        "<h2>10. Changes to this policy</h2>"
+        "<p>If this policy changes, the updated version will be posted on this "
+        "page.</p>"
+        f"<p><b>Effective date: {PRIVACY_EFFECTIVE_EN}</b></p>"
+    )
+    return ui.page(
+        "Privacy policy — NAMU Cloud",
+        body,
+        current="/en/privacy",
+        cta="me" if logged_in else "start",
+        description="What information NAMU Cloud receives, what it is used for, "
+        "how long it is kept, and how to ask for deletion.",
+        ask=False,
+        lang="en",
+    )
+
+
 # 경로 → 그리는 함수. 한국어판(`pages.PAGES`)과 **따로 둔다** — `ask_corpus`가
 # 안내원의 자료를 만들 때 `pages.PAGES`를 통째로 돌리므로, 여기 것을 그 사전에
 # 섞으면 한국어 안내원이 영어 화면 글까지 근거로 물고 온다.
@@ -695,4 +909,6 @@ PAGES = {
     "/en/memory": memory_page,
     "/en/safety": safety_page,
     "/en/faq": faq_page,
+    # 발에만 걸리는 화면(`ui.FOOT_ONLY_EN`).
+    "/en/privacy": privacy_page,
 }

@@ -81,8 +81,10 @@ def test_footer_leads_back_into_the_site_and_out_to_the_guides():
     inside = [(u, a) for u, a in links if u.startswith("/")]
     outside = [(u, a) for u, a in links if not u.startswith("/")]
 
-    # 사이트 안 링크는 메뉴 전체를 담는다.
-    assert {u for u, _a in inside} == {path for path, _label in ui.MENU}
+    # 사이트 안 링크는 메뉴 전체와, 발에만 있는 화면(개인정보 처리방침)을 담는다.
+    assert {u for u, _a in inside} == {
+        path for path, _label in (*ui.MENU, *ui.FOOT_ONLY)
+    }
     for _url, attrs in inside:
         assert "_blank" not in attrs
     assert outside, "바깥 안내서로 나가는 길이 하나도 없다"

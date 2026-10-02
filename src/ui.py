@@ -539,6 +539,19 @@ MENU_EN = (
     ("/en/faq", "FAQ"),
 )
 
+# 머리줄 메뉴에는 없고 **발에만** 걸리는 공개 화면 — 개인정보 처리방침
+# (2026-10-02, Claude 커넥터 등록에 처리방침 주소가 필요해서 만들었다).
+#
+# MENU에 넣지 않는 이유: 머리줄은 이미 꽉 차 있다(위 MENU_EN 설명의 '잘림'
+# 실측). 처리방침은 찾아 들어오는 화면이지 둘러보는 화면이 아니므로 발이 맞다.
+#
+# 그래도 **문 목록(`PUBLIC_PATHS`)의 원본은 여전히 이 파일의 튜플들뿐이다** —
+# "메뉴에 없는 공개 경로가 슬금슬금 는다"는 걱정은 이름 붙은 목록 하나로
+# 막는다. 발(`footer`)이 이 목록을 그대로 그리므로 "화면에 링크가 없는 공개
+# 경로"는 여전히 생기지 않는다.
+FOOT_ONLY = (("/privacy", "개인정보 처리방침"),)
+FOOT_ONLY_EN = (("/en/privacy", "Privacy policy"),)
+
 # 같은 화면의 다른 언어판이 어디인지. 언어 단추가 이 짝을 보고 링크를 만든다.
 LANG_PAIRS = {
     "/": "/en",
@@ -546,11 +559,12 @@ LANG_PAIRS = {
     "/memory": "/en/memory",
     "/safety": "/en/safety",
     "/faq": "/en/faq",
+    "/privacy": "/en/privacy",
 }
 LANG_PAIRS_BACK = {en: ko for ko, en in LANG_PAIRS.items()}
 
-PUBLIC_PATHS = tuple(path for path, _label in MENU) + tuple(
-    path for path, _label in MENU_EN
+PUBLIC_PATHS = tuple(
+    path for path, _label in (*MENU, *MENU_EN, *FOOT_ONLY, *FOOT_ONLY_EN)
 )
 
 GITHUB_URL = "https://github.com/onmiso-hash/namu-agent"
@@ -661,9 +675,12 @@ def topbar(current: str = "", cta: str = "me", lang: str = "ko") -> str:
 def footer(lang: str = "ko") -> str:
     """모든 화면 맨 아래. 사이트 안의 페이지가 먼저, 바깥 문서가 나중이다."""
     en = lang == "en"
+    # 메뉴 뒤에 발에만 있는 화면(개인정보 처리방침)을 잇는다 — `FOOT_ONLY` 참고.
     pages = "".join(
         f'<li><a href="{path}">{html.escape(label)}</a></li>'
-        for path, label in (MENU_EN if en else MENU)
+        for path, label in (
+            (*MENU_EN, *FOOT_ONLY_EN) if en else (*MENU, *FOOT_ONLY)
+        )
     )
     # 바깥 문서는 전부 한국어뿐이다. 영어 화면에서 이름표만 영어로 달면 눌러
     # 들어간 뒤에야 알게 되므로, 이름표에 (Korean)을 함께 적는다.

@@ -1451,7 +1451,8 @@ def test_public_paths_and_menu_never_drift_apart():
     import ui
 
     assert rs._PUBLIC_PATHS == frozenset(
-        path for path, _label in (*ui.MENU, *ui.MENU_EN)
+        path
+        for path, _label in (*ui.MENU, *ui.MENU_EN, *ui.FOOT_ONLY, *ui.FOOT_ONLY_EN)
     )
 
 

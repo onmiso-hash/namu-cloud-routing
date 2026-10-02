@@ -148,7 +148,15 @@ def test_the_language_button_is_absent_where_there_is_no_translation():
 
 def test_english_menu_and_pages_are_the_same_set():
     """메뉴에 있는데 안 열리는 항목도, 메뉴에 없는 떠돌이 페이지도 없어야 한다."""
-    assert set(pages_en.PAGES) == {path for path, _label in ui.MENU_EN}
+    assert set(pages_en.PAGES) == {
+        path for path, _label in (*ui.MENU_EN, *ui.FOOT_ONLY_EN)
+    }
+
+
+def test_english_privacy_page_is_linked_from_every_footer():
+    for render in pages_en.PAGES.values():
+        assert '<a href="/en/privacy">Privacy policy</a>' in render(False)
+    assert "Effective date: October 2, 2026" in pages_en.privacy_page(False)
 
 
 def test_language_pairs_cover_every_public_page():
