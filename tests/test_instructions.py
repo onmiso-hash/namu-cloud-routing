@@ -118,7 +118,32 @@ def test_cloud_and_self_hosted_expose_the_same_tools():
     클라우드에만 있었고, 사용자가 그것을 짚어 이 시험이 생겼다. 코어의
     `http_server.HTTP_EXPOSED_TOOLS`가 개인 주소가 내주는 목록이므로 그것과
     글자까지 같은지 본다.
+
+    예외는 하나다. 대화 점검 기록(`namu_record_session`)은 회원의 대화 원문을
+    통째로 받으므로, MCP 디렉터리 등록을 앞두고 2026-10-02 사용자 결정으로
+    클라우드에서만 뺐다. 그 밖의 차이는 여전히 막는다.
     """
     import http_server
 
-    assert rs.EXPOSED_TOOLS == http_server.HTTP_EXPOSED_TOOLS
+    cloud_only_removed = {"namu_record_session"}
+    assert rs.EXPOSED_TOOLS == http_server.HTTP_EXPOSED_TOOLS - cloud_only_removed
+
+
+def test_tool_descriptions_state_facts_only():
+    """MCP 디렉터리 정책: 도구 설명문에는 AI 행동 지시나 다른 도구 안내를 넣지
+    않는다(2026-10-02). 모든 도구에 읽기·쓰기 표시가 붙고, 설명문은 붙는 쪽이
+    잘라 쓰는 길이(약 2,048자) 안에 든다."""
+    import asyncio
+    import re
+
+    tools = asyncio.run(rs.mcp.list_tools())
+    assert {t.name for t in tools} == set(rs.EXPOSED_TOOLS)
+    for t in tools:
+        assert t.annotations is not None, f"{t.name}에 읽기·쓰기 표시가 없다"
+        assert t.annotations.read_only_hint is not None, t.name
+        assert len(t.description) <= 2048, f"{t.name} 설명문이 잘린다"
+        directive = re.search(
+            r"(?i)\b(call this|you must|should|instead|do not|don't)\b|namu_\w+",
+            t.description,
+        )
+        assert directive is None, f"{t.name} 설명문에 지시·다른 도구 언급: {directive}"

@@ -67,7 +67,6 @@ import memo  # noqa: E402
 import profile  # noqa: E402
 import project_policy  # noqa: E402
 import record_input  # noqa: E402
-import sessions  # noqa: E402
 import task_move  # noqa: E402
 import task_resolve  # noqa: E402
 import ticket_web  # noqa: E402
@@ -79,6 +78,7 @@ import web_auth  # noqa: E402
 from mcp.server.mcpserver import Context, MCPServer  # noqa: E402
 from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 from mcp.server.transport_security import TransportSecuritySettings  # noqa: E402
+from mcp.types import ToolAnnotations  # noqa: E402
 
 # 이 서버가 내주는 도구. **소개문도 이 목록에서 만든다** — 목록과 소개문이 갈라지면
 # 붙은 AI가 없는 도구를 부른다. 셀프호스팅 쪽이 실제로 그랬고(소개 7종/노출 3종),
@@ -92,7 +92,6 @@ EXPOSED_TOOLS = frozenset({
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
     "namu_task_move",
-    "namu_record_session",
 })
 
 mcp = MCPServer(
@@ -107,6 +106,160 @@ mcp = MCPServer(
 )
 
 logger = logging.getLogger("namu.routing_server")
+
+
+# ---------------------------------------------------------------------------
+# 도구 설명문과 읽기·쓰기 표시 (MCP 디렉터리 등록, 2026-10-02)
+#
+# 설명문에는 **도구가 무엇을 하는지만** 적는다. "언제 불러라", "그 도구 대신
+# 이것을 써라" 같은 AI 행동 지시와 다른 도구 안내는 넣지 않는다 — 디렉터리
+# 정책이 금하는 것이고, 그런 안내는 서버 소개문(`instructions`)의 몫이다.
+# 기억 남기기의 칸 목록은 손으로 적지 않고 코어의 표(config.FIELDS)에서 만든다
+# (namu-65 — 칸 설명을 두 곳에 적으면 갈라진다).
+# ---------------------------------------------------------------------------
+def _record_field_lines() -> str:
+    # 붙는 쪽은 설명문을 앞에서 약 2,048자까지만 쓴다(코어 tool_description 참고)
+    # — 그래서 예시는 빼고, 모든 그릇에 공통인 칸은 한 마디로 줄인다.
+    every = set(cfg.BOWL_NAMES)
+    lines = []
+    for field in cfg.FIELDS:
+        where = "all bowls" if set(field.bowls) >= every else ", ".join(field.bowls)
+        if not field.required_in:
+            need = "optional"
+        elif set(field.required_in) == set(field.bowls):
+            need = "required"
+        else:
+            need = "required in " + ", ".join(field.required_in)
+        lines.append(
+            f"- {field.name} ({where}; {need}): "
+            f"{record_input._first_sentence(field.desc)}"
+        )
+    return "\n".join(lines)
+
+
+_TOOL_DESCRIPTIONS = {
+    "namu_recall": (
+        "Return an overview of this user's memory in one call: every sticky "
+        "note (memo), active profile facts, recent learnings (filtered by "
+        "`query`/`task_type`, up to `limit`), and every open task with its "
+        "next step. `project` limits the open tasks to one project folder. "
+        "Fails with an onboarding message if the user has not connected a "
+        "GitHub repository yet."
+    ),
+    "namu_search": (
+        "Search one memory bowl of this user. `bowl`: 'learnings' (default), "
+        "'tasks', 'profile', 'memo' or 'attachments'. `query` is optional; "
+        "when it has several words, all of them must match. Filters: "
+        "`project` and `task` (tasks, attachments), `machine`, `via`, "
+        "`since`/`until` (date or datetime, Korea time; tasks), "
+        "`outcome_filter` ('success'/'failure'/'partial'; learnings), "
+        "`limit` (default 10). Returns the matching entries; for learnings "
+        "also a count of outcomes."
+    ),
+    "namu_record": (
+        "Append one memory entry to this user's own GitHub repository. "
+        "Entries are append-only. `bowl` is required: learnings (reusable "
+        "lessons), profile (facts about the user), tasks (work log), memo "
+        "(short-lived notes; the only bowl whose entries can be removed "
+        "later) or attachments (log of uploaded files).\n"
+        f"Every entry has `summary` (what), `reason` (why) and `body` "
+        f"(details); all three are required. '{cfg.OMITTED}' is accepted "
+        "when there is nothing to add, except for a memo body.\n"
+        "The tasks bowl requires `project` (a folder name). With "
+        f"`create=true` a new task folder is made: `summary` becomes its "
+        f"title (max {record_input._title_limit()} characters), `body` its "
+        f"next-step line (max {record_input._next_line_limit()} characters) "
+        "and `done_when` its completion criteria.\n"
+        "A field that the chosen bowl does not accept is rejected. Older "
+        "field names (" + ", ".join(record_input._legacy_field_names())
+        + ") are mapped to the new ones.\n"
+        "Fields:\n" + _record_field_lines() + "\n"
+        "Returns the new entry id (for tasks, the lines written), or a dict "
+        "with `notices`/`warning` when there is something to report."
+    ),
+    "namu_task_move": (
+        "Move one task folder (task.md and log.md) from room `project` to "
+        "room `to`, within this user's own storage. `to` must be an existing "
+        "room of this user; otherwise nothing moves and the error lists the "
+        "user's rooms. Rejected if a task with the same name already exists "
+        "in the destination. Closed tasks can be moved. Bookmarks move with "
+        "the task unless the destination already holds a bookmark from the "
+        "same machine. The change is pushed to the user's repository at once."
+    ),
+    "namu_upload_file": (
+        "Save one plain-text file to attach_file/<name> in this user's "
+        "GitHub repository and log it in the attachments bowl. `content_text` "
+        "is the file content as text (up to 100KB). `summary` and `reason` "
+        "are required; `body`, `project`, `topic` and `tags` are optional. "
+        "The file is written to GitHub directly and is not kept on this "
+        "server. Uploading an existing name replaces that file and is logged "
+        "as a new revision."
+    ),
+    "namu_list_files": (
+        "List the files under attach_file/ in this user's repository with "
+        "their size and the note recorded at upload. `include_removed=true` "
+        "also lists deleted files with the reason they were removed."
+    ),
+    "namu_download_file": (
+        "Return one uploaded file by `name`. Text files up to 100KB come back "
+        "as `content_text`. Other files come back without content unless "
+        "`force_base64=true`, which returns the bytes as base64. Downloads "
+        "are not logged."
+    ),
+    "namu_delete_file": (
+        "Remove one uploaded file from attach_file/ in this user's repository "
+        "and log the required `reason` in the attachments bowl. Earlier "
+        "versions remain in the repository's git history."
+    ),
+    "namu_create_upload_ticket": (
+        "Create a one-time upload link for one file, to be stored as "
+        "attach_file/<name> (up to 20MB, any file type). `summary` and "
+        "`reason` are required and are logged when the file arrives. The "
+        "link accepts one multipart POST with the field `file`, works once "
+        "and expires after 2 hours. Nothing is written until a file arrives. "
+        "Returns `upload_url` and `ticket_id`."
+    ),
+    "namu_create_download_ticket": (
+        "Create a download link for one uploaded file by `name`. The link "
+        "serves the file from the user's repository, can be opened more than "
+        "once and expires after 1 hour. Returns `download_url` and "
+        "`ticket_id`."
+    ),
+    "namu_check_ticket": (
+        "Return the status of an upload or download link by `ticket_id`: "
+        "완료 (done), 대기중 (waiting), 만료됨 (expired) or 없음 (not found). "
+        "Download links stay 대기중 because downloads are not tracked."
+    ),
+}
+
+
+def _annotations(title: str, *, read_only: bool, destructive: bool = False,
+                 idempotent: bool = False) -> ToolAnnotations:
+    # 바깥 웹을 돌아다니는 도구는 없다 — 닿는 곳은 이 회원의 저장소뿐이다.
+    return ToolAnnotations(
+        title=title,
+        read_only_hint=read_only,
+        destructive_hint=None if read_only else destructive,
+        idempotent_hint=idempotent,
+        open_world_hint=False,
+    )
+
+
+_TOOL_ANNOTATIONS = {
+    "namu_recall": _annotations("Load memory overview", read_only=True, idempotent=True),
+    "namu_search": _annotations("Search memory", read_only=True, idempotent=True),
+    "namu_record": _annotations("Save a memory entry", read_only=False),
+    "namu_task_move": _annotations("Move a task to another project", read_only=False),
+    # 같은 이름이면 GitHub의 파일을 덮어쓴다.
+    "namu_upload_file": _annotations("Upload a text file", read_only=False, destructive=True),
+    "namu_list_files": _annotations("List uploaded files", read_only=True, idempotent=True),
+    "namu_download_file": _annotations("Read an uploaded file", read_only=True, idempotent=True),
+    "namu_delete_file": _annotations("Delete an uploaded file", read_only=False, destructive=True),
+    "namu_create_upload_ticket": _annotations("Create an upload link", read_only=False),
+    # 링크만 만들고 회원의 저장소는 바꾸지 않는다.
+    "namu_create_download_ticket": _annotations("Create a download link", read_only=True),
+    "namu_check_ticket": _annotations("Check an upload or download link", read_only=True, idempotent=True),
+}
 
 
 def tool(*d_args, **d_kwargs):
@@ -128,6 +281,11 @@ def tool(*d_args, **d_kwargs):
     """
 
     def decorator(fn):
+        # 설명문과 읽기·쓰기 표시는 아래 표(`_TOOL_DESCRIPTIONS`·`_TOOL_ANNOTATIONS`)
+        # 한 자리에서 온다 — 도구마다 흩어 두면 한 곳만 고쳐진다.
+        d_kwargs.setdefault("description", _TOOL_DESCRIPTIONS.get(fn.__name__))
+        d_kwargs.setdefault("annotations", _TOOL_ANNOTATIONS.get(fn.__name__))
+
         @wraps(fn)
         def guarded(*args, **kwargs):
             try:
@@ -1171,24 +1329,8 @@ _TASKS_PROJECT_REQUIRED = (
     "the 'tasks' bowl requires an explicit 'project' here (no cwd on the web)."
 )
 
-# 도구 설명문은 손으로 쓰지 않고 코어의 표(config.FIELDS)에서 만든 것을 그대로
-# 붙인다(namu-65의 규칙 — 설명문을 두 곳에 적으면 갈라지고, 갈라진 설명을 읽은 AI가
-# 잘못된 그릇에 담는 것이 그 작업의 발단이었다). 클라우드에만 해당하는 사실(라우팅
-# 키·프로젝트 명시·반환 모양)만 앞뒤에 덧붙인다.
-_RECORD_TOOL_DESCRIPTION = (
-    record_input.tool_description()
-    + "\n\n"
-    "── 이 클라우드 주소에서만 다른 점 ──\n"
-    "- 기록은 요청 URL의 `?user=<키>`가 가리키는 **회원님 전용 저장소**에 남는다.\n"
-    "- 작업일지(tasks) 그릇은 `project`(프로젝트 이름)를 반드시 함께 줘야 한다 — "
-    "이 주소에는 '지금 이 폴더'라는 것이 없다.\n"
-    "- 반환은 보통 새 기록의 id(문자열) 하나이고, 작업일지는 실제로 적힌 줄이다. "
-    "알릴 것이 있을 때만 {\"id\": …, \"notices\": [...], \"warning\": …} 형태의 "
-    "dict가 되므로, `isinstance(result, dict)`로 두 모양을 가른다."
-)
 
-
-@tool(description=_RECORD_TOOL_DESCRIPTION)
+@tool()
 def namu_record(
     # ── 새 이름 (namu-65 3층 스키마) — 개인용 mcp_server.namu_record와 같은 순서
     bowl: str | None = None,
@@ -1356,39 +1498,9 @@ def namu_record(
 #   ③ 쓰기 전 최신화·쓰기 뒤 push는 이 파일의 다른 쓰기 도구와 같은 배선
 #      (`_sync_or_reject`/`_push_and_collect_warning`)을 그대로 쓴다.
 # ---------------------------------------------------------------------------
-_TASK_MOVE_DESCRIPTION = (
-    "Move a task's whole folder (task.md + log.md) from one room to another, "
-    "inside this member's own storage only (multi-tenant mirror of the "
-    "personal tool of the same name — the actual move/permission logic lives "
-    "in vendor/namu-agent's `task_move` module, not in this server).\n"
-    "- `to` must already be one of THIS MEMBER's own rooms. An unknown or "
-    "missing name never creates one — the error message IS the numbered room "
-    "list to show the member, and that list only ever contains their own "
-    "rooms (another member's room names never appear in it, and can never be "
-    "a destination, even if you already know the exact name).\n"
-    "- `project` (the source room) is required — there is no 'current "
-    "folder' on the web, same rule as recording to the tasks bowl.\n"
-    "- Bookmarks (`.pin.<machine>`) travel with the task to the new room, "
-    "unless the destination room already has that machine's bookmark on "
-    "something else — then only the source bookmark is dropped (never "
-    "silently overwriting what another machine already pinned there).\n"
-    "- Closed tasks ([완료]/[중단]) can be moved too — tidying up finished "
-    "work into the right room is a common, legitimate reason to move.\n"
-    "- If a task with the same name already exists in the destination room, "
-    "this is rejected and nothing moves (log.md is append-only; merging two "
-    "of them would make it impossible to tell which lines came from where).\n"
-    "- ⚠ Do not call this twice at once on the same task (e.g. from two open "
-    "sessions). log.md is designed for union-merge across machines/sessions "
-    "— each caller only ever appends its own lines. If one call is mid-move "
-    "while another appends to the same task's log.md in the old room, that "
-    "line either never reaches the new location or collides at the next "
-    "sync. There is no cross-call lock; this tool pushes to the member's "
-    "repo immediately after moving, to keep the danger window as short as "
-    "possible."
-)
 
 
-@tool(description=_TASK_MOVE_DESCRIPTION)
+@tool()
 def namu_task_move(
     task: str,
     to: str,
@@ -1445,105 +1557,6 @@ def namu_task_move(
     if warning:
         return {"summary": summary, "warning": warning}
     return summary
-
-
-# ---------------------------------------------------------------------------
-# 세션 측정 한 도구 (namu-self-improvement-loop — 웹 몫)
-#
-# CLI에는 세션 종료 훅이 있어 대화가 끝나면 기계가 알아서 잰다. 웹 대화창에는 훅이
-# 없고(2026-09-12 공식 문서 확인 — 훅은 클로드 코드에서만 돈다), 앤트로픽 서버에
-# 있는 대화를 이 서버가 가져올 길도 없다(같은 날 공식 지원 문서 확인 — 사람이
-# 설정에서 요청해 이메일로 받는 길뿐이고 프로그램용 창구가 없다). 이 서버에
-# 도착하는 것은 도구를 부를 때 실어 준 값과 주소의 출처 표시뿐이다.
-#
-# 그래서 웹에서는 **대화 안에 있는 AI가** 이 도구를 부르며 대화를 넘긴다. 넘어온
-# 뒤의 일은 훅과 완전히 같다 — 같은 나이테로 재고 같은 그릇에 같은 모양으로
-# 남긴다. 그래야 주간 점검이 두 곳에서 온 값을 고치는 곳 없이 합산한다.
-#
-# 훅과 다른 점은 값의 정확도뿐이다. AI가 옮겨 적으므로 빠질 수 있고, "요청 중단"
-# 표지는 웹에 아예 없다. 그래도 판정은 여전히 기계가 하므로, 이 그릇이 지키려던
-# 것(사람이 판단해 적은 숫자를 섞지 않는다)은 그대로 지켜진다.
-# ---------------------------------------------------------------------------
-@tool()
-def namu_record_session(
-    session_id: str,
-    utterances: list,
-    project: str | None = None,
-    title: str | None = None,
-    interrupts: list | None = None,
-    denials: list | None = None,
-    end_reason: str | None = None,
-    ctx: Context | None = None,
-):
-    """Measure THIS conversation for misalignments and store the result.
-
-    CALL THIS ONCE when the conversation is wrapping up — the user says goodbye,
-    thanks you, says the work is done, or asks you to save/finish. On Claude Code
-    a hook does this automatically at session end; in a web chat there is no hook,
-    so you must call it yourself. If you never call it, this conversation is
-    invisible to the user's weekly self-improvement review.
-
-    You do NOT judge anything. Hand over what the user actually said, verbatim,
-    and the server runs the measurement. Never summarize, paraphrase, translate,
-    or leave out a message — a shortened transcript produces a wrong count.
-
-    Args:
-      session_id: A stable id for this conversation. Reuse the SAME value if you
-        call this twice in one conversation (only the last call is counted).
-      utterances: Every user message, oldest first, as
-        [{"at": "<timestamp>", "text": "<verbatim message>"}, ...].
-        Include ALL of them, including short ones like "ok" or "no".
-        `at` should be the time that message was sent; pass "" if unknown.
-      project: Which project/room this conversation belongs to, if known.
-      title: A short title for this conversation.
-      interrupts: Timestamps where the user cut you off mid-response, if known.
-      denials: Timestamps where the user rejected a tool call, if known.
-      end_reason: Why the conversation ended (e.g. "user said goodbye").
-
-    Returns: dict with the stored id and the counts, or `skipped` explaining why
-      nothing was stored (no user messages, or this conversation was already
-      recorded with the same number of messages).
-    """
-    key = _resolve_user(ctx)
-    _resolve_via(ctx)  # ?client= 출처 태그 검증
-
-    session_id = (session_id or "").strip()
-    if not session_id:
-        raise ValueError("session_id는 필수입니다 / session_id is required")
-
-    잰값 = sessions.measure(
-        session_id=session_id,
-        utterances=utterances,
-        interrupts=interrupts,
-        denials=denials,
-        project=project,
-        title=title,
-        end_reason=end_reason,
-    )
-    if 잰값 is None:
-        return {"skipped": "사람이 한 마디도 없어 남기지 않았습니다 / no user messages"}
-
-    with closing(identity.connect()) as conn:
-        _sync_or_reject(conn, key)  # TTL 기반 최신화 + 미연결 사용자 거부
-    paths = _paths_for_user(key)
-
-    if sessions.already_recorded(session_id, len(잰값["utterances"]), paths):
-        return {"skipped": "이미 같은 값이 남아 있습니다 / already recorded"}
-
-    new_id = sessions.record_session(**잰값, paths=paths)
-
-    with closing(identity.connect()) as conn:
-        warning = _push_and_collect_warning(conn, key)
-
-    결과 = {
-        "id": new_id,
-        "misalignments": 잰값["misalignments"],
-        "structural_marks": 잰값["structural_marks"],
-        "utterance_count": len(잰값["utterances"]),
-    }
-    if warning:
-        결과["warning"] = warning
-    return 결과
 
 
 # ---------------------------------------------------------------------------
@@ -1724,27 +1737,6 @@ def store_file(
 # 바이너리를 AI가 직접 밀어 넣던 길이 사라지지만, 그 길은 애초에 쓸 수 없었다 —
 # 50KB짜리도 base64로는 6만 8천 자라 몇 분이 걸린다.
 # ---------------------------------------------------------------------------
-_UPLOAD_DESCRIPTION = (
-    "Upload one **text** file to this user's own GitHub repository (under "
-    "attach_file/) and log it in the attachments bowl. The file goes straight "
-    "to GitHub — it is never kept on this server.\n"
-    "Put the text itself in `content_text`, exactly as it is. There is no "
-    "base64 field on this tool and you must not create one: encoding a file "
-    "into text is what used to make this take minutes.\n"
-    "**Anything that is not plain text — PPT/PDF/images/video/zip — and any "
-    "text over 100KB goes through `namu_create_upload_ticket` instead.** That "
-    "gives a link the file is sent to directly, so its contents never pass "
-    "through your output and size stops mattering.\n"
-    "- `name`: the file name, e.g. '2026-3분기-보고서.md'. Sub-folders are not "
-    "used; the file always lands at attach_file/<name>.\n"
-    "- Uploading the same name again replaces the file on GitHub and is logged "
-    "as a new revision ('새 판'); the earlier log entry stays.\n"
-    "- `summary` (what this file is) and `reason` (why it was kept) are "
-    "required: the file body is not synced to the user's PCs, so these two "
-    "lines are what makes the file findable later.\n"
-    "- `body` is optional here — for an attachment the file itself IS the full "
-    "story. Add it only when there is context the file does not carry."
-)
 
 
 def _text_to_bytes(content_text: str) -> bytes:
@@ -1766,7 +1758,7 @@ def _text_to_bytes(content_text: str) -> bytes:
     return content
 
 
-@tool(description=_UPLOAD_DESCRIPTION)
+@tool()
 def namu_upload_file(
     name: str,
     content_text: str,
@@ -1797,19 +1789,7 @@ def namu_upload_file(
     return out
 
 
-_LIST_DESCRIPTION = (
-    "List the files this user has uploaded (attach_file/ in their own GitHub "
-    "repository), each with its size and the note recorded when it was "
-    "uploaded.\n"
-    "- Names and sizes come from GitHub; why/when/which-task come from the "
-    "attachments bowl.\n"
-    "- `include_removed=True` also lists files that were deleted, so you can "
-    "answer 'where did that file go' — a deleted file keeps its log entry with "
-    "the reason it was removed."
-)
-
-
-@tool(description=_LIST_DESCRIPTION)
+@tool()
 def namu_list_files(
     include_removed: bool = False,
     ctx: Context | None = None,
@@ -1863,25 +1843,6 @@ def namu_list_files(
     return {"files": rows, "count": len(rows)}
 
 
-_DOWNLOAD_DESCRIPTION = (
-    "Read one uploaded file back **so that you (the model) can look at its "
-    "contents**. It comes straight from the user's GitHub repository, not from "
-    "this server.\n"
-    "**If the point is to hand the file to the user, use "
-    "`namu_create_download_ticket` instead** — that gives a link the user "
-    "clicks, and nothing has to pass through your output.\n"
-    "- Text files up to 100KB come back as plain text in `content_text`.\n"
-    "- Anything else comes back with no content at all, just a `hint` telling "
-    "you to use the download ticket. Binary files are not sent through this "
-    "tool by default.\n"
-    "- `force_base64=True` brings a binary back as base64 anyway. Only do this "
-    "when you genuinely must process the bytes yourself; it is slow.\n"
-    "- `name`: the file name as shown by namu_list_files.\n"
-    "- Downloads are deliberately NOT logged (the file does not change, and on "
-    "the web this server cannot tell whether the user actually saved it)."
-)
-
-
 def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:
     """파일 한 개를 회원 저장소에서 받아 온다 — 받기 도구와 받기 티켓의 공통 자리.
 
@@ -1892,7 +1853,7 @@ def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:
     return attach_files.download(conn, user_key, name)
 
 
-@tool(description=_DOWNLOAD_DESCRIPTION)
+@tool()
 def namu_download_file(
     name: str,
     force_base64: bool = False,
@@ -1946,26 +1907,7 @@ def _origin_for(ctx: "Context | None") -> str:
     return web_auth._public_origin(req)
 
 
-_CREATE_UPLOAD_TICKET_DESCRIPTION = (
-    "Create a one-time upload link for one file, for anything you should NOT "
-    "push through `namu_upload_file`: binaries (PPT/PDF/images/video/zip) and "
-    "anything over 100KB. Nothing is written to GitHub until a file actually "
-    "arrives, so an unused link leaves no trace anywhere.\n"
-    "You get back `upload_url`. Then do ONE of these:\n"
-    "1. If the file is in your own workspace, POST it yourself:\n"
-    "   `curl -sS -X POST -F \"file=@/path/to/file\" <upload_url>`\n"
-    "   If that fails with host_not_allowed (403), the link is still alive — "
-    "just hand it to the user as in step 2. Do not create another ticket.\n"
-    "2. If the file is on the user's own machine, give them the `upload_url` "
-    "and ask them to open it and drop the file in.\n"
-    "- `name`, `summary` and `reason` mean exactly what they mean in "
-    "`namu_upload_file`; they are stored with the link and written to the "
-    "attachments log when the file lands.\n"
-    "- The link expires in 2 hours and works once."
-)
-
-
-@tool(description=_CREATE_UPLOAD_TICKET_DESCRIPTION)
+@tool()
 def namu_create_upload_ticket(
     name: str,
     summary: str,
@@ -2014,20 +1956,7 @@ def namu_create_upload_ticket(
     }
 
 
-_CREATE_DOWNLOAD_TICKET_DESCRIPTION = (
-    "Create a download link for one uploaded file. **This is how you hand a "
-    "file to the user** — they click the link and the file downloads straight "
-    "from their GitHub repository. Nothing passes through your output.\n"
-    "- Use this instead of `namu_download_file` whenever the user wants the "
-    "file itself rather than you reading its contents.\n"
-    "- You can also fetch it yourself with `curl -sS -o <path> <download_url>` "
-    "if you need the bytes in your workspace.\n"
-    "- `name`: the file name as shown by namu_list_files.\n"
-    "- The link expires in 1 hour and can be opened more than once until then."
-)
-
-
-@tool(description=_CREATE_DOWNLOAD_TICKET_DESCRIPTION)
+@tool()
 def namu_create_download_ticket(name: str, ctx: Context | None = None) -> dict:
     key = _resolve_user(ctx)
     via = _resolve_via(ctx)
@@ -2062,17 +1991,7 @@ def namu_create_download_ticket(name: str, ctx: Context | None = None) -> dict:
     }
 
 
-_CHECK_TICKET_DESCRIPTION = (
-    "Check whether a file has arrived through an upload link yet. Use this when "
-    "the user says 'I uploaded it'.\n"
-    "- `status` is one of 완료 (done), 대기중 (waiting), 만료됨 (expired), 없음 "
-    "(no such link).\n"
-    "- A download link stays 대기중 even after the user downloads: this server "
-    "cannot tell whether they actually saved the file, and does not log it."
-)
-
-
-@tool(description=_CHECK_TICKET_DESCRIPTION)
+@tool()
 def namu_check_ticket(ticket_id: str, ctx: Context | None = None) -> dict:
     key = _resolve_user(ctx)
     _resolve_via(ctx)
@@ -2096,18 +2015,7 @@ def namu_check_ticket(ticket_id: str, ctx: Context | None = None) -> dict:
     return out
 
 
-_DELETE_DESCRIPTION = (
-    "Remove one uploaded file from the user's GitHub repository and log why.\n"
-    "- `reason` is required: the log keeps the entry after the file is gone, so "
-    "'where did that file go' can be answered with when and why.\n"
-    "- ⚠ This is not an erase. Git keeps history, so anyone who walks back to a "
-    "commit before the deletion still finds the file. Say so plainly if the "
-    "user asks for the file to be wiped — truly erasing it means rewriting the "
-    "repository history, which this tool does not do."
-)
-
-
-@tool(description=_DELETE_DESCRIPTION)
+@tool()
 def namu_delete_file(
     name: str,
     reason: str,
