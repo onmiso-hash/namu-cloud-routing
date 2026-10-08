@@ -920,6 +920,13 @@ def _html_me_connected(
         '<a class="btn btn-primary" href="/auth/memory">기억 열람·검색</a>'
         '<a class="btn" href="/auth/memory?bowl=tasks">열린 작업 보기</a>'
         "</div></div>",
+        '<div class="card">'
+        '<h2 style="margin-top:0">내 캐릭터</h2>'
+        "<p>만든 캐릭터를 모아 보고, 고치거나 지울 수 있습니다.</p>"
+        '<div class="btn-row" style="margin-bottom:0">'
+        '<a class="btn btn-primary" href="/auth/character">내 캐릭터 보기</a>'
+        '<a class="btn" href="/character">+ 새 캐릭터 만들기</a>'
+        "</div></div>",
     ]
     if mcp_url:
         body.append(_html_onboarding_section(mcp_url))
@@ -2693,6 +2700,241 @@ async def character_save(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# 내 캐릭터(namu-character-web 4단계) — 목록 / 고치기 / 지우기.
+#
+# 목록·고치기는 GET(읽기만 한다). 지우기는 POST 전용이고, 폐기·재발급과 같은
+# 결로 확인 화면을 한 번 거친다 — 다만 확인표는 고정 문자열("yes")이 아니라
+# `character.forget()`이 매번 새로 만드는 토큰이다: 미리 보기 뒤에 다른 곳에서
+# 카드가 바뀌면 토큰이 달라져 거절되므로, 그 사이 벌어진 변경을 못 보고
+# 지우는 사고를 막는다.
+# ---------------------------------------------------------------------------
+def _html_character_list(rows: list, notice_html: str = "") -> str:
+    character = _core_character()
+    if rows:
+        items = []
+        for r in rows:
+            name = html.escape(r["name"])
+            char_id = html.escape(r["id"])
+            aliases = ", ".join(html.escape(a) for a in r.get("aliases") or [])
+            stage = html.escape(character.stage_desc(r["stage"]))
+            when = html.escape(r.get("last_talk_when") or "아직 대화한 적 없음")
+            items.append(
+                '<div class="card" style="margin-bottom:12px">'
+                f'<h3 style="margin:0 0 4px">{name}'
+                + (f" <small>({aliases})</small>" if aliases else "")
+                + "</h3>"
+                f'<p style="margin:0 0 10px"><small>{stage} · 호감도 {r["affection"]} · '
+                f"마지막 대화 {when}</small></p>"
+                '<div class="btn-row" style="margin-bottom:0">'
+                f'<a class="btn" href="/auth/character/edit/{char_id}">고치기</a>'
+                '<form method="post" action="/auth/character/delete" '
+                'style="display:inline">'
+                f'<input type="hidden" name="char_id" value="{char_id}">'
+                '<button type="submit" class="btn btn-danger">지우기</button>'
+                "</form>"
+                "</div></div>"
+            )
+        listing = "".join(items)
+    else:
+        listing = "<p>아직 만든 캐릭터가 없습니다.</p>"
+
+    body = (
+        '<span class="eyebrow">내 페이지</span>'
+        "<h1>내 캐릭터</h1>"
+        + notice_html
+        + '<p class="lead">저장한 캐릭터를 고치거나 지울 수 있습니다.</p>'
+        + listing
+        + '<p><a href="/character">+ 새 캐릭터 만들기</a> · '
+        '<a href="/auth/me">← 내 페이지로</a></p>'
+    )
+    return _html_page("NAMU 내 캐릭터", body)
+
+
+def _character_list_sync(user_key: str, notice_html: str = "") -> Response:
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+        if not row.get("installation_id") or not row.get("repo_full_name"):
+            return HTMLResponse(_html_me_not_connected(user_key))
+        try:
+            user_repo.ensure_ready(conn, user_key)
+        except user_repo.UserRepoError as exc:
+            logger.warning("캐릭터 목록: 저장소 준비 실패 (user_key=%s): %s", user_key, exc)
+            notice_html += _html_notice(
+                "저장소를 최신으로 맞추지 못해 <b>마지막으로 받아 둔 내용</b>을 "
+                "보여드립니다.",
+                tone="warn",
+            )
+
+    character = _core_character()
+    paths = _memory_paths(user_key)
+    try:
+        rows = character.list_all(paths=paths)
+    except (OSError, ValueError) as exc:
+        logger.warning("캐릭터 목록 읽기 실패 (user_key=%s): %s", user_key, exc)
+        rows = []
+        notice_html += _html_notice(
+            "캐릭터 목록을 읽지 못했습니다 — 잠시 후 새로고침해 보세요.", tone="warn"
+        )
+
+    return HTMLResponse(_html_character_list(rows, notice_html=notice_html))
+
+
+async def character_list(request: Request) -> Response:
+    """내 캐릭터 목록 화면(namu-character-web 4단계)."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+    return await run_in_threadpool(_character_list_sync, user_key)
+
+
+def _character_edit_sync(user_key: str, char_id: str) -> Response:
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
+            return HTMLResponse(_html_me_login_required(), status_code=401)
+        if not row.get("installation_id") or not row.get("repo_full_name"):
+            return HTMLResponse(_html_me_not_connected(user_key))
+        try:
+            user_repo.ensure_ready(conn, user_key)
+        except user_repo.UserRepoError as exc:
+            logger.warning("캐릭터 고치기: 저장소 준비 실패 (user_key=%s): %s", user_key, exc)
+            return HTMLResponse(
+                _html_character_list(
+                    [],
+                    notice_html=_html_notice(
+                        "저장소를 최신으로 맞추지 못했습니다 — 잠시 후 다시 시도해 "
+                        "주세요.",
+                        tone="warn",
+                    ),
+                ),
+                status_code=503,
+            )
+
+    character = _core_character()
+    paths = _memory_paths(user_key)
+    rec = character.find(char_id, paths=paths)
+    if rec is None:
+        return HTMLResponse(
+            _character_list_sync(user_key, notice_html=_html_notice(
+                "그 캐릭터를 찾지 못했습니다 — 이미 지워졌을 수 있습니다.", tone="warn"
+            )).body.decode("utf-8"),
+            status_code=404,
+        )
+
+    return HTMLResponse(
+        character_page.character_page(
+            logged_in=True,
+            edit={
+                "id": rec["character_id"],
+                "version": rec["version"],
+                "card": rec["card"],
+            },
+        )
+    )
+
+
+async def character_edit(request: Request) -> Response:
+    """캐릭터 고치기 화면 — 기존 카드를 만들기 화면에 미리 채워 다시 보여준다."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+    char_id = request.path_params.get("char_id", "")
+    return await run_in_threadpool(_character_edit_sync, user_key, char_id)
+
+
+def _html_character_delete_confirm(name: str, will_delete: dict, token: str, char_id: str) -> str:
+    """지우기 확인 화면 — 재발급/폐기와 같은 문턱. 토큰은 `character.forget()`이
+    매긴 확인표이므로, 이 화면이 떠 있는 동안 다른 곳에서 카드가 바뀌면 다시
+    눌러도 거절된다(그 사이 벌어진 변경을 못 보고 지우는 사고를 막는다)."""
+    diary = will_delete.get("diary", 0)
+    core = will_delete.get("core", 0)
+    archive = will_delete.get("archive", 0)
+    versions = will_delete.get("card_versions", 0)
+    body = (
+        f"<h1>'{html.escape(name)}'을 정말 지울까요?</h1>"
+        '<div class="card">'
+        f"<p>지우면 일기 {diary}편, 핵심 기억 {core}개, 대화 원문 {archive}건, "
+        f"카드 판 {versions}개가 모두 함께 지워지고 <b>되돌릴 수 없습니다.</b></p>"
+        "</div>"
+        + '<div class="btn-row">'
+        '<form method="post" action="/auth/character/delete">'
+        f'<input type="hidden" name="char_id" value="{html.escape(char_id)}">'
+        f'<input type="hidden" name="confirm" value="{html.escape(token)}">'
+        '<button type="submit" class="btn btn-danger">네, 지웁니다</button>'
+        "</form>"
+        '<a class="btn" href="/auth/character">아니요, 돌아가기</a>'
+        "</div>"
+    )
+    return _html_page("NAMU 캐릭터 지우기 확인", body)
+
+
+def _character_delete_sync(user_key: str, char_id: str, confirm: str) -> Response:
+    if not char_id:
+        return HTMLResponse(
+            _character_list_sync(
+                user_key,
+                notice_html=_html_notice("지울 캐릭터를 고르지 않으셨습니다.", tone="info"),
+            ).body.decode("utf-8")
+        )
+
+    character = _core_character()
+    paths = _memory_paths(user_key)
+    try:
+        result = character.forget(
+            char_id, target="character", confirm=confirm or None, paths=paths
+        )
+    except ValueError as exc:
+        logger.info("캐릭터 지우기 거절 (user_key=%s, char_id=%s): %s", user_key, char_id, exc)
+        return HTMLResponse(
+            _character_list_sync(
+                user_key,
+                notice_html=_html_notice(
+                    "지우지 못했습니다 — 이미 지워졌거나 그 사이 바뀌었을 수 있습니다. "
+                    "다시 시도해 주세요.",
+                    tone="warn",
+                ),
+            ).body.decode("utf-8")
+        )
+
+    if result["step"] == "preview":
+        return HTMLResponse(
+            _html_character_delete_confirm(
+                result["character"], result["will_delete"], result["confirm"], char_id
+            )
+        )
+
+    # step == "done" — 실제로 지웠다. 회원 저장소에 반영한다.
+    try:
+        with closing(identity.connect()) as conn:
+            user_repo.push(conn, user_key, "캐릭터 지우기(웹)")
+        notice = _html_notice(f"'{html.escape(result['character'])}'을 지웠습니다.", tone="good")
+    except user_repo.UserRepoError as exc:
+        logger.warning("캐릭터 지우기 후 push 실패 (user_key=%s): %s", user_key, exc)
+        notice = _html_notice(
+            f"'{html.escape(result['character'])}'을 이 서버에서는 지웠지만 "
+            "<b>회원님 저장소에 반영하지 못했습니다.</b> 잠시 후 다시 시도해 주세요 "
+            "— 그때까지는 다른 기기에서 다시 나타날 수 있습니다.",
+            tone="warn",
+        )
+
+    return HTMLResponse(_character_list_sync(user_key, notice_html=notice).body.decode("utf-8"))
+
+
+async def character_delete(request: Request) -> Response:
+    """캐릭터 지우기(POST 전용) — 확인표 없이 부르면 미리 보기만, 확인표를 더해
+    다시 부르면 그때 지운다(재발급·폐기와 같은 2단계 구조)."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return HTMLResponse(_html_me_login_required(), status_code=401)
+    form = await request.form()
+    char_id = str(form.get("char_id") or "").strip()
+    confirm = str(form.get("confirm") or "").strip()
+    return await run_in_threadpool(_character_delete_sync, user_key, char_id, confirm)
+
+
+# ---------------------------------------------------------------------------
 # 주소 관리(namu-60) — 연결 시험 / 재발급 / 폐기. 셋 다 **POST 전용**이다.
 #
 # GET으로 두면 링크 프리페치나 채팅 미리보기 크롤러가 눌러 버릴 수 있고,
@@ -3166,6 +3408,12 @@ def build_auth_app() -> Starlette:
             Route("/auth/memo/remove", memo_remove, methods=["POST"]),
             # 캐릭터 저장(namu-character-web 2단계) — 서버에 쓰는 동작이라 POST 전용.
             Route("/auth/character/save", character_save, methods=["POST"]),
+            # 내 캐릭터 목록·고치기·지우기(namu-character-web 4단계). 목록·고치기는
+            # 읽기만 해서 GET, 지우기는 파괴적 동작이라 POST 전용(위 주소 관리와 같은
+            # 이유).
+            Route("/auth/character", character_list, methods=["GET"]),
+            Route("/auth/character/edit/{char_id}", character_edit, methods=["GET"]),
+            Route("/auth/character/delete", character_delete, methods=["POST"]),
             # 주소 관리 3종은 POST만 받는다 — GET(링크·프리페치)으로는 절대
             # 실행되지 않아야 한다(파괴적 동작).
             Route("/auth/mcp/test", mcp_test, methods=["POST"]),

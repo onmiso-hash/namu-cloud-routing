@@ -2734,3 +2734,135 @@ def test_character_save_reports_push_failed_but_keeps_server_copy(client, monkey
     body = r.json()
     assert body["error"] == "push_failed"
     assert body["id"] and body["version"]
+
+
+# ---------------------------------------------------------------------------
+# 내 캐릭터 목록·고치기·지우기 (namu-character-web 4단계)
+#
+# 저장소 왕복은 `_memory_env`로 걷어낸다 — 여기서 볼 것은 "무엇을 보여주고
+# 무엇을 지우는가"다. 캐릭터는 `character.save`를 직접 불러 만든다(저장
+# 엔드포인트는 위에서 이미 따로 시험했다).
+# ---------------------------------------------------------------------------
+def _saved_character(paths, **overrides) -> dict:
+    return wa._core_character().save(_valid_card(**overrides), via="test", paths=paths)
+
+
+def test_character_list_requires_login():
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = c.get("/auth/character")
+    assert r.status_code == 401
+    assert "로그인" in r.text
+
+
+def test_character_list_shows_empty_state(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52001, repo="ann/char1")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/character")
+
+    assert r.status_code == 200
+    assert "아직 만든 캐릭터가 없습니다" in r.text
+
+
+def test_character_list_shows_saved_character(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52002, repo="ann/char2")
+    paths, _pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _saved_character(paths, name="목록이")
+
+    r = client.get("/auth/character")
+
+    assert r.status_code == 200
+    assert "목록이" in r.text
+    assert "고치기" in r.text
+    assert "지우기" in r.text
+
+
+def test_character_edit_requires_login():
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = c.get("/auth/character/edit/01ABC")
+    assert r.status_code == 401
+    assert "로그인" in r.text
+
+
+def test_character_edit_404s_for_missing_character(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52003, repo="ann/char3")
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.get("/auth/character/edit/없는캐릭터")
+
+    assert r.status_code == 404
+
+
+def test_character_edit_preloads_existing_card(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52004, repo="ann/char4")
+    paths, _pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    result = _saved_character(paths, name="고칠이")
+
+    r = client.get(f"/auth/character/edit/{result['id']}")
+
+    assert r.status_code == 200
+    assert "cm-edit-data" in r.text
+    assert "고칠이" in r.text
+    assert result["version"] in r.text
+
+
+def test_character_delete_requires_login():
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = c.post("/auth/character/delete", data={"char_id": "01ABC"})
+    assert r.status_code == 401
+    assert "로그인" in r.text
+
+
+def test_character_delete_first_post_shows_preview_without_deleting(
+    client, monkeypatch, tmp_path
+):
+    row = _connect_via_login(client, monkeypatch, github_id=52005, repo="ann/char5")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    result = _saved_character(paths, name="지울이")
+
+    r = client.post("/auth/character/delete", data={"char_id": result["id"]})
+
+    assert r.status_code == 200
+    assert "정말" in r.text
+    assert "지울이" in r.text
+    assert not pushes, "미리 보기만으로는 저장소에 아무것도 반영하지 않아야 한다"
+    assert wa._core_character().find(result["id"], paths=paths) is not None, (
+        "미리 보기 단계에서 실제로 지워지면 안 된다"
+    )
+
+
+def test_character_delete_with_confirm_token_deletes_and_pushes(
+    client, monkeypatch, tmp_path
+):
+    row = _connect_via_login(client, monkeypatch, github_id=52006, repo="ann/char6")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    result = _saved_character(paths, name="지울이2")
+
+    preview = client.post("/auth/character/delete", data={"char_id": result["id"]})
+    token = re.search(r'name="confirm" value="([^"]+)"', preview.text).group(1)
+
+    r = client.post(
+        "/auth/character/delete",
+        data={"char_id": result["id"], "confirm": token},
+    )
+
+    assert r.status_code == 200
+    assert "지웠습니다" in r.text
+    assert len(pushes) == 1
+    assert wa._core_character().find(result["id"], paths=paths) is None
+
+
+def test_character_delete_rejects_stale_confirm_token(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52007, repo="ann/char7")
+    paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    result = _saved_character(paths, name="지울이3")
+
+    r = client.post(
+        "/auth/character/delete",
+        data={"char_id": result["id"], "confirm": "틀린확인표"},
+    )
+
+    assert r.status_code == 200
+    assert "지우지 못했습니다" in r.text
+    assert not pushes
+    assert wa._core_character().find(result["id"], paths=paths) is not None

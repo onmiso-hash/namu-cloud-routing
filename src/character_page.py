@@ -36,10 +36,19 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 않는다. 공개 저장소로는 서버가 저장을 거절한다(기존 설계 원칙 — 캐릭터
 일기는 비공개 저장소에만 쓴다).
 
+## 고치기 — 같은 화면을 다른 입구로 연다
+
+`/auth/character`(내 캐릭터 목록)의 "고치기"는 새 화면을 만들지 않고 이
+화면에 기존 카드를 미리 채워 연다(`web_auth.character_edit`). `edit` 인자로
+`{id, version, card}`를 받으면 `#cm-edit-data`에 JSON으로 실어 보내고,
+자바스크립트가 그것을 초안으로 덮어쓴 뒤 처음 질문부터 다시 보여준다 — 질문
+목록·검사 규칙이 만들기와 똑같으므로 틀을 두 벌 두지 않는다. 저장 단추는
+그대로 `/auth/character/save`를 부르지만, 미리 채운 `version`이 함께 실려
+있어 새 캐릭터가 아니라 그 캐릭터의 다음 판으로 저장된다.
+
 ## 이번에 하지 않는 것(설계서 0장의 다음 단계)
 
-위쪽 메뉴의 "캐릭터", 영어판 `/en/character`, 로그인 뒤 내 캐릭터를 목록으로
-보여주는 `/auth/character`.
+위쪽 메뉴의 "캐릭터", 영어판 `/en/character`.
 """
 import html
 import json
@@ -232,6 +241,18 @@ function clean(raw){
 let state = {};
 try { state = clean(JSON.parse(localStorage.getItem(KEY) || 'null')); } catch(e) { state = {}; }
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e) {} };
+
+/* 고치기 화면(`/auth/character/edit/...`)으로 들어왔으면 서버가 미리 채워 준
+   카드로 초안을 덮어쓴다 — 이 브라우저에 남아 있던 다른 초안보다 우선한다. */
+const editEl = document.getElementById('cm-edit-data');
+if (editEl) {
+  try {
+    const preload = JSON.parse(editEl.textContent);
+    state = clean(preload.card);
+    save();
+    localStorage.setItem(SAVED_KEY, JSON.stringify({id: preload.id, version: preload.version}));
+  } catch(e) {}
+}
 let step = 0;
 
 const answered = q => { const v = state[q.key]; return Array.isArray(v) ? v.length > 0 : !!v; };
@@ -483,9 +504,14 @@ renderStep();
 </script>"""
 
 
-def character_page(logged_in: bool = False) -> str:
+def character_page(logged_in: bool = False, edit: dict | None = None) -> str:
     data = schema_data()
     promises = "".join(f"<li>{html.escape(p)}</li>" for p in data["promises"])
+    edit_script = (
+        f'<script type="application/json" id="cm-edit-data">{_json_for_script(edit)}</script>'
+        if edit is not None
+        else ""
+    )
     body = (
         _CSS
         + '<header class="cm-head">'
@@ -537,6 +563,7 @@ def character_page(logged_in: bool = False) -> str:
         "</aside>"
         "</div>"
         f'<script type="application/json" id="cm-schema">{_json_for_script(data)}</script>'
+        + edit_script
         + _SCRIPT.replace("__DRAFT_KEY__", json.dumps(DRAFT_KEY))
         .replace("__LOGGED_IN__", "true" if logged_in else "false")
     )
