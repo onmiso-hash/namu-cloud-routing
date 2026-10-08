@@ -46,7 +46,9 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 아무것도 쓰이지 않는다 — 결과는 복사하기로 직접 가져갈 수 있다. 로그인 유도
 단추는 `?next=`로 이 화면에 돌아오게 하고, 브라우저에 표시를 남겨 두었다가
 돌아오면 곧장 저장한다(로그인만 하고 저장은 안 된 채 끝나던 문제, 2026-10-08).
-"+ 새 캐릭터 만들기"는 `?new=1`로 들어와 이미 저장한 카드의 초안을 비운다. 로그인한
+"+ 새 캐릭터 만들기"는 `?new=1`로 들어와, 저장한 뒤 바뀌지 않은 초안만 비운다
+(바뀐 초안은 남기고 저장 표시만 뗀다). 저장 표시에는 캐릭터 이름이 함께 있어,
+이름이 다른 초안은 앞 캐릭터를 덮어쓰지 않고 새 캐릭터로 저장된다. 로그인한
 뒤에는 "저장하기"가 `/auth/character/save`(POST, `web_auth.character_save`)로
 카드를 보내 저장한다. 그 주소가 로그인·저장소 연결·비공개 확인까지 다시
 검사하므로, 이 화면은 로그인 여부만 보고 단추를 가를 뿐 보안 판단을 하지
@@ -281,6 +283,10 @@ _TEXT = {
             "saved": "저장했어요({name}). 나무에 연결된 AI에게 이름을 말하면 불러와요.",
             "save_failed": "저장하지 못했어요. 잠시 후 다시 시도해 주세요.",
             "save_offline": "저장하지 못했어요 — 연결을 확인하고 다시 시도해 주세요.",
+            "pending_no_login": "로그인이 확인되지 않아 저장하지 못했어요. "
+            "'로그인하고 저장하기'를 다시 눌러 주세요.",
+            "pending_empty": "저장할 캐릭터 초안이 이 브라우저에 없어요. "
+            "질문에 답해 캐릭터를 만든 뒤 저장해 주세요.",
             "copied": "복사했어요",
             "selected": "선택해 뒀어요. Ctrl+C로 복사하세요",
             # 한국어판은 서버가 준 message를 그대로 보인다.
@@ -335,6 +341,10 @@ _TEXT = {
             "saved": "Saved ({name}). Say the name to an AI connected to Namu to bring them in.",
             "save_failed": "Couldn't save. Please try again in a moment.",
             "save_offline": "Couldn't save — check your connection and try again.",
+            "pending_no_login": "Couldn't confirm your sign-in, so nothing was saved. "
+            "Press 'Sign in to save' again.",
+            "pending_empty": "There's no character draft in this browser to save. "
+            "Answer the questions to make one, then save.",
             "copied": "Copied",
             "selected": "Selected. Press Ctrl+C to copy",
             # 서버의 오류 부호(`web_auth.character_save`의 `error`)별 영어 문구.
@@ -471,14 +481,21 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>'
 const byKey = {}; QS.forEach(q => { byKey[q.key] = q; });
 const PENDING_KEY = KEY + ':save-after-login';
 
-/* "+ 새 캐릭터 만들기"(`?new=1`)로 들어왔을 때, 이 브라우저의 초안이 이미 저장한
-   캐릭터(또는 고치던 캐릭터)라면 비우고 새로 시작한다. 그대로 두면 저장 번호가
-   남아 새 캐릭터가 앞 캐릭터를 고친 판으로 저장된다. 아직 저장하지 않은 초안은
-   만들던 중이므로 지우지 않는다. */
+/* "+ 새 캐릭터 만들기"(`?new=1`)로 들어왔을 때 — 초안이 저장한 그대로(저장 때
+   남긴 사본 `snap`과 글자까지 같음)일 때만 비우고 새로 시작한다. 저장 뒤 한 글자라도
+   바뀐 초안은 만들던 중인 새 캐릭터이므로 초안은 남기고 저장 표시만 뗀다
+   (저장 표시만 보고 초안을 지워 만들던 캐릭터를 잃은 사고, 2026-10-09). */
 if (new URLSearchParams(location.search).has('new') && !document.getElementById('cm-edit-data')) {
   try {
-    if (localStorage.getItem(SAVED_KEY)) {
+    let rec = null, now = null;
+    try { rec = JSON.parse(localStorage.getItem(SAVED_KEY) || 'null'); } catch(e) {}
+    /* 사본은 정리한 초안(`clean`)으로 떠 두었으므로 비교도 정리한 뒤에 한다 —
+       브라우저에 남은 원문은 칸 순서·여분 값이 달라 글자로는 안 맞을 수 있다. */
+    try { now = JSON.stringify(clean(JSON.parse(localStorage.getItem(KEY) || 'null'))); } catch(e) {}
+    if (rec && typeof rec.snap === 'string' && rec.snap === now) {
       [KEY, SAVED_KEY, KEY + ':passed'].forEach(k => localStorage.removeItem(k));
+    } else {
+      localStorage.removeItem(SAVED_KEY);
     }
     history.replaceState(null, '', location.pathname);
   } catch(e) {}
@@ -517,7 +534,8 @@ if (editEl) {
     const preload = JSON.parse(editEl.textContent);
     state = clean(preload.card);
     save();
-    localStorage.setItem(SAVED_KEY, JSON.stringify({id: preload.id, version: preload.version}));
+    localStorage.setItem(SAVED_KEY, JSON.stringify({
+      id: preload.id, version: preload.version, name: state.name || '', snap: JSON.stringify(state)}));
   } catch(e) {}
 }
 let step = 0;
@@ -686,12 +704,19 @@ function buildPreview(){
   return lines.join('\n');
 }
 
-/* 저장한 뒤 서버가 돌려준 id·version을 기억해 둔다 — 같은 카드를 다시
-   저장할 때 새 캐릭터로 오해되지 않고(이름 중복 거절) 고치는 것으로
-   이어지게 하기 위해서다. */
+/* 저장한 뒤 서버가 돌려준 id·version을 이름·저장 당시 사본과 함께 기억해 둔다 —
+   같은 카드를 다시 저장할 때 새 캐릭터로 오해되지 않고(이름 중복 거절) 고치는
+   것으로 이어지게 하기 위해서다. 다만 초안의 이름이 저장한 캐릭터와 다르면
+   다른 캐릭터를 만드는 중이므로 그 id를 쓰지 않는다 — 쓰면 새 캐릭터가 앞
+   캐릭터를 덮어쓴다. 이름을 고치는 일은 고치기 화면(`#cm-edit-data`)에서만
+   같은 캐릭터로 이어진다. 이름이 없는 옛 표시(2026-10-09 이전)는 어느 캐릭터의
+   것인지 알 수 없으므로 버린다. */
 function getSaved(){
-  try { return JSON.parse(localStorage.getItem(SAVED_KEY) || 'null'); }
-  catch(e) { return null; }
+  let v = null;
+  try { v = JSON.parse(localStorage.getItem(SAVED_KEY) || 'null'); } catch(e) { return null; }
+  if (!v || !v.id || !v.name) return null;
+  if (v.name !== state.name && !editEl) return null;
+  return v;
 }
 function setSaved(v){ try { localStorage.setItem(SAVED_KEY, JSON.stringify(v)); } catch(e) {} }
 function buildSaveCard(){
@@ -726,7 +751,7 @@ if (LOGGED_IN) {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
-        setSaved({id: data.id, version: data.version});
+        setSaved({id: data.id, version: data.version, name: state.name || '', snap: JSON.stringify(state)});
         msg.className = 'cm-save-msg ok';
         msg.textContent = fill(T.saved, {name: data.name});
         $('cm-connect-hint').hidden = false;
@@ -784,8 +809,15 @@ renderStep();
 /* 로그인하고 저장하기를 눌러 로그인을 마치고 돌아왔다 — 결과 화면을 열고 바로 저장한다. */
 let pending = null;
 try { pending = localStorage.getItem(PENDING_KEY); localStorage.removeItem(PENDING_KEY); } catch(e) {}
-if (pending && LOGGED_IN && QS.some(answered)) {
-  renderCard(); showResult(); $('cm-save').click();
+/* 저장하지 못하면 조용히 넘어가지 않고 까닭을 보인다 — 사용자는 저장된 줄 안다. */
+if (pending) {
+  renderCard(); showResult();
+  if (LOGGED_IN && QS.some(answered)) {
+    $('cm-save').click();
+  } else {
+    $('cm-save-msg').className = 'cm-save-msg err';
+    $('cm-save-msg').textContent = LOGGED_IN ? T.pending_empty : T.pending_no_login;
+  }
 }
 })();
 </script>"""

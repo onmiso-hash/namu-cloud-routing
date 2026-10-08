@@ -150,6 +150,9 @@ _FONT_STACK = (
 # ---------------------------------------------------------------------------
 _BASE_CSS = (
     "*{box-sizing:border-box;}"
+    # hidden 속성은 브라우저 기본 규칙이라 .btn{display:inline-flex} 같은 규칙에 진다 —
+    # 로그인 전·후 저장 단추가 둘 다 보이던 사고(2026-10-09). 어디서든 숨김이 이기게 한다.
+    "[hidden]{display:none !important;}"
     "html{scroll-behavior:smooth;}"
     "body{margin:0;background:var(--bg);color:var(--fg);line-height:1.75;"
     "font-size:16.5px;letter-spacing:-.003em;"

@@ -161,3 +161,22 @@ def test_english_save_errors_cover_every_error_code_of_the_save_route():
     codes.discard("invalid_card")  # 따로 다룬다(`invalid_card` 문구)
 
     assert codes == set(character_page._TEXT["en"]["js"]["errors"])
+
+
+def test_hidden_attribute_beats_button_display():
+    # .btn{display:inline-flex}가 hidden을 이겨 로그인 전·후 저장 단추가 둘 다
+    # 보이던 사고(2026-10-09). 숨김 규칙이 빠지면 같은 일이 다시 난다.
+    page = character_page.character_page(False)
+    assert "[hidden]{display:none !important;}" in page
+    assert 'id="cm-save" hidden' in page
+    assert 'id="cm-save-login"' in page
+
+
+def test_new_character_keeps_changed_draft_and_saved_marker_carries_name():
+    # 저장 표시만 보고 만들던 초안(아인)을 지운 사고(2026-10-09) — 저장 그대로인
+    # 초안만 비우고, 저장 표시에는 이름을 실어 다른 캐릭터를 덮어쓰지 않는다.
+    page = character_page.character_page(True)
+    assert "rec.snap === now" in page
+    assert "if (v.name !== state.name && !editEl) return null;" in page
+    assert "snap: JSON.stringify(state)" in page
+    assert "T.pending_empty" in page and "T.pending_no_login" in page
