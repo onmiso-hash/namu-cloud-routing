@@ -63,7 +63,6 @@ import attachments  # noqa: E402
 import character  # noqa: E402
 import config as cfg  # noqa: E402
 import db  # noqa: E402
-import github_app  # noqa: E402
 import identity  # noqa: E402
 import memo  # noqa: E402
 import profile  # noqa: E402
@@ -1888,45 +1887,40 @@ def namu_list_files(
 # 캐릭터(나무 캐릭터 1단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
 # 회원 폴더로 갈아 끼우고, 공개 저장소를 막고, 쓴 뒤 올리는 일만 한다.
 # ---------------------------------------------------------------------------
-# 비공개 확인 결과를 잠깐 기억한다 — 저장할 때마다 GitHub에 물으면 느리다. **비공개라고
-# 확인된 것만** 기억한다: 공개이거나 확인에 실패한 경우를 기억하면, 회원이 저장소를
-# 비공개로 바꾼 뒤에도 한동안 거절당한다. 반대로 비공개 → 공개로 바꾼 경우는 이 시간
-# 동안 쓰기가 통과할 수 있다(5분).
-_PRIVATE_REPO_TTL_SEC = 300.0
-_private_repo_checked: "dict[str, float]" = {}
-
-
 def _require_private_repo(conn: sqlite3.Connection, user_key: str) -> None:
-    """회원 저장소가 비공개인지 확인하고, 아니면 캐릭터 쓰기를 거절한다.
+    """회원 저장소가 비공개인지 보고, 아니면 캐릭터 쓰기를 거절한다.
 
     나무 캐릭터 설계서 12장 — 캐릭터 일기와 원문은 사적인 글이다. 우리는 저장소를
     만들지 않고 비공개가 미리 골라진 생성 화면으로 보낼 뿐이라(pages.NEW_REPO_URL),
-    공개 저장소가 연결돼 있을 수 있다. 확인하지 못했을 때도 거절한다 — 모를 때
-    통과시키면 공개 저장소에 사적인 글을 쓰게 된다.
+    공개 저장소가 연결돼 있을 수 있다.
+
+    비공개 여부는 로그인·저장소 연결 때 한 번 물어 장부에 적어 두고 그 답을 계속
+    쓴다 — 다시 로그인하면 새로 묻는다(2026-10-08 허니 결정). 장부에 답이 없으면
+    (이 기능 전에 연결한 회원, 또는 그때 묻지 못한 경우) 여기서 한 번 묻는다.
+    확인하지 못했을 때도 거절한다 — 모를 때 통과시키면 공개 저장소에 사적인 글을
+    쓰게 된다.
     """
-    checked = _private_repo_checked.get(user_key)
-    if checked is not None and time.monotonic() - checked < _PRIVATE_REPO_TTL_SEC:
-        return
-    try:
-        repo_full_name, token = attach_files._repo_and_token(conn, user_key)
-        private = github_app.repo_is_private(repo_full_name, token)
-    except (RuntimeError, user_repo.UserRepoError) as exc:
-        logger.warning("사용자(%s) 저장소 비공개 확인 실패: %s", user_key, exc)
-        raise ValueError(
-            "저장소가 비공개인지 확인하지 못해 캐릭터를 저장하지 않았습니다 — 잠시 뒤 "
-            "다시 시도해 주세요. | Could not confirm that your repository is private, "
-            "so the character was not saved. Please try again shortly."
-        ) from exc
+    private = identity.get_repo_private(conn, user_key)
+    if private is None:
+        try:
+            private = user_repo.check_repo_private(conn, user_key)
+        except (RuntimeError, ValueError) as exc:
+            logger.warning("사용자(%s) 저장소 비공개 확인 실패: %s", user_key, exc)
+            raise ValueError(
+                "저장소가 비공개인지 확인하지 못해 캐릭터를 저장하지 않았습니다 — 잠시 뒤 "
+                "다시 시도해 주세요. | Could not confirm that your repository is private, "
+                "so the character was not saved. Please try again shortly."
+            ) from exc
     if not private:
-        _private_repo_checked.pop(user_key, None)
+        repo = (identity.get_by_user_key(conn, user_key) or {}).get("repo_full_name")
         raise ValueError(
-            f"연결된 저장소({repo_full_name})가 공개 저장소라 캐릭터를 저장하지 않았습니다 — "
+            f"연결된 저장소({repo})가 공개 저장소라 캐릭터를 저장하지 않았습니다 — "
             "캐릭터 일기는 사적인 글이라 비공개 저장소에만 씁니다. GitHub에서 저장소를 "
-            "비공개(Settings → Danger Zone → Change visibility)로 바꾼 뒤 다시 시도해 "
-            f"주세요. | Your repository ({repo_full_name}) is public. Characters are only "
-            "stored in a private repository; make it private and try again."
+            "비공개(Settings → Danger Zone → Change visibility)로 바꾼 뒤, 나무 클라우드 "
+            "홈페이지에서 로그아웃했다가 다시 로그인해 주세요. | Your repository "
+            f"({repo}) is public. Characters are only stored in a private repository: "
+            "make it private, then log out and log in again on the NAMU Cloud website."
         )
-    _private_repo_checked[user_key] = time.monotonic()
 
 
 @tool()
