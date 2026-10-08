@@ -222,7 +222,7 @@ _CHROME_CSS = (
     ".menu{display:flex;gap:2px;list-style:none;margin:0;padding:0;flex:1;"
     "overflow-x:auto;scrollbar-width:none;}"
     ".menu::-webkit-scrollbar{display:none;}"
-    ".menu a{display:inline-block;padding:7px 11px;border-radius:8px;"
+    ".menu a{display:inline-block;padding:7px 8px;border-radius:8px;"
     "text-decoration:none;color:var(--fg-soft);font-size:.92rem;font-weight:600;"
     "white-space:nowrap;}"
     ".menu a:hover{background:var(--bg-soft);color:var(--fg);}"
@@ -243,10 +243,22 @@ _CHROME_CSS = (
     "{outline:2px solid var(--accent);outline-offset:2px;}"
     # 좁은 화면에서는 글자를 접고 그림글자만 남긴다. 언어 단추가 같이 접히지
     # 않으면 휴대폰에서 머리줄이 두 줄로 터진다(단추가 셋이 되기 때문).
-    "@media (max-width:520px){.themebtn .lab,.langbtn .lab{display:none;}}"
-    "@media (max-width:720px){.topbar-in{flex-wrap:wrap;gap:8px;padding:8px 16px;}"
+    #
+    # 아래 세 숫자(1200·1000·640)는 2026-10-08 메뉴에 '캐릭터'를 더하며 360~1440px를
+    # 10px 간격으로 재서 정했다. 그 전에는 730~1040px(태블릿·작은 노트북)에서 이미
+    # 메뉴가 넘쳐 끝 항목이 숨어 있었고, 영어는 '캐릭터'가 더해지자 1440px에서도
+    # 넘쳤다. 단추 글자를 일찍 접고, 메뉴를 둘째 줄로 내리는 폭을 넓혀서 640px
+    # 이상에서는 넘치지 않게 했다. 메뉴 항목을 늘리면 이 측정을 다시 할 것.
+    "@media (max-width:1200px){.themebtn .lab,.langbtn .lab{display:none;}}"
+    "@media (max-width:1000px){.topbar-in{flex-wrap:wrap;gap:8px;padding:8px 16px;}"
     ".menu{order:3;width:100%;flex:none;margin:0 -16px;padding:0 16px 6px;}"
     ".brand{flex:1;}}"
+    # 휴대폰 폭에서는 메뉴가 화면보다 넓어 옆으로 밀어야 한다. 스크롤 막대를
+    # 숨겼으므로 오른쪽 끝을 흐리게 해 '더 있다'는 표시만 남긴다. 끝까지 밀면
+    # 마지막 항목은 오른쪽 여백(16px) 안쪽에 서므로 글자는 흐려지지 않는다.
+    "@media (max-width:640px){.menu{-webkit-mask-image:linear-gradient("
+    "to right,#000 calc(100% - 28px),transparent);mask-image:linear-gradient("
+    "to right,#000 calc(100% - 28px),transparent);}}"
     ".sitefoot{border-top:1px solid var(--border);margin-top:4em;"
     "background:var(--bg-soft);padding:30px 20px 40px;}"
     ".sitefoot-in{max-width:var(--maxw-wide);margin:0 auto;display:flex;"
@@ -522,6 +534,7 @@ MENU = (
     ("/memory", "무엇을 기억하나"),
     ("/safety", "안전"),
     ("/faq", "자주 묻는 질문"),
+    ("/character", "캐릭터"),
 )
 
 # 영어 공개 화면(namu-83). 한국어 경로 앞에 `/en`을 붙인 것이 짝이며, 홈만
@@ -534,7 +547,7 @@ MENU = (
 # **이름표는 한국어판을 그대로 옮기지 않고 짧게 줄인다.** 영어는 같은 뜻을
 # 담는 데 글자가 훨씬 많이 들어서(`무엇을 기억하나` 7자 ↔ `What it remembers`
 # 17자), 곧이곧대로 옮기면 머리줄이 넘친다. 넘친 자리는 `.menu`의 가로 밀기가
-# 받아 주지만 스크롤 막대를 숨겨 두어서(201줄) **잘린 것처럼 보인다** —
+# 받아 주지만 스크롤 막대를 숨겨 두어서(`_CHROME_CSS`의 `.menu`) **잘린 것처럼 보인다** —
 # 2026-09-01 사용자 실측으로 `Guide (Korean) ↗`가 잘려 나가는 것을 확인했다.
 # 화면 안의 제목과 `<title>`이 온전한 설명을 하므로, 메뉴는 짧은 이름이 맞다.
 MENU_EN = (
@@ -543,6 +556,7 @@ MENU_EN = (
     ("/en/memory", "Memory"),
     ("/en/safety", "Safety"),
     ("/en/faq", "FAQ"),
+    ("/en/character", "Character"),
 )
 
 # 머리줄 메뉴에는 없고 **발에만** 걸리는 공개 화면 — 개인정보 처리방침
@@ -566,15 +580,16 @@ LANG_PAIRS = {
     "/safety": "/en/safety",
     "/faq": "/en/faq",
     "/privacy": "/en/privacy",
+    "/character": "/en/character",
 }
 LANG_PAIRS_BACK = {en: ko for ko, en in LANG_PAIRS.items()}
 
-# 아직 메뉴에도 발에도 걸지 않은 공개 화면 — 캐릭터 만들기(나무 캐릭터 설계서 0장,
-# 2026-10-08). 설계서는 위쪽 메뉴에 "캐릭터"를 더하기로 정했지만 그것은 다음
-# 단계라, 그때까지는 주소를 아는 사람만 들어온다. **메뉴를 걸 때 이 줄에서 빼서
-# MENU로 옮긴다** — 이름 붙은 목록으로 따로 두는 것은 "링크 없는 공개 경로"가
-# 어디 있는지 한눈에 보이게 하기 위해서다(FOOT_ONLY와 같은 까닭).
-UNLISTED = (("/character", "캐릭터 만들기"),)
+# 아직 메뉴에도 발에도 걸지 않은 공개 화면. 지금은 비어 있다 — 캐릭터 만들기
+# (`/character`)가 여기 있다가 2026-10-08에 메뉴로 옮겨 갔다. 주소만 먼저 열고
+# 링크는 나중에 거는 화면이 생기면 여기 적는다 — 이름 붙은 목록으로 따로 두는
+# 것은 "링크 없는 공개 경로"가 어디 있는지 한눈에 보이게 하기 위해서다
+# (FOOT_ONLY와 같은 까닭).
+UNLISTED: tuple[tuple[str, str], ...] = ()
 
 PUBLIC_PATHS = tuple(
     path

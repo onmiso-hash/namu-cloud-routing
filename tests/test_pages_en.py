@@ -14,13 +14,16 @@ import re
 
 import pytest
 
+import character_page
 import pages
 import pages_en
 import ui
 
 ALL_PAGES = list(pages_en.PAGES.items())
 
-ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES)
+ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES) | set(character_page.PAGES)
+# 경로 → 그리는 함수(두 언어 전부). 캐릭터 만들기는 `pages.PAGES` 밖에 산다.
+RENDER = {**pages.PAGES, **pages_en.PAGES, **character_page.PAGES}
 KNOWN_AUTH_PATHS = {"/auth/github/login", "/auth/me", "/auth/memory"}
 # 이름표 아이콘(`ui.ICON_PATHS`)도 웹 앱이 내보내는 우리 주소다.
 KNOWN_AUTH_PATHS |= set(ui.ICON_PATHS)
@@ -125,8 +128,8 @@ def test_english_pages_change_their_invitation_once_you_are_in(path, render):
 @pytest.mark.parametrize("ko_path,en_path", sorted(ui.LANG_PAIRS.items()))
 def test_the_language_button_makes_a_round_trip(ko_path, en_path):
     """가서 돌아올 수 있어야 한다. 한쪽만 열리면 방문자가 갇힌다."""
-    ko_out = pages.PAGES[ko_path](False)
-    en_out = pages_en.PAGES[en_path](False)
+    ko_out = RENDER[ko_path](False)
+    en_out = RENDER[en_path](False)
 
     assert f'<a class="btn langbtn" href="{en_path}"' in ko_out
     assert f'<a class="btn langbtn" href="{ko_path}"' in en_out
@@ -136,7 +139,7 @@ def test_the_language_button_makes_a_round_trip(ko_path, en_path):
 def test_both_language_versions_point_search_engines_at_each_other(ko_path, en_path):
     """양쪽이 서로를 가리켜야 검색 엔진이 같은 화면의 두 언어판으로 인정한다.
     한쪽만 적으면 영어 화면이 별개의 얕은 페이지로 취급된다."""
-    for out in (pages.PAGES[ko_path](False), pages_en.PAGES[en_path](False)):
+    for out in (RENDER[ko_path](False), RENDER[en_path](False)):
         assert f'<link rel="alternate" hreflang="ko" href="{ko_path}">' in out
         assert f'<link rel="alternate" hreflang="en" href="{en_path}">' in out
 
@@ -150,7 +153,7 @@ def test_the_language_button_is_absent_where_there_is_no_translation():
 
 def test_english_menu_and_pages_are_the_same_set():
     """메뉴에 있는데 안 열리는 항목도, 메뉴에 없는 떠돌이 페이지도 없어야 한다."""
-    assert set(pages_en.PAGES) == {
+    assert set(pages_en.PAGES) | {character_page.PATH_EN} == {
         path for path, _label in (*ui.MENU_EN, *ui.FOOT_ONLY_EN)
     }
 
@@ -163,8 +166,8 @@ def test_english_privacy_page_is_linked_from_every_footer():
 
 def test_language_pairs_cover_every_public_page():
     """짝이 빠진 화면이 있으면 그 화면에서만 언어 단추가 조용히 사라진다."""
-    assert set(ui.LANG_PAIRS) == set(pages.PAGES)
-    assert set(ui.LANG_PAIRS.values()) == set(pages_en.PAGES)
+    assert set(ui.LANG_PAIRS) == set(pages.PAGES) | {character_page.PATH}
+    assert set(ui.LANG_PAIRS.values()) == set(pages_en.PAGES) | {character_page.PATH_EN}
 
 
 # ---------------------------------------------------------------------------

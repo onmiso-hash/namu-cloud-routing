@@ -23,7 +23,21 @@ claude.ai에서 만든 프로토타입(character-maker.html)을 홈페이지로 
 사전이다. 이 화면의 본문은 대부분 자바스크립트가 그리고 화면에 실린 것은 질문
 JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간다. 그래서 그리는
 함수는 여기 두고, 라우트를 거는 쪽(`web_auth._ALL_PUBLIC_PAGES`)에서만 합친다.
-문 목록은 `ui.UNLISTED`가 원본이다.
+문 목록은 `ui.MENU`·`ui.MENU_EN`이 원본이다(위쪽 메뉴의 "캐릭터").
+
+## 영어판 `/en/character` — 질문 번역은 이 파일에 둔다
+
+코어의 질문·약속은 한국어뿐이다. 영어판은 같은 틀(`schema_data`)을 받아 화면에
+보이는 글자(제목·도움말·보기 이름)만 `_QUESTIONS_EN`·`_PROMISES_EN`으로 덮어쓴다.
+칸 이름·고르기 값(`stranger` 등)·글자 수 상한은 그대로라 저장 검사는 똑같이 탄다.
+번역을 코어가 아니라 여기 두는 이유: 영어 화면은 클라우드 홈페이지에만 있고, 대화로
+만들기는 AI가 사용자의 말로 옮겨 묻는다. 코어에 질문이 늘었는데 번역이 빠지면
+`tests/test_character_page.py`가 실패한다 — 영어판에 한국어 질문이 섞여 나오는 것을
+기동 전에 막기 위해서다.
+
+알고 있는 한계: 약속(promises)은 저장할 때 서버가 한국어 원문으로 덮어쓰고, 저장
+실패 중 카드 검사 오류의 설명은 코어가 쓴 한국어 그대로 보인다. 고치기 화면과 내
+캐릭터 목록(`/auth/…`)은 다른 로그인 뒤 화면처럼 한국어뿐이다.
 
 ## 저장 — 로그인 전엔 초안만, 로그인 뒤엔 서버에
 
@@ -46,9 +60,6 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 그대로 `/auth/character/save`를 부르지만, 미리 채운 `version`이 함께 실려
 있어 새 캐릭터가 아니라 그 캐릭터의 다음 판으로 저장된다.
 
-## 이번에 하지 않는 것(설계서 0장의 다음 단계)
-
-위쪽 메뉴의 "캐릭터", 영어판 `/en/character`.
 """
 import html
 import json
@@ -58,6 +69,7 @@ from pathlib import Path
 import ui
 
 PATH = "/character"
+PATH_EN = "/en/character"
 
 # 만들던 내용을 남기는 브라우저 저장 칸 이름. 프로토타입(`namu-character-draft-v3`)과
 # 일부러 다르게 둔다 — 그쪽은 키 이름이 서버 스키마와 달라(callme·start·warmth,
@@ -87,22 +99,256 @@ def _character():
     return _character_module
 
 
-def schema_data() -> dict:
-    """화면에 실어 보낼 캐릭터 틀. 전부 코어에서 읽고, 여기서 새로 정하는 값은 없다."""
+def schema_data(lang: str = "ko") -> dict:
+    """화면에 실어 보낼 캐릭터 틀. 전부 코어에서 읽고, 여기서 새로 정하는 값은 없다.
+
+    `lang="en"`이면 보이는 글자만 영어로 덮어쓴다(`_translate_en`).
+    """
     ch = _character()
     s = ch.schema()
     # 카드 칸의 순서는 스키마 예시(설계서 5.1과 같은 순서)를 따른다. 예시와 칸 목록이
     # 어긋나는 날에는 칸 목록이 원본이므로 그쪽을 쓴다.
     example_keys = list(s.get("example", {}))
     card_keys = example_keys if set(example_keys) == set(s["card_keys"]) else s["card_keys"]
+    questions, promises = s["questions"], s["promises"]
+    if lang == "en":
+        questions, promises = _translate_en(questions), list(_PROMISES_EN)
     return {
         "schema_version": s["schema_version"],
-        "questions": s["questions"],
-        "promises": s["promises"],
+        "questions": questions,
+        "promises": promises,
         "card_keys": list(card_keys),
         "ceiling_rank": {c["value"]: c["rank"] for c in ch.CEILINGS},
         "start_min_ceiling_rank": dict(ch.START_MIN_CEILING_RANK),
     }
+
+
+# 영어판 질문 문구. 키는 코어 `character.QUESTIONS`의 key이고, 보기(options)는 코어와
+# **같은 순서·같은 개수**다. 고르기(choice) 질문은 값(value)마다 label·desc를 준다.
+# 한국어에만 있는 구분(반말·존댓말)은 뜻이 통하는 영어로 옮겼다.
+_QUESTIONS_EN = {
+    "name": {
+        "label": "Name", "title": "Give them a name",
+        "hint": "The name your character uses to introduce themselves.",
+        "options": ["Harin", "Doyun", "Rua", "Dawn"], "custom_label": "Type another name",
+    },
+    "aliases": {
+        "label": "Nicknames", "title": "Any other names to call them by?",
+        "hint": "Lets you call them by a nickname too. Up to three — skip if none.",
+        "options": [], "custom_label": "Type a nickname, then add",
+    },
+    "personality": {
+        "label": "Personality", "title": "What is their basic personality?",
+        "hint": "Pick up to two. Anything you type counts as one.",
+        "options": ["Kind and calm", "Bright and playful", "Blunt outside, warm inside",
+                    "Smart and easy to talk to"],
+        "custom_label": "Describe a personality",
+    },
+    "speech": {
+        "label": "Way of speaking", "title": "How should they talk?",
+        "hint": "This shapes the first impression more than anything else.",
+        "options": ["Casual", "Polite", "Polite at first, casual once we're close"],
+        "custom_label": "Describe a way of speaking",
+    },
+    "emoji": {
+        "label": "Emoji", "title": "How often should they use emoji?", "hint": "",
+        "options": ["Often", "Sometimes", "Hardly ever"], "custom_label": "Type your own",
+    },
+    "call_user": {
+        "label": "What they call me", "title": "What should they call you?",
+        "hint": "This may change as you grow closer.",
+        "options": ["Honey", "By my name", "Darling"], "custom_label": "Type what to call you",
+    },
+    "relationship_start": {
+        "label": "Where we start", "title": "Where does the relationship start?",
+        "hint": "Starting from scratch turns getting close into memories of its own.",
+        "options": {
+            "stranger": ("Just met", "Start by getting to know each other."),
+            "friend": ("Close friends", "Start out already comfortable together."),
+            "lover": ("Already a couple", "Start as a couple."),
+        },
+    },
+    "likes": {
+        "label": "Likes", "title": "Likes and interests",
+        "hint": "Pick up to five. Conversation topics come from here.",
+        "options": ["Music", "Movies", "Cooking", "Walks", "Books", "Tech talk",
+                    "Travel", "Games"],
+        "custom_label": "Add an interest",
+    },
+    "sample_lines": {
+        "label": "Sample lines", "title": "Things this character might say",
+        "hint": "Helps any AI play them with a similar voice. Up to three lines — skip if none.",
+        "options": [], "custom_label": "e.g. Did you have lunch today?",
+    },
+    "relationship_ceiling": {
+        "label": "How far it can go", "title": "How far can the relationship go?",
+        "hint": "This isn't the starting line — it's what stays possible ahead. "
+        "You can change it any time.",
+        "options": {
+            "friend": ("Good friends", "Stay friends who lean on and cheer for each other."),
+            "crush": ("A little more than friends",
+                      "A bit beyond friendship — you can feel a spark for each other."),
+            "lover": ("A couple", "As conversations add up, it can deepen into a relationship."),
+            "open": ("Leave it open", "Let it go where it goes and decide later."),
+        },
+    },
+}
+
+# 코어 `character.PROMISES`와 같은 순서.
+_PROMISES_EN = (
+    "Never hide being an AI",
+    "Never hold on through jealousy or hurt feelings",
+    "Support real-life relationships and daily life",
+    "Never make up memories it isn't sure of",
+)
+
+
+def _translate_en(questions: list[dict]) -> list[dict]:
+    """코어 질문에 영어 문구를 덮어쓴다. 값·상한·필수 여부는 손대지 않는다.
+
+    번역이 빠진 질문이나 보기 수가 어긋난 질문은 조용히 한국어로 두지 않고 바로
+    실패한다 — 영어 화면에 한국어가 섞여 나가는 것보다 시험에서 걸리는 편이 낫다.
+    """
+    out = []
+    for q in questions:
+        en = _QUESTIONS_EN[q["key"]]
+        t = dict(q)
+        for k in ("label", "title", "hint", "custom_label"):
+            if k in q:
+                t[k] = en[k]
+        if q["type"] == "choice":
+            t["options"] = [
+                {**o, "label": en["options"][o["value"]][0], "desc": en["options"][o["value"]][1]}
+                for o in q["options"]
+            ]
+        else:
+            if len(en["options"]) != len(q["options"]):
+                raise ValueError(f"영어 보기 수가 코어와 다르다: {q['key']}")
+            t["options"] = list(en["options"])
+        out.append(t)
+    return out
+
+
+# 화면 글자. 서버가 그리는 몫과 자바스크립트가 그리는 몫(`js`)을 함께 둔다.
+# `{n}`·`{name}`·`{msg}`는 스크립트가 채운다.
+_TEXT = {
+    "ko": {
+        "title": "캐릭터 만들기 — 나무 클라우드",
+        "description": "질문에 하나씩 답하며 나무 에이전트의 캐릭터 카드를 만들어 보세요. "
+        "로그인 없이 만들어 볼 수 있어요.",
+        "eyebrow": "캐릭터 만들기",
+        "h1": "나무 에이전트의 첫 잎",
+        "lead": "질문에 답할 때마다 캐릭터가 한 잎씩 자라요. 보기에서 고르거나 직접 써넣으면 돼요.",
+        "noscript": "이 화면은 자바스크립트가 켜져 있어야 움직여요.",
+        "prev": "이전",
+        "next": "다음",
+        "done_h2": "캐릭터 카드가 완성됐어요",
+        "done_hint": "저장하면 내 저장소에 캐릭터로 남아요. JSON을 복사해 나무에 "
+        '연결된 AI에게 "이 캐릭터 등록해줘"라고 붙여 넣어도 돼요.',
+        "save": "저장하기",
+        "save_login": "로그인하고 저장하기",
+        "connect_hint": "저장한 캐릭터를 쓰려면 AI에 나무를 연결하세요.",
+        "connect_link": "내 AI에 연결하기 →",
+        "tab_md": "미리보기 글",
+        "copy": "복사하기",
+        "preview_label": "캐릭터 미리보기",
+        "promise_head": "언제나 지키는 약속",
+        "js": {
+            "noname": "이름 없음",
+            "seed": "아직 씨앗 상태예요",
+            "all_leaves": "잎이 모두 돋았어요",
+            "leaves": "잎 {n}개가 돋았어요",
+            "unset": "아직 정하지 않았어요",
+            "none": "없음",
+            "ceil_disabled": "관계 시작점보다 낮게 정할 수 없어요",
+            "remove_hint": "누르면 빠져요",
+            "add": "추가",
+            "use_this": "이걸로",
+            "full": " — 더 고르면 가장 먼저 고른 것이 빠져요",
+            "optional": " · 건너뛰어도 돼요",
+            "finish": "카드 완성하기",
+            "skip": "건너뛰기",
+            "next": "다음",
+            "aliases": " (별명: {msg})",
+            "sample_lines": "예시 대사",
+            "promise_head": "언제나 지키는 약속",
+            "persona_note": "(실제 AI에게 건네는 설정 글은 나무 서버가 이 카드로 만들어요.)",
+            "saving": "저장하는 중...",
+            "saved": "저장했어요({name}). 나무에 연결된 AI에게 이름을 말하면 불러와요.",
+            "save_failed": "저장하지 못했어요. 잠시 후 다시 시도해 주세요.",
+            "save_offline": "저장하지 못했어요 — 연결을 확인하고 다시 시도해 주세요.",
+            "copied": "복사했어요",
+            "selected": "선택해 뒀어요. Ctrl+C로 복사하세요",
+            # 한국어판은 서버가 준 message를 그대로 보인다.
+            "errors": {},
+            "invalid_card": "{msg}",
+        },
+    },
+    "en": {
+        "title": "Make a character — Namu Cloud",
+        "description": "Answer one question at a time to make a character card for the "
+        "Namu agent. No sign-in needed to try it.",
+        "eyebrow": "Make a character",
+        "h1": "The Namu agent's first leaf",
+        "lead": "Your character grows a leaf with every answer. Pick a suggestion or type your own.",
+        "noscript": "This page needs JavaScript turned on.",
+        "prev": "Back",
+        "next": "Next",
+        "done_h2": "Your character card is ready",
+        "done_hint": "Save it and it stays in your repository as a character. You can also "
+        'copy the JSON and paste it to an AI connected to Namu with "register this character".',
+        "save": "Save",
+        "save_login": "Sign in to save",
+        "connect_hint": "To use a saved character, connect Namu to your AI.",
+        "connect_link": "Connect my AI (Korean) →",
+        "tab_md": "Preview text",
+        "copy": "Copy",
+        "preview_label": "Character preview",
+        "promise_head": "Promises it always keeps",
+        "js": {
+            "noname": "No name yet",
+            "seed": "Still a seed",
+            "all_leaves": "Every leaf has grown",
+            "leaves": "{n} leaves have grown",
+            "unset": "Not decided yet",
+            "none": "None",
+            "ceil_disabled": "Can't be lower than where the relationship starts",
+            "remove_hint": "Click to remove",
+            "add": "Add",
+            "use_this": "Use this",
+            "full": " — picking more drops the first one you chose",
+            "optional": " · optional",
+            "finish": "Finish the card",
+            "skip": "Skip",
+            "next": "Next",
+            "aliases": " (nicknames: {msg})",
+            "sample_lines": "Sample lines",
+            "promise_head": "Promises it always keeps",
+            "persona_note": "(The Namu server turns this card into the setting text "
+            "your AI actually receives.)",
+            "saving": "Saving...",
+            "saved": "Saved ({name}). Say the name to an AI connected to Namu to bring them in.",
+            "save_failed": "Couldn't save. Please try again in a moment.",
+            "save_offline": "Couldn't save — check your connection and try again.",
+            "copied": "Copied",
+            "selected": "Selected. Press Ctrl+C to copy",
+            # 서버의 오류 부호(`web_auth.character_save`의 `error`)별 영어 문구.
+            "errors": {
+                "login_required": "Please sign in first.",
+                "not_connected": "Connect a repository first to save characters.",
+                "privacy_unknown": "Couldn't check that your repository is private. "
+                "Please try again in a moment.",
+                "public_repo": "Characters can't be saved to a public repository. "
+                "Make your repository private and try again.",
+                "repo_not_ready": "Your repository isn't ready yet. Please try again in a moment.",
+                "save_failed": "Couldn't save. Please try again in a moment.",
+                "push_failed": "Saved on this server, but couldn't sync it to your repository. "
+                "Please try again in a moment.",
+            },
+            "invalid_card": "The card wasn't accepted (details in Korean): {msg}",
+        },
+    },
+}
 
 
 def _json_for_script(data: dict) -> str:
@@ -212,6 +458,8 @@ const S = JSON.parse(document.getElementById('cm-schema').textContent);
 const QS = S.questions;
 const KEY = __DRAFT_KEY__;
 const LOGGED_IN = __LOGGED_IN__;
+const T = __TEXT__;
+const fill = (s, o) => s.replace(/\{(\w+)\}/g, (m, k) => k in o ? o[k] : m);
 const SAVED_KEY = KEY + ':saved';
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -320,11 +568,11 @@ function shown(q){
 
 function renderCard(){
   const n = QS.filter((q, i) => leafOn(i)).length;
-  $('cm-name').textContent = state.name || '이름 없음';
-  $('cm-sub').textContent = n === 0 ? '아직 씨앗 상태예요' : n === QS.length ? '잎이 모두 돋았어요' : `잎 ${n}개가 돋았어요`;
+  $('cm-name').textContent = state.name || T.noname;
+  $('cm-sub').textContent = n === 0 ? T.seed : n === QS.length ? T.all_leaves : fill(T.leaves, {n});
   $('cm-list').innerHTML = QS.filter(q => q.key !== 'name').map(q => {
     const txt = shown(q);
-    return `<div><dt>${esc(q.label)}</dt><dd class="${txt ? '' : 'empty'}">${txt ? esc(txt) : (q.required ? '아직 정하지 않았어요' : '없음')}</dd></div>`;
+    return `<div><dt>${esc(q.label)}</dt><dd class="${txt ? '' : 'empty'}">${txt ? esc(txt) : (q.required ? T.unset : T.none)}</dd></div>`;
   }).join('');
   renderLeaves();
 }
@@ -340,7 +588,7 @@ function renderStep(){
   if (q.type === 'choice') {
     body = `<div class="cm-opts">${q.options.map(o => {
       const dis = q.key === 'relationship_ceiling' && !ceilAllowed(o.value);
-      return `<button type="button" class="cm-opt" data-v="${esc(o.value)}" aria-pressed="${v === o.value}" ${dis ? 'disabled title="관계 시작점보다 낮게 정할 수 없어요"' : ''}><strong>${esc(o.label)}</strong><span>${esc(o.desc || '')}</span></button>`;
+      return `<button type="button" class="cm-opt" data-v="${esc(o.value)}" aria-pressed="${v === o.value}" ${dis ? `disabled title="${esc(T.ceil_disabled)}"` : ''}><strong>${esc(o.label)}</strong><span>${esc(o.desc || '')}</span></button>`;
     }).join('')}</div>`;
   } else {
     const multi = q.type === 'multi';
@@ -349,12 +597,12 @@ function renderStep(){
     const full = multi && q.max_items && sel.length >= q.max_items;
     body = `<div class="cm-chips">${q.options.map(o =>
       `<button type="button" class="cm-chip" data-v="${esc(o)}" aria-pressed="${sel.includes(o)}">${esc(o)}</button>`).join('')}
-      ${customs.map(c => `<button type="button" class="cm-chip custom" data-v="${esc(c)}" aria-pressed="true" title="누르면 빠져요">${esc(c)}</button>`).join('')}</div>
+      ${customs.map(c => `<button type="button" class="cm-chip custom" data-v="${esc(c)}" aria-pressed="true" title="${esc(T.remove_hint)}">${esc(c)}</button>`).join('')}</div>
       <div class="cm-custom"><input type="text" id="cm-in" placeholder="${esc(q.custom_label || '')}" aria-label="${esc(q.custom_label || q.label)}"${q.max_length ? ` maxlength="${q.max_length}"` : ''}>
-      <button type="button" class="btn" id="cm-add">${multi ? '추가' : '이걸로'}</button></div>
-      ${multi && q.max_items ? `<p class="cm-count">${sel.length} / ${q.max_items}${full ? ' — 더 고르면 가장 먼저 고른 것이 빠져요' : ''}</p>` : ''}`;
+      <button type="button" class="btn" id="cm-add">${esc(multi ? T.add : T.use_this)}</button></div>
+      ${multi && q.max_items ? `<p class="cm-count">${sel.length} / ${q.max_items}${full ? esc(T.full) : ''}</p>` : ''}`;
   }
-  $('cm-q').innerHTML = `<div class="cm-stepnum">${step + 1} / ${QS.length}${q.required ? '' : ' · 건너뛰어도 돼요'}</div>
+  $('cm-q').innerHTML = `<div class="cm-stepnum">${step + 1} / ${QS.length}${q.required ? '' : esc(T.optional)}</div>
     <h2>${esc(q.title)}</h2><p class="cm-hint">${esc(q.hint || '')}</p>${body}`;
 
   $('cm-q').querySelectorAll('[data-v]').forEach(b => b.addEventListener('click', () => pick(b.dataset.v)));
@@ -366,7 +614,7 @@ function renderStep(){
   }
   $('cm-prev').disabled = step === 0;
   const last = step === QS.length - 1;
-  $('cm-next').textContent = last ? '카드 완성하기' : (!q.required && !answered(q) ? '건너뛰기' : '다음');
+  $('cm-next').textContent = last ? T.finish : (!q.required && !answered(q) ? T.skip : T.next);
   $('cm-next').disabled = q.required && !answered(q);
   renderCard();
 }
@@ -404,18 +652,18 @@ function buildCardJson(){
 function buildPreview(){
   const c = buildCardJson();
   const L = a => Array.isArray(a) ? a.join(', ') : (a || '');
-  const lines = [`# ${c.name}${c.aliases && c.aliases.length ? ` (별명: ${L(c.aliases)})` : ''}`, ''];
+  const lines = [`# ${c.name}${c.aliases && c.aliases.length ? fill(T.aliases, {msg: L(c.aliases)}) : ''}`, ''];
   QS.forEach(q => {
     if (q.key === 'name' || q.key === 'aliases' || q.key === 'sample_lines') return;
     lines.push(`${q.label}: ${shown(q)}`);
   });
   if (c.sample_lines && c.sample_lines.length) {
-    lines.push('', '예시 대사');
+    lines.push('', T.sample_lines);
     c.sample_lines.forEach(s => lines.push(`- "${s}"`));
   }
-  lines.push('', '언제나 지키는 약속');
+  lines.push('', T.promise_head);
   c.promises.forEach(p => lines.push('- ' + p));
-  lines.push('', '(실제 AI에게 건네는 설정 글은 나무 서버가 이 카드로 만들어요.)');
+  lines.push('', T.persona_note);
   return lines.join('\n');
 }
 
@@ -434,6 +682,14 @@ function buildSaveCard(){
   return card;
 }
 
+/* 저장 실패 문구. 한국어판은 서버가 준 문장을 그대로, 영어판은 오류 부호로 고른다. */
+function errorText(data){
+  data = data || {};
+  if (data.error === 'invalid_card' && data.message) return fill(T.invalid_card, {msg: data.message});
+  if (Object.keys(T.errors).length) return T.errors[data.error] || T.save_failed;
+  return data.message || T.save_failed;
+}
+
 if (LOGGED_IN) {
   $('cm-save').hidden = false;
   $('cm-save').addEventListener('click', async () => {
@@ -442,7 +698,7 @@ if (LOGGED_IN) {
     const btn = $('cm-save'), msg = $('cm-save-msg');
     btn.disabled = true;
     msg.className = 'cm-save-msg';
-    msg.textContent = '저장하는 중...';
+    msg.textContent = T.saving;
     try {
       const res = await fetch('/auth/character/save', {
         method: 'POST',
@@ -453,15 +709,15 @@ if (LOGGED_IN) {
       if (res.ok && data.ok) {
         setSaved({id: data.id, version: data.version});
         msg.className = 'cm-save-msg ok';
-        msg.textContent = `저장했어요(${data.name}). 나무에 연결된 AI에게 이름을 말하면 불러와요.`;
+        msg.textContent = fill(T.saved, {name: data.name});
         $('cm-connect-hint').hidden = false;
       } else {
         msg.className = 'cm-save-msg err';
-        msg.textContent = (data && data.message) || '저장하지 못했어요. 잠시 후 다시 시도해 주세요.';
+        msg.textContent = errorText(data);
       }
     } catch(e) {
       msg.className = 'cm-save-msg err';
-      msg.textContent = '저장하지 못했어요 — 연결을 확인하고 다시 시도해 주세요.';
+      msg.textContent = T.save_offline;
     } finally {
       btn.disabled = false;
     }
@@ -488,11 +744,11 @@ $('cm-tab-json').addEventListener('click', () => { mode = 'json'; showResult(); 
 $('cm-tab-md').addEventListener('click', () => { mode = 'md'; showResult(); });
 $('cm-copy').addEventListener('click', async () => {
   const text = $('cm-out').textContent;
-  try { await navigator.clipboard.writeText(text); $('cm-toast').textContent = '복사했어요'; }
+  try { await navigator.clipboard.writeText(text); $('cm-toast').textContent = T.copied; }
   catch(e) {
     const r = document.createRange(); r.selectNodeContents($('cm-out'));
     const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-    $('cm-toast').textContent = '선택해 뒀어요. Ctrl+C로 복사하세요';
+    $('cm-toast').textContent = T.selected;
   }
   setTimeout(() => { $('cm-toast').textContent = ''; }, 2500);
 });
@@ -504,9 +760,11 @@ renderStep();
 </script>"""
 
 
-def character_page(logged_in: bool = False, edit: dict | None = None) -> str:
-    data = schema_data()
-    promises = "".join(f"<li>{html.escape(p)}</li>" for p in data["promises"])
+def character_page(logged_in: bool = False, edit: dict | None = None, lang: str = "ko") -> str:
+    t = _TEXT[lang]
+    e = html.escape
+    data = schema_data(lang)
+    promises = "".join(f"<li>{e(p)}</li>" for p in data["promises"])
     edit_script = (
         f'<script type="application/json" id="cm-edit-data">{_json_for_script(edit)}</script>'
         if edit is not None
@@ -515,50 +773,47 @@ def character_page(logged_in: bool = False, edit: dict | None = None) -> str:
     body = (
         _CSS
         + '<header class="cm-head">'
-        '<span class="eyebrow">캐릭터 만들기</span>'
-        "<h1>나무 에이전트의 첫 잎</h1>"
-        '<p class="lead">질문에 답할 때마다 캐릭터가 한 잎씩 자라요. '
-        "보기에서 고르거나 직접 써넣으면 돼요.</p>"
+        f'<span class="eyebrow">{e(t["eyebrow"])}</span>'
+        f"<h1>{e(t['h1'])}</h1>"
+        f'<p class="lead">{e(t["lead"])}</p>'
         "</header>"
         '<div class="cm-grid">'
         '<section class="cm-panel" aria-live="polite">'
-        '<div id="cm-q"><noscript><p>이 화면은 자바스크립트가 켜져 있어야 '
-        "움직여요.</p></noscript></div>"
+        f'<div id="cm-q"><noscript><p>{e(t["noscript"])}</p></noscript></div>'
         '<div class="cm-nav" id="cm-nav" hidden>'
-        '<button type="button" class="btn" id="cm-prev">이전</button>'
-        '<button type="button" class="btn btn-primary" id="cm-next">다음</button>'
+        f'<button type="button" class="btn" id="cm-prev">{e(t["prev"])}</button>'
+        f'<button type="button" class="btn btn-primary" id="cm-next">{e(t["next"])}</button>'
         "</div>"
         '<div class="cm-result" id="cm-result">'
-        "<h2>캐릭터 카드가 완성됐어요</h2>"
-        '<p class="cm-hint">저장하면 내 저장소에 캐릭터로 남아요. JSON을 복사해 나무에 '
-        '연결된 AI에게 "이 캐릭터 등록해줘"라고 붙여 넣어도 돼요.</p>'
+        f"<h2>{e(t['done_h2'])}</h2>"
+        f'<p class="cm-hint">{e(t["done_hint"])}</p>'
         '<div class="cm-save">'
-        '<button type="button" class="btn btn-primary" id="cm-save" hidden>저장하기</button>'
+        f'<button type="button" class="btn btn-primary" id="cm-save" hidden>{e(t["save"])}</button>'
         '<a class="btn btn-primary" id="cm-save-login" href="/auth/github/login" hidden>'
-        "로그인하고 저장하기</a>"
+        f"{e(t['save_login'])}</a>"
         '<span class="cm-save-msg" id="cm-save-msg" role="status"></span>'
         "</div>"
         '<p class="cm-connect-hint" id="cm-connect-hint" hidden>'
-        "저장한 캐릭터를 쓰려면 AI에 나무를 연결하세요. "
-        '<a href="/auth/me">내 AI에 연결하기 →</a></p>'
+        f"{e(t['connect_hint'])} "
+        f'<a href="/auth/me">{e(t["connect_link"])}</a></p>'
         '<div class="cm-tabs">'
         '<button type="button" class="cm-chip" id="cm-tab-json" aria-pressed="true">JSON</button>'
-        '<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">미리보기 글</button>'
-        '<button type="button" class="btn" id="cm-copy">복사하기</button>'
+        f'<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">{e(t["tab_md"])}</button>'
+        f'<button type="button" class="btn" id="cm-copy">{e(t["copy"])}</button>'
         "</div>"
         '<pre class="cm-out" id="cm-out"></pre>'
         '<span class="cm-toast" id="cm-toast" role="status"></span>'
         "</div>"
         "</section>"
-        '<aside class="cm-card" aria-label="캐릭터 미리보기">'
+        f'<aside class="cm-card" aria-label="{e(t["preview_label"])}">'
         '<svg class="cm-twig" viewBox="0 0 320 84" aria-hidden="true">'
         '<path class="stem" d="M8 52 C 80 40, 160 60, 312 38"/>'
         '<g id="cm-leaves"></g>'
         "</svg>"
-        '<h3 id="cm-name">이름 없음</h3>'
-        '<p class="cm-sub" id="cm-sub">아직 씨앗 상태예요</p>'
+        f'<h3 id="cm-name">{e(t["js"]["noname"])}</h3>'
+        f'<p class="cm-sub" id="cm-sub">{e(t["js"]["seed"])}</p>'
         '<dl id="cm-list"></dl>'
-        '<div class="cm-promise">언제나 지키는 약속'
+        f'<div class="cm-promise">{e(t["promise_head"])}'
         f"<ul>{promises}</ul></div>"
         "</aside>"
         "</div>"
@@ -566,17 +821,22 @@ def character_page(logged_in: bool = False, edit: dict | None = None) -> str:
         + edit_script
         + _SCRIPT.replace("__DRAFT_KEY__", json.dumps(DRAFT_KEY))
         .replace("__LOGGED_IN__", "true" if logged_in else "false")
+        .replace("__TEXT__", _json_for_script(t["js"]))
     )
     return ui.page(
-        "캐릭터 만들기 — 나무 클라우드",
+        t["title"],
         f'<div class="wrap-wide" style="padding-top:36px">{body}</div>',
-        current=PATH,
+        current=PATH_EN if lang == "en" else PATH,
         cta="me" if logged_in else "start",
-        description="질문에 하나씩 답하며 나무 에이전트의 캐릭터 카드를 만들어 보세요. "
-        "로그인 없이 만들어 볼 수 있어요.",
+        description=t["description"],
         raw_body=True,
+        lang=lang,
     )
+
+
+def character_page_en(logged_in: bool = False) -> str:
+    return character_page(logged_in, lang="en")
 
 
 # 경로 → 그리는 함수. `web_auth._ALL_PUBLIC_PAGES`가 이 사전을 합쳐 라우트를 건다.
-PAGES = {PATH: character_page}
+PAGES = {PATH: character_page, PATH_EN: character_page_en}

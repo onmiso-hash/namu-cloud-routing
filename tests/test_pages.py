@@ -11,6 +11,7 @@ import re
 
 import pytest
 
+import character_page
 import pages
 import pages_en
 import ui
@@ -20,7 +21,7 @@ ALL_PAGES = list(pages.PAGES.items())
 # 링크가 닿아도 되는 사이트 안의 주소 전부 — 한국어판과 영어판(namu-83).
 # 한국어 화면의 언어 단추가 `/en/…`을 가리키므로, 한국어 페이지만 아는 목록으로
 # 검사하면 멀쩡한 링크가 '없는 곳'으로 잡힌다.
-ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES)
+ALL_PUBLIC_PATHS = set(pages.PAGES) | set(pages_en.PAGES) | set(character_page.PAGES)
 
 # 사이트가 걸어도 되는, 공개 목록 밖의 우리 주소. 로그인 왕복과 로그인 뒤
 # 화면들이라 여기 적어 둔다 — 이 목록에 없는 새 주소를 페이지가 걸면
@@ -186,8 +187,11 @@ def test_faq_does_not_promise_prices_or_dates():
 
 def test_menu_and_pages_are_the_same_set():
     """메뉴에 있는데 안 열리는 항목도, 메뉴에 없는 떠돌이 페이지도 없어야 한다.
-    발에만 걸리는 화면(`ui.FOOT_ONLY`, 개인정보 처리방침)도 목록에 이름이 있다."""
-    assert set(pages.PAGES) == {path for path, _label in (*ui.MENU, *ui.FOOT_ONLY)}
+    발에만 걸리는 화면(`ui.FOOT_ONLY`, 개인정보 처리방침)도 목록에 이름이 있다.
+    캐릭터 만들기는 메뉴에 있지만 `pages.PAGES` 밖에 따로 산다(character_page 첫머리)."""
+    assert set(pages.PAGES) | {character_page.PATH} == {
+        path for path, _label in (*ui.MENU, *ui.FOOT_ONLY)
+    }
 
 
 def test_privacy_page_is_linked_from_every_footer():
