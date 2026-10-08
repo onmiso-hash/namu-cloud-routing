@@ -93,9 +93,10 @@ EXPOSED_TOOLS = frozenset({
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
     "namu_task_move",
-    # 나무 캐릭터 1단계 — 목록·스키마·저장·불러오기. 일기·핵심 기억·잊기는 2·3단계.
+    # 나무 캐릭터 1단계 — 목록·스키마·저장·불러오기. 2단계 — 일기·핵심 기억. 잊기는 3단계.
     "namu_character_list", "namu_character_schema",
     "namu_character_save", "namu_character_load",
+    "namu_character_diary", "namu_character_core",
 })
 
 mcp = MCPServer(
@@ -266,6 +267,29 @@ _TOOL_DESCRIPTIONS = {
         "now, time since the last talk), `recent_diary`, `core_memories`, "
         "`pending_memories`, `guidance`, `card` and its `version`."
     ),
+    "namu_character_diary": (
+        "Write one diary entry for a character (by name, alias or id) in this "
+        "user's repository. `summary` is a short text from the character's "
+        "point of view (max 500 characters). `affection_delta` is an integer "
+        "clipped to -5..+5 (the requested value is kept in the entry) and "
+        "`delta_reason` is required when it is not 0. `call_user_change` "
+        "records a new way the character calls the user. `core_candidates` "
+        "(max 3, 200 characters each; at most 10 pending in total) are stored "
+        "as pending long-term memories; only confirmed entries become core "
+        "memories. Relationship state is recomputed from all diary entries. "
+        "Rejected when the user's repository is public. Returns the applied "
+        "`affection_delta`, `clipped_from`, `relationship`, `stage_change`, "
+        "`pending_added` and `pending_count`."
+    ),
+    "namu_character_core": (
+        "List, confirm or reject a character's pending long-term memories. "
+        "`action` is \"list\" (default), \"confirm\" (move the pending "
+        "entries in `ids` to core memories) or \"reject\" (delete the "
+        "pending entries in `ids`). Only pending entries can be confirmed; if "
+        "any id is not pending, nothing is changed. Confirm and reject are "
+        "rejected when the user's repository is public. Returns `pending`, "
+        "`core` and `confirmed` or `rejected`."
+    ),
 }
 
 
@@ -299,6 +323,10 @@ _TOOL_ANNOTATIONS = {
     "namu_character_schema": _annotations("Get the character card questions", read_only=True, idempotent=True),
     "namu_character_save": _annotations("Save a character card", read_only=False),
     "namu_character_load": _annotations("Load a character", read_only=True, idempotent=True),
+    "namu_character_diary": _annotations("Write a character diary entry", read_only=False),
+    # reject는 대기 후보를 지운다.
+    "namu_character_core": _annotations("Confirm or reject character memories", read_only=False,
+                                        destructive=True),
 }
 
 
@@ -1884,7 +1912,7 @@ def namu_list_files(
 
 
 # ---------------------------------------------------------------------------
-# 캐릭터(나무 캐릭터 1단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
+# 캐릭터(나무 캐릭터 1·2단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
 # 회원 폴더로 갈아 끼우고, 공개 저장소를 막고, 쓴 뒤 올리는 일만 한다.
 # ---------------------------------------------------------------------------
 def _require_private_repo(conn: sqlite3.Connection, user_key: str) -> None:
@@ -1968,6 +1996,56 @@ def namu_character_load(name: str, ctx: Context | None = None) -> dict:
     with closing(identity.connect()) as conn:
         _sync_or_reject(conn, key)
     return character.load(name, _paths_for_user(key))
+
+
+@tool()
+def namu_character_diary(
+    name: str,
+    summary: str,
+    affection_delta: int = 0,
+    delta_reason: str | None = None,
+    mood: str | None = None,
+    call_user_change: str | None = None,
+    topics: list[str] | None = None,
+    core_candidates: list[str] | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        _require_private_repo(conn, key)
+        result = character.write_diary(
+            name, summary, affection_delta, delta_reason, mood=mood,
+            call_user_change=call_user_change, topics=topics,
+            core_candidates=core_candidates, via=via, paths=_paths_for_user(key),
+        )
+        warning = _push_and_collect_warning(conn, key)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@tool()
+def namu_character_core(
+    name: str,
+    action: str = "list",
+    ids: list[str] | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        if action == "list":
+            # 보기만 할 때는 비공개 확인을 거치지 않는다(읽기 도구와 같은 규칙).
+            return character.core(name, action, ids, via=via, paths=_paths_for_user(key))
+        _require_private_repo(conn, key)
+        result = character.core(name, action, ids, via=via, paths=_paths_for_user(key))
+        warning = _push_and_collect_warning(conn, key)
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:

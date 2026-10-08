@@ -1,4 +1,4 @@
-"""캐릭터 도구(나무 캐릭터 1단계) — 회원 폴더로 갈라 쓰기, 공개 저장소 거절, 올리기.
+"""캐릭터 도구(나무 캐릭터 1·2단계) — 회원 폴더로 갈라 쓰기, 공개 저장소 거절, 올리기.
 
 저장·검사 로직 자체는 코어(vendor/namu-agent/namu-plugin/test_character.py)가 검사한다.
 여기서는 이 서버가 더하는 몫만 본다.
@@ -186,4 +186,51 @@ def test_character_tools_are_exposed():
     assert {
         "namu_character_list", "namu_character_schema",
         "namu_character_save", "namu_character_load",
+        "namu_character_diary", "namu_character_core",
     } <= rs.EXPOSED_TOOLS
+
+
+# ── 2단계: 일기·핵심 기억 ────────────────────────────────────────────────────
+def test_diary_and_core_round_trip(_connected_member, tmp_path):
+    saved = rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    out = rs.namu_character_diary(
+        "하린", "처음 같이 산책했다.", 9, "즐거움", core_candidates=["첫 산책은 한강"],
+        ctx=_FakeCtx(ALICE),
+    )
+    assert out["affection_delta"] == 5 and out["clipped_from"] == 9
+    char_dir = tmp_path / "users" / ALICE / "memory" / "character" / saved["id"]
+    assert (char_dir / "diary" / f"{out['id']}.yaml").is_file()
+    pid = out["pending_added"][0]["id"]
+
+    listed = rs.namu_character_core("하린", ctx=_FakeCtx(ALICE))
+    assert listed["pending"] == [{"id": pid, "text": "첫 산책은 한강"}]
+    res = rs.namu_character_core("하린", "confirm", [pid], ctx=_FakeCtx(ALICE))
+    assert res["confirmed"][0]["id"] == pid
+    assert (char_dir / "core" / f"{pid}.yaml").is_file()
+    loaded = rs.namu_character_load("하린", ctx=_FakeCtx(ALICE))
+    assert loaded["relationship"]["affection"] == 15
+    assert loaded["core_memories"] == [{"id": pid, "text": "첫 산책은 한강"}]
+    # 저장·일기·확정 세 번 모두 올렸다.
+    assert _connected_member["pushes"] == [ALICE] * 3
+
+
+def test_diary_and_core_writes_are_refused_on_a_public_repository(_connected_member, tmp_path):
+    rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    out = rs.namu_character_diary("하린", "수다.", core_candidates=["기억"], ctx=_FakeCtx(ALICE))
+    pid = out["pending_added"][0]["id"]
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, ALICE, False)
+    with pytest.raises(ValueError, match="공개 저장소"):
+        rs.namu_character_diary("하린", "수다.", ctx=_FakeCtx(ALICE))
+    with pytest.raises(ValueError, match="공개 저장소"):
+        rs.namu_character_core("하린", "confirm", [pid], ctx=_FakeCtx(ALICE))
+    # 보기만 하는 것은 된다.
+    assert rs.namu_character_core("하린", ctx=_FakeCtx(ALICE))["pending"][0]["id"] == pid
+
+
+def test_diaries_are_kept_per_member():
+    rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    rs.namu_character_save(_card(), ctx=_FakeCtx(BOB))
+    rs.namu_character_diary("하린", "앨리스와.", 5, "즐거움", ctx=_FakeCtx(ALICE))
+    assert rs.namu_character_load("하린", ctx=_FakeCtx(ALICE))["relationship"]["affection"] == 15
+    assert rs.namu_character_load("하린", ctx=_FakeCtx(BOB))["relationship"]["affection"] == 10
