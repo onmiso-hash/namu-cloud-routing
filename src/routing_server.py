@@ -60,8 +60,10 @@ if str(_VENDOR_PLUGIN_DIR) not in sys.path:
 import access_log  # noqa: E402
 import attach_files  # noqa: E402
 import attachments  # noqa: E402
+import character  # noqa: E402
 import config as cfg  # noqa: E402
 import db  # noqa: E402
+import github_app  # noqa: E402
 import identity  # noqa: E402
 import memo  # noqa: E402
 import profile  # noqa: E402
@@ -92,6 +94,9 @@ EXPOSED_TOOLS = frozenset({
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
     "namu_task_move",
+    # 나무 캐릭터 1단계 — 목록·스키마·저장·불러오기. 일기·핵심 기억·잊기는 2·3단계.
+    "namu_character_list", "namu_character_schema",
+    "namu_character_save", "namu_character_load",
 })
 
 mcp = MCPServer(
@@ -230,6 +235,38 @@ _TOOL_DESCRIPTIONS = {
         "완료 (done), 대기중 (waiting), 만료됨 (expired) or 없음 (not found). "
         "Download links stay 대기중 because downloads are not tracked."
     ),
+    "namu_character_list": (
+        "List this user's characters: id, name, aliases, relationship stage, "
+        "affection score, last talk time and the current card version. "
+        "Character records are kept apart from the other bowls and are not "
+        "part of the memory overview or memory search."
+    ),
+    "namu_character_schema": (
+        "Return the character-making questions and the card shape. Each "
+        "question has `key` (the card field), `title`, `hint`, `type` "
+        "(single/multi/choice), limits and suggested `options`; `rules` lists "
+        "the checks applied when saving and `example` is a filled card."
+    ),
+    "namu_character_save": (
+        "Create or update one character card in this user's repository. "
+        "`card` is a JSON object or JSON text. It is checked against the "
+        "character card schema: required fields, the relationship ceiling not "
+        "below the start, and names/aliases not used by another character of "
+        "this user. `promises` is always set by the server and "
+        "`expression_level` must be null. With `id` null a new character is "
+        "created; with an existing `id` the card is updated and `base_version` "
+        "must equal the card's current `version` (as returned when listing or "
+        "loading characters), otherwise the save is rejected. Earlier versions "
+        "are kept. Rejected when the user's repository is public. Returns "
+        "{`id`, `version`, `name`, `created`}."
+    ),
+    "namu_character_load": (
+        "Load one character by name, alias or id. Returns `persona` (the "
+        "character setting text built by the server from the card), "
+        "`relationship` (stage, affection, how the character calls the user "
+        "now, time since the last talk), `recent_diary`, `core_memories`, "
+        "`pending_memories`, `guidance`, `card` and its `version`."
+    ),
 }
 
 
@@ -259,6 +296,10 @@ _TOOL_ANNOTATIONS = {
     # 링크만 만들고 회원의 저장소는 바꾸지 않는다.
     "namu_create_download_ticket": _annotations("Create a download link", read_only=True),
     "namu_check_ticket": _annotations("Check an upload or download link", read_only=True, idempotent=True),
+    "namu_character_list": _annotations("List characters", read_only=True, idempotent=True),
+    "namu_character_schema": _annotations("Get the character card questions", read_only=True, idempotent=True),
+    "namu_character_save": _annotations("Save a character card", read_only=False),
+    "namu_character_load": _annotations("Load a character", read_only=True, idempotent=True),
 }
 
 
@@ -1841,6 +1882,98 @@ def namu_list_files(
 
     rows.sort(key=lambda r: str(r.get("timestamp") or ""), reverse=True)
     return {"files": rows, "count": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# 캐릭터(나무 캐릭터 1단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
+# 회원 폴더로 갈아 끼우고, 공개 저장소를 막고, 쓴 뒤 올리는 일만 한다.
+# ---------------------------------------------------------------------------
+# 비공개 확인 결과를 잠깐 기억한다 — 저장할 때마다 GitHub에 물으면 느리다. **비공개라고
+# 확인된 것만** 기억한다: 공개이거나 확인에 실패한 경우를 기억하면, 회원이 저장소를
+# 비공개로 바꾼 뒤에도 한동안 거절당한다. 반대로 비공개 → 공개로 바꾼 경우는 이 시간
+# 동안 쓰기가 통과할 수 있다(5분).
+_PRIVATE_REPO_TTL_SEC = 300.0
+_private_repo_checked: "dict[str, float]" = {}
+
+
+def _require_private_repo(conn: sqlite3.Connection, user_key: str) -> None:
+    """회원 저장소가 비공개인지 확인하고, 아니면 캐릭터 쓰기를 거절한다.
+
+    나무 캐릭터 설계서 12장 — 캐릭터 일기와 원문은 사적인 글이다. 우리는 저장소를
+    만들지 않고 비공개가 미리 골라진 생성 화면으로 보낼 뿐이라(pages.NEW_REPO_URL),
+    공개 저장소가 연결돼 있을 수 있다. 확인하지 못했을 때도 거절한다 — 모를 때
+    통과시키면 공개 저장소에 사적인 글을 쓰게 된다.
+    """
+    checked = _private_repo_checked.get(user_key)
+    if checked is not None and time.monotonic() - checked < _PRIVATE_REPO_TTL_SEC:
+        return
+    try:
+        repo_full_name, token = attach_files._repo_and_token(conn, user_key)
+        private = github_app.repo_is_private(repo_full_name, token)
+    except (RuntimeError, user_repo.UserRepoError) as exc:
+        logger.warning("사용자(%s) 저장소 비공개 확인 실패: %s", user_key, exc)
+        raise ValueError(
+            "저장소가 비공개인지 확인하지 못해 캐릭터를 저장하지 않았습니다 — 잠시 뒤 "
+            "다시 시도해 주세요. | Could not confirm that your repository is private, "
+            "so the character was not saved. Please try again shortly."
+        ) from exc
+    if not private:
+        _private_repo_checked.pop(user_key, None)
+        raise ValueError(
+            f"연결된 저장소({repo_full_name})가 공개 저장소라 캐릭터를 저장하지 않았습니다 — "
+            "캐릭터 일기는 사적인 글이라 비공개 저장소에만 씁니다. GitHub에서 저장소를 "
+            "비공개(Settings → Danger Zone → Change visibility)로 바꾼 뒤 다시 시도해 "
+            f"주세요. | Your repository ({repo_full_name}) is public. Characters are only "
+            "stored in a private repository; make it private and try again."
+        )
+    _private_repo_checked[user_key] = time.monotonic()
+
+
+@tool()
+def namu_character_list(ctx: Context | None = None) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+    return {"characters": character.list_all(_paths_for_user(key))}
+
+
+@tool()
+def namu_character_schema(ctx: Context | None = None) -> dict:
+    # 회원 저장소를 읽지 않는다 — 질문 목록은 서버에 있는 정의다. 그래도 열쇠 검사는
+    # 다른 도구와 같이 한다(열쇠 없는 요청에 답하는 도구를 따로 두지 않는다).
+    _resolve_user(ctx)
+    _resolve_via(ctx)
+    return character.schema()
+
+
+@tool()
+def namu_character_save(
+    card: dict | str,
+    base_version: str | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    via = _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        _require_private_repo(conn, key)
+        result = character.save(card, base_version, via=via, paths=_paths_for_user(key))
+        # 저장이 끝난 뒤에만 올린다 — 올리기가 실패해도 저장은 사본에 남고 다음 쓰기 때
+        # 함께 올라간다(namu_record와 같은 규칙, `_push_and_collect_warning` 참고).
+        warning = _push_and_collect_warning(conn, key)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@tool()
+def namu_character_load(name: str, ctx: Context | None = None) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+    return character.load(name, _paths_for_user(key))
 
 
 def fetch_file(conn: sqlite3.Connection, user_key: str, name: str) -> bytes:
