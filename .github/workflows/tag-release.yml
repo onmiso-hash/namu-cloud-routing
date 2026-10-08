@@ -1,0 +1,50 @@
+name: tag-release
+
+# main의 지금 커밋에 클라우드 꼬리표를 붙인다. 손으로 돌린다(workflow_dispatch).
+#
+# 왜 있나(2026-10-08): 클라우드 세션은 꼬리표를 직접 올릴 수 없고(git push가 403으로
+# 막힌다), 사용자가 쓰는 PC는 방화벽으로 GitHub 화면이 막혀 있다. 이 저장소에는 판
+# 번호 파일이 없어 번호가 꼬리표 그 자체이므로, 번호는 돌리는 쪽이 정해 넣는다.
+#
+# - 이미 있는 꼬리표면 거절한다(덮어쓰지 않는다).
+# - 지금 가장 큰 꼬리표보다 작은 번호도 거절한다.
+# - 가벼운 꼬리표다(v0.1.86~v0.1.88과 같은 모양).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "붙일 꼬리표 (예: v0.1.89)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: 꼬리표 붙이기
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "꼬리표 모양이 아니다: $TAG (예: v0.1.89)" >&2
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG 이미 있음 — 덮어쓰지 않는다" >&2
+            exit 1
+          fi
+          latest=$(git tag -l 'v*' | sort -V | tail -1)
+          if [ -n "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$TAG" | sort -V | tail -1)" != "$TAG" ]; then
+            echo "$TAG 는 지금 가장 큰 꼬리표 $latest 보다 작다" >&2
+            exit 1
+          fi
+          echo "$TAG → $(git rev-parse HEAD)"
+          git tag "$TAG" HEAD
+          git push origin "refs/tags/$TAG"
