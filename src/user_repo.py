@@ -693,7 +693,11 @@ _COMMIT_AUTHOR_EMAIL = "namu-cloud-routing@users.noreply.github.com"
 # 넣지 않으면 쪽지를 한 번이라도 붙인 회원의 저장소에 다음 push의 `git add -A`가
 # 의미 없는 잠금 파일을 커밋해 올린다. 코어 개인용 동기화(memory_sync.LOCAL_EXCLUDE_LINES)
 # 도 같은 이유로 이 파일을 로컬 제외 목록에 넣는다 — 두 쪽이 같은 목록을 가져야 한다.
-_LOCAL_ONLY_CACHE_RELATIVE_PATHS = ("db/namu.db", "memory/.memo.lock")
+# memory/character/.character.lock도 같은 성격이다(코어 character.py가 카드를 저장하는
+# 동안 잡는 잠금, 코어 v0.1.95).
+_LOCAL_ONLY_CACHE_RELATIVE_PATHS = (
+    "db/namu.db", "memory/.memo.lock", "memory/character/.character.lock",
+)
 
 
 def _exclude_local_only_cache_paths(target: Path) -> None:
