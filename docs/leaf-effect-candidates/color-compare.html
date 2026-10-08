@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>잎 색 비교</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/wanteddev/wanted-sans@v1.0.3/packages/wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.min.css">
+<style>
+:root{--page:#ece8ea;--fg:#211a1e}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--fg);font-family:"Wanted Sans Variable","Wanted Sans",system-ui,sans-serif;line-height:1.6}
+main{max-width:1000px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:1.4rem;margin:0 0 6px}
+.lead{margin:0 0 18px;color:#555}
+.bar{display:flex;gap:8px;margin-bottom:22px;flex-wrap:wrap}
+button{font:inherit;border:1px solid #cfc6cb;background:#fff;color:#211a1e;border-radius:8px;padding:7px 16px;cursor:pointer}
+button.main{background:#7d2f57;border-color:#7d2f57;color:#fff}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+@media (max-width:700px){.grid{grid-template-columns:minmax(0,1fr)}}
+.col h2{font-size:1.05rem;margin:0 0 8px}
+/* 실제 홈페이지 색을 그대로 옮긴 작은 화면 */
+.mock{border-radius:14px;padding:16px 18px 18px;margin-bottom:12px;border:1px solid var(--border)}
+.mock.light{--bg:#fbf9fa;--fg:#211a1e;--soft:#666063;--faint:#908c8e;--border:#e6dfe3;--bud:#d9ced4;--accent:#7d2f57}
+.mock.dark{--bg:#1e181b;--fg:#ede9eb;--soft:#b6a7af;--faint:#887d83;--border:#2b2227;--bud:#3a2f35;--accent:#ba6b94}
+.mock{background:var(--bg);color:var(--fg)}
+.mock .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:.85rem;color:var(--soft)}
+.mock .btn{background:var(--accent);color:#fff;border-radius:8px;padding:3px 12px;font-size:.82rem;font-weight:600}
+.mock svg{display:block;width:100%;height:auto}
+.mock h3{margin:2px 0 0;font-size:1.25rem}
+.mock p{margin:0;color:var(--soft);font-size:.88rem}
+.stem{stroke:var(--faint);stroke-width:2;fill:none;stroke-linecap:round}
+.bud{fill:var(--bud)}
+.leaf{opacity:0;transform:scale(0);transform-box:fill-box;fill:var(--l1)}
+.leaf.on{opacity:1;transform:scale(1);fill:var(--l2);transition:transform .8s cubic-bezier(.3,1.6,.5,1),opacity .3s ease,fill 1.4s ease .3s}
+.spark{fill:none;stroke:var(--l1);stroke-width:1.5;opacity:0}
+.spark.go{animation:spark .9s ease-out}
+@keyframes spark{0%{opacity:.9;r:2px}100%{opacity:0;r:16px}}
+/* 자주: 홈페이지 강조색 */
+.plum .light{--l1:#c993b0;--l2:#7d2f57}
+.plum .dark{--l1:#e3b6cd;--l2:#ba6b94}
+/* 초록 */
+.green .light{--l1:#8cc47f;--l2:#4f8a4b}
+.green .dark{--l1:#b5e3a8;--l2:#7cbf72}
+.note{font-size:.92rem;color:#555;margin:0}
+</style>
+</head>
+<body>
+<main>
+  <h1>잎 색 비교 — 자주 / 초록</h1>
+  <p class="lead">왼쪽은 홈페이지 강조색(자주), 오른쪽은 초록입니다. 위는 밝은 화면, 아래는 어두운 화면입니다. 네 화면이 함께 움직입니다. 아래로 난 잎이 잘리지 않게 그림 틀도 키워 두었습니다.</p>
+  <div class="bar">
+    <button class="main" id="next">다음 (잎 하나)</button>
+    <button id="all">한 번에 끝까지</button>
+    <button id="reset">처음부터</button>
+  </div>
+  <div class="grid">
+    <div class="col plum">
+      <h2>자주 잎 (예전 색)</h2>
+      <div class="mock light"><div class="top"><span>나무 클라우드</span><span class="btn">시작하기</span></div><svg viewBox="0 0 320 84"></svg><h3>하린</h3><p class="cnt"></p></div>
+      <div class="mock dark"><div class="top"><span>나무 클라우드</span><span class="btn">시작하기</span></div><svg viewBox="0 0 320 84"></svg><h3>하린</h3><p class="cnt"></p></div>
+      <p class="note">단추·강조색과 같은 색이라 화면 전체가 한 가지 색으로 묶여 보입니다. 대신 잎이라는 느낌은 약해집니다.</p>
+    </div>
+    <div class="col green">
+      <h2>초록 잎 (지금 색)</h2>
+      <div class="mock light"><div class="top"><span>나무 클라우드</span><span class="btn">시작하기</span></div><svg viewBox="0 0 320 84"></svg><h3>하린</h3><p class="cnt"></p></div>
+      <div class="mock dark"><div class="top"><span>나무 클라우드</span><span class="btn">시작하기</span></div><svg viewBox="0 0 320 84"></svg><h3>하린</h3><p class="cnt"></p></div>
+      <p class="note">"잎이 돋는다"는 뜻이 바로 읽힙니다. 대신 화면에서 자주색이 아닌 색은 이 잎뿐이라 눈에 띕니다.</p>
+    </div>
+  </div>
+</main>
+<script>
+const N = 10, NS = 'http://www.w3.org/2000/svg';
+const el = (t, a) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); return e; };
+const sets = [];
+document.querySelectorAll('.mock').forEach(m => {
+  const svg = m.querySelector('svg'), leaves = [], sparks = [];
+  svg.appendChild(el('path', {class:'stem', d:'M8 52 C 80 40, 160 60, 312 38'}));
+  for (let i = 0; i < N; i++) {
+    const t = (i + 0.7) / N, x = 8 + t * 300, y = 52 - t * 14 + Math.sin(t * Math.PI) * 4;
+    const up = i % 2 === 0, ty = up ? y - 2 : y + 2;
+    svg.appendChild(el('circle', {class:'bud', cx:x, cy:ty, r:1.8}));
+    const g = el('g', {transform:`rotate(${up ? -28 : 28} ${x} ${ty})`});
+    const p = el('path', {class:'leaf', d: up
+      ? `M${x} ${ty} C ${x-9} ${ty-10}, ${x-4} ${ty-24}, ${x} ${ty-28} C ${x+4} ${ty-24}, ${x+9} ${ty-10}, ${x} ${ty} Z`
+      : `M${x} ${ty} C ${x-9} ${ty+10}, ${x-4} ${ty+22}, ${x} ${ty+26} C ${x+4} ${ty+22}, ${x+9} ${ty+10}, ${x} ${ty} Z`});
+    p.style.transformOrigin = up ? '50% 100%' : '50% 0%';
+    g.appendChild(p); svg.appendChild(g); leaves.push(p);
+    const s = el('circle', {class:'spark', cx:x, cy:up ? ty - 14 : ty + 13, r:2}); svg.appendChild(s); sparks.push(s);
+  }
+  sets.push({leaves, sparks, cnt: m.querySelector('.cnt')});
+});
+let n = 0;
+const show = () => sets.forEach(s => s.cnt.textContent = n === 0 ? '아직 씨앗 상태예요' : n === N ? '잎이 모두 돋았어요' : `잎 ${n}개가 돋았어요`);
+function grow(){
+  if (n >= N) return;
+  sets.forEach(s => { s.leaves[n].classList.add('on'); const sp = s.sparks[n]; sp.classList.remove('go'); void sp.getBBox(); sp.classList.add('go'); });
+  n++; show();
+}
+document.getElementById('next').onclick = grow;
+document.getElementById('all').onclick = () => { const t = setInterval(() => { grow(); if (n >= N) clearInterval(t); }, 450); };
+document.getElementById('reset').onclick = () => { sets.forEach(s => { s.leaves.forEach(l => l.classList.remove('on')); s.sparks.forEach(x => x.classList.remove('go')); }); n = 0; show(); };
+show();
+</script>
+</body>
+</html>

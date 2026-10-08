@@ -569,8 +569,16 @@ LANG_PAIRS = {
 }
 LANG_PAIRS_BACK = {en: ko for ko, en in LANG_PAIRS.items()}
 
+# 아직 메뉴에도 발에도 걸지 않은 공개 화면 — 캐릭터 만들기(나무 캐릭터 설계서 0장,
+# 2026-10-08). 설계서는 위쪽 메뉴에 "캐릭터"를 더하기로 정했지만 그것은 다음
+# 단계라, 그때까지는 주소를 아는 사람만 들어온다. **메뉴를 걸 때 이 줄에서 빼서
+# MENU로 옮긴다** — 이름 붙은 목록으로 따로 두는 것은 "링크 없는 공개 경로"가
+# 어디 있는지 한눈에 보이게 하기 위해서다(FOOT_ONLY와 같은 까닭).
+UNLISTED = (("/character", "캐릭터 만들기"),)
+
 PUBLIC_PATHS = tuple(
-    path for path, _label in (*MENU, *MENU_EN, *FOOT_ONLY, *FOOT_ONLY_EN)
+    path
+    for path, _label in (*MENU, *MENU_EN, *FOOT_ONLY, *FOOT_ONLY_EN, *UNLISTED)
 )
 
 GITHUB_URL = "https://github.com/onmiso-hash/namu-agent"

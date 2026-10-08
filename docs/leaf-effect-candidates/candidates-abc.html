@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>잎 효과 후보</title>
+<style>
+:root{
+  --bg:#fbf9fa;--card:#f3edf0;--fg:#211a1e;--soft:#666063;--faint:#908c8e;
+  --gray:#d9ced4;--green:#4f8a4b;--green-light:#8cc47f;--accent:#7d2f57;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#141012;--card:#1e181b;--fg:#ede9eb;--soft:#b6a7af;--faint:#887d83;
+    --gray:#3a2f35;--green:#7cbf72;--green-light:#b5e3a8;--accent:#ba6b94;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#141012;--card:#1e181b;--fg:#ede9eb;--soft:#b6a7af;--faint:#887d83;
+  --gray:#3a2f35;--green:#7cbf72;--green-light:#b5e3a8;--accent:#ba6b94;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;line-height:1.6}
+main{max-width:760px;margin:0 auto;padding:28px 16px 60px}
+h1{font-size:1.4rem;margin:0 0 6px}
+.lead{color:var(--soft);margin:0 0 24px}
+.box{background:var(--card);border-radius:14px;padding:18px 18px 14px;margin-bottom:18px}
+.box h2{font-size:1.05rem;margin:0 0 2px}
+.box p{margin:0 0 10px;color:var(--soft);font-size:.92rem}
+svg{display:block;width:100%;height:auto;max-height:110px}
+.stem{stroke:var(--faint);stroke-width:2;fill:none;stroke-linecap:round}
+.row{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+button{font:inherit;border:1px solid var(--gray);background:var(--bg);color:var(--fg);border-radius:8px;padding:6px 14px;cursor:pointer}
+button.main{background:var(--accent);border-color:var(--accent);color:#fff}
+.count{color:var(--soft);font-size:.9rem}
+
+/* A: 회색 잎이 초록으로 물든다 */
+.A .leaf{fill:var(--gray);transition:fill .7s ease;transform-box:fill-box}
+.A .leaf.on{fill:var(--green);animation:pulse .6s ease}
+@keyframes pulse{0%{transform:scale(1)}40%{transform:scale(1.25)}100%{transform:scale(1)}}
+
+/* B: 빈 가지에서 잎이 돋아난다 */
+.B .leaf{fill:var(--green);opacity:0;transform:scale(0);transform-box:fill-box}
+.B .leaf.on{opacity:1;transform:scale(1);transition:transform .7s cubic-bezier(.3,1.6,.5,1),opacity .3s ease}
+
+/* C: 돋아나며 연두에서 초록으로 + 반짝 */
+.C .leaf{fill:var(--green-light);opacity:0;transform:scale(0);transform-box:fill-box}
+.C .leaf.on{opacity:1;transform:scale(1);fill:var(--green);
+  transition:transform .8s cubic-bezier(.3,1.6,.5,1),opacity .3s ease,fill 1.4s ease .3s}
+.C .spark{fill:none;stroke:var(--green-light);stroke-width:1.5;opacity:0}
+.C .spark.go{animation:spark .9s ease-out}
+@keyframes spark{0%{opacity:.9;r:2}100%{opacity:0;r:16}}
+.C .bud{fill:var(--gray)}
+
+@media (prefers-reduced-motion:reduce){
+  .leaf,.leaf.on{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>잎 효과 후보 세 가지</h1>
+  <p class="lead">각 상자의 <b>다음</b>을 누르면 질문 하나를 마치고 넘어간 것처럼 잎이 바뀝니다. 질문은 모두 10개입니다.</p>
+
+  <div class="box A" data-k="A">
+    <h2>A. 회색 잎이 초록으로 물들기</h2>
+    <p>잎 10개가 처음부터 회색으로 보이고, 한 단계를 마칠 때마다 하나씩 초록으로 물들면서 살짝 커졌다 돌아옵니다.</p>
+    <svg viewBox="0 0 320 80"></svg>
+    <div class="row"><button class="main">다음</button><button class="reset">처음부터</button><span class="count"></span></div>
+  </div>
+
+  <div class="box B" data-k="B">
+    <h2>B. 빈 가지에서 잎이 돋아나기</h2>
+    <p>처음에는 가지만 있고, 한 단계를 마칠 때마다 초록 잎이 하나씩 톡 하고 자라납니다.</p>
+    <svg viewBox="0 0 320 80"></svg>
+    <div class="row"><button class="main">다음</button><button class="reset">처음부터</button><span class="count"></span></div>
+  </div>
+
+  <div class="box C" data-k="C">
+    <h2>C. 눈에서 잎이 돋아 초록으로 짙어지기</h2>
+    <p>가지에 잎이 날 자리(작은 점)가 보이고, 단계를 마치면 그 자리에서 연둣빛 잎이 돋아 초록으로 짙어지며 작은 빛이 퍼집니다.</p>
+    <svg viewBox="0 0 320 80"></svg>
+    <div class="row"><button class="main">다음</button><button class="reset">처음부터</button><span class="count"></span></div>
+  </div>
+</main>
+<script>
+const N = 10, NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs){ const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+function setup(box){
+  const svg = box.querySelector('svg'), k = box.dataset.k;
+  svg.appendChild(el('path', {class:'stem', d:'M8 56 C 80 44, 160 64, 312 42'}));
+  const leaves = [], sparks = [];
+  for (let i = 0; i < N; i++){
+    const t = (i + 0.7) / N, x = 8 + t * 300, y = 56 - t * 14 + Math.sin(t * Math.PI) * 4;
+    const up = i % 2 === 0, ty = up ? y - 2 : y + 2;
+    if (k === 'C') svg.appendChild(el('circle', {class:'bud', cx:x, cy:ty, r:1.8}));
+    const g = el('g', {transform:`rotate(${up ? -28 : 28} ${x} ${ty})`});
+    const p = el('path', {class:'leaf', d: up
+      ? `M${x} ${ty} C ${x-9} ${ty-10}, ${x-4} ${ty-24}, ${x} ${ty-28} C ${x+4} ${ty-24}, ${x+9} ${ty-10}, ${x} ${ty} Z`
+      : `M${x} ${ty} C ${x-9} ${ty+10}, ${x-4} ${ty+22}, ${x} ${ty+26} C ${x+4} ${ty+22}, ${x+9} ${ty+10}, ${x} ${ty} Z`});
+    // 잎자루(가지에 붙은 쪽)에서 자라나도록 기준점을 잎 밑동에 둔다
+    p.style.transformOrigin = up ? '50% 100%' : '50% 0%';
+    g.appendChild(p); svg.appendChild(g); leaves.push(p);
+    if (k === 'C'){ const s = el('circle', {class:'spark', cx:x, cy:up ? ty-14 : ty+13, r:2}); svg.appendChild(s); sparks.push(s); }
+  }
+  let n = 0;
+  const count = box.querySelector('.count');
+  const show = () => count.textContent = `${n} / ${N}단계`;
+  box.querySelector('.main').onclick = () => {
+    if (n >= N) return;
+    leaves[n].classList.add('on');
+    if (sparks[n]){ sparks[n].classList.remove('go'); void sparks[n].getBBox(); sparks[n].classList.add('go'); }
+    n++; show();
+  };
+  box.querySelector('.reset').onclick = () => { leaves.forEach(l => l.classList.remove('on')); sparks.forEach(s => s.classList.remove('go')); n = 0; show(); };
+  show();
+}
+document.querySelectorAll('.box').forEach(setup);
+</script>
+</body>
+</html>

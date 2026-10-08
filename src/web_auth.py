@@ -66,6 +66,7 @@ from starlette.responses import (
 from starlette.routing import Route
 
 import ask
+import character_page
 import github_app as ga
 import identity
 import pages
@@ -92,7 +93,9 @@ SERVICE = "cloud"
 # **같은 사전 하나**를 보게 해서, 영어 화면을 늘릴 때 한쪽만 늘어나 404가 나는
 # 일이 없게 한다. `ui.PUBLIC_PATHS`(문지기가 보는 목록)와 짝이 맞는지는 아래
 # `_assert_public_pages_match`가 기동할 때 확인한다.
-_ALL_PUBLIC_PAGES = {**pages.PAGES, **pages_en.PAGES}
+# 캐릭터 만들기(`character_page`)는 `pages.PAGES`에 넣지 않고 여기서만 합친다 —
+# 그 사전은 AI 안내원의 말뭉치가 통째로 읽는다(character_page 첫머리 참고).
+_ALL_PUBLIC_PAGES = {**pages.PAGES, **pages_en.PAGES, **character_page.PAGES}
 
 # httpx는 매 요청의 URL을 INFO로 찍는다("HTTP Request: POST http://... 200 OK").
 # 연결 시험(`_http_probe`)은 URL 경로에 사용자 접속 열쇠를 실어 보내므로, 그대로

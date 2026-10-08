@@ -420,10 +420,11 @@ def test_접속_기록과_방문_기록이_같은_이름을_쓴다():
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("path", sorted(ui.PUBLIC_PATHS))
 def test_공개_화면마다_신호가_한_번씩_붙는다(path):
+    import character_page
     import pages
     import pages_en
 
-    out = {**pages.PAGES, **pages_en.PAGES}[path](False)
+    out = {**pages.PAGES, **pages_en.PAGES, **character_page.PAGES}[path](False)
 
     assert out.count(ui.API_PATHS[0]) == 1, f"{path}: 신호가 없거나 둘 이상이다"
 
