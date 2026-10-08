@@ -14,6 +14,7 @@ import asyncio
 import re
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -2603,3 +2604,133 @@ def test_font_route_does_not_open_the_folder_underneath(client):
 
     for path in ["/asset/OFL.txt", "/asset/../web_auth.py", "/asset/"]:
         assert client.get(path).status_code == 404, f"{path}가 열렸다"
+
+
+# ---------------------------------------------------------------------------
+# 캐릭터 저장 (namu-character-web 2단계) — 저장 버튼과 로그인·비공개 저장소
+# 정책의 연결.
+#
+# 저장소 왕복(user_repo.ensure_ready/push)은 `_memory_env`로 걷어낸다 — 여기서
+# 볼 것은 "어느 조건에서 어떤 응답을 돌리는가"이지 git 동작이 아니다. 다만
+# `character.save` 자체는 벤더 코어를 그대로 불러 실행한다 — 카드 검증·판
+# 기록까지가 이 시험의 대상이다.
+# ---------------------------------------------------------------------------
+def _login_cookie(client, user_key: str) -> None:
+    """OAuth 왕복 없이 로그인 세션 쿠키만 심는다(저장소 미연결 사용자 시험용)."""
+    client.cookies.set(
+        wa._SESSION_COOKIE_NAME,
+        wa._sign_with_expiry(user_key, wa._SESSION_COOKIE_TTL_SEC),
+    )
+
+
+def _valid_card(**overrides) -> dict:
+    card = {
+        "id": None,
+        "name": "테스트봇",
+        "aliases": [],
+        "personality": ["따뜻함"],
+        "speech": "반말로, 다정하게",
+        "emoji": "",
+        "call_user": "자기",
+        "relationship_start": "stranger",
+        "likes": [],
+        "sample_lines": [],
+        "relationship_ceiling": "friend",
+    }
+    card.update(overrides)
+    return card
+
+
+def test_character_save_requires_login():
+    c = TestClient(wa.build_auth_app(), base_url="https://testserver")
+    r = c.post("/auth/character/save", json={"card": _valid_card()})
+    assert r.status_code == 401
+    assert r.json()["error"] == "login_required"
+
+
+def test_character_save_rejects_unconnected_repo(client):
+    with closing(identity.connect()) as conn:
+        user_key = identity.upsert_user(conn, 51001, "norepo")
+    _login_cookie(client, user_key)
+
+    r = client.post("/auth/character/save", json={"card": _valid_card()})
+
+    assert r.status_code == 409
+    assert r.json()["error"] == "not_connected"
+
+
+def test_character_save_rejects_public_repo(client, monkeypatch):
+    row = _connect_via_login(client, monkeypatch, github_id=51002, repo="pub/repo")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], False)
+
+    r = client.post("/auth/character/save", json={"card": _valid_card()})
+
+    assert r.status_code == 409
+    assert r.json()["error"] == "public_repo"
+
+
+def test_character_save_returns_privacy_unknown_when_recheck_fails(client, monkeypatch):
+    """로그인 콜백이 비공개 확인을 시도했다 실패해 모름(None)으로 남은 경우를
+    그대로 재현한다 — 저장 시도에서 한 번 더 확인하다 또 실패하면 503이다."""
+    row = _connect_via_login(client, monkeypatch, github_id=51003, repo="who/knows")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], None)
+
+    def _boom(conn, user_key):
+        raise RuntimeError("github down")
+
+    monkeypatch.setattr(wa.user_repo, "check_repo_private", _boom)
+
+    r = client.post("/auth/character/save", json={"card": _valid_card()})
+
+    assert r.status_code == 503
+    assert r.json()["error"] == "privacy_unknown"
+
+
+def test_character_save_success_creates_card_and_pushes(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=51004, repo="ok/repo")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], True)
+    _paths, pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.post("/auth/character/save", json={"card": _valid_card()})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["created"] is True
+    assert body["name"] == "테스트봇"
+    assert body["id"] and body["version"]
+    assert len(pushes) == 1
+
+
+def test_character_save_rejects_invalid_card(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=51005, repo="ok/repo2")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], True)
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    r = client.post("/auth/character/save", json={"card": _valid_card(name="")})
+
+    assert r.status_code == 400
+    assert r.json()["error"] == "invalid_card"
+
+
+def test_character_save_reports_push_failed_but_keeps_server_copy(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=51006, repo="ok/repo3")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], True)
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    def _boom_push(conn, key, message=""):
+        raise wa.user_repo.UserRepoError("network down")
+
+    monkeypatch.setattr(wa.user_repo, "push", _boom_push)
+
+    r = client.post("/auth/character/save", json={"card": _valid_card()})
+
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error"] == "push_failed"
+    assert body["id"] and body["version"]

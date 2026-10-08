@@ -25,11 +25,21 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 함수는 여기 두고, 라우트를 거는 쪽(`web_auth._ALL_PUBLIC_PAGES`)에서만 합친다.
 문 목록은 `ui.UNLISTED`가 원본이다.
 
+## 저장 — 로그인 전엔 초안만, 로그인 뒤엔 서버에
+
+만들던 내용은 로그인 여부와 상관없이 늘 브라우저(localStorage)에 먼저 남는다.
+로그인하지 않은 채로는 "저장하기" 대신 로그인 유도 단추만 보이고, 서버에는
+아무것도 쓰이지 않는다 — 결과는 복사하기로 직접 가져갈 수 있다. 로그인한
+뒤에는 "저장하기"가 `/auth/character/save`(POST, `web_auth.character_save`)로
+카드를 보내 저장한다. 그 주소가 로그인·저장소 연결·비공개 확인까지 다시
+검사하므로, 이 화면은 로그인 여부만 보고 단추를 가를 뿐 보안 판단을 하지
+않는다. 공개 저장소로는 서버가 저장을 거절한다(기존 설계 원칙 — 캐릭터
+일기는 비공개 저장소에만 쓴다).
+
 ## 이번에 하지 않는 것(설계서 0장의 다음 단계)
 
-저장 버튼·로그인 연결, 위쪽 메뉴의 "캐릭터", 영어판 `/en/character`, 로그인 뒤
-`/auth/character`. 지금은 만들던 내용을 브라우저(localStorage)에만 남기고, 결과는
-복사하기로 가져간다.
+위쪽 메뉴의 "캐릭터", 영어판 `/en/character`, 로그인 뒤 내 캐릭터를 목록으로
+보여주는 `/auth/character`.
 """
 import html
 import json
@@ -141,12 +151,12 @@ _CSS = (
     ".cm-card{padding:0 22px 22px;position:sticky;top:74px;}"
     "@media (max-width:820px){.cm-card{position:static;}}"
     ".cm-twig{display:block;width:100%;height:84px;margin-bottom:4px;}"
-    # 잎은 한 단계를 마치고 넘어갈 때 눈(작은 점)에서 옅은 자주로 돋아 강조색으로 짙어진다.
-    # 짙은 색은 사이트 강조색(--accent)을 따르고, 돋을 때의 옅은 색만 이 화면에 따로 둔다.
-    ".cm-twig{--cm-leaf:var(--accent);--cm-leaf-light:#c993b0;}"
+    # 잎은 한 단계를 마치고 넘어갈 때 눈(작은 점)에서 옅은 초록으로 돋아 짙은 초록으로
+    # 짙어진다 — "잎이 돋는다"는 뜻이 바로 읽히도록 사이트 강조색과는 다른 색을 쓴다.
+    ".cm-twig{--cm-leaf:#4f8a4b;--cm-leaf-light:#8cc47f;}"
     "@media (prefers-color-scheme:dark){:root:not([data-theme=\"light\"]) .cm-twig{"
-    "--cm-leaf:var(--accent);--cm-leaf-light:#e3b6cd;}}"
-    ":root[data-theme=\"dark\"] .cm-twig{--cm-leaf:var(--accent);--cm-leaf-light:#e3b6cd;}"
+    "--cm-leaf:#7cbf72;--cm-leaf-light:#b5e3a8;}}"
+    ":root[data-theme=\"dark\"] .cm-twig{--cm-leaf:#7cbf72;--cm-leaf-light:#b5e3a8;}"
     ".cm-twig .bud{fill:var(--border-strong);}"
     ".cm-twig .leafshape{fill:var(--cm-leaf-light);opacity:0;transform:scale(0);"
     "transform-box:fill-box;}"
@@ -173,6 +183,11 @@ _CSS = (
     ".cm-out{white-space:pre-wrap;word-break:break-word;font-size:.88rem;line-height:1.6;"
     "max-height:420px;overflow:auto;margin:0;}"
     ".cm-toast{color:var(--ok);font-size:.9rem;}"
+    ".cm-save{display:flex;align-items:center;gap:12px;flex-wrap:wrap;"
+    "margin:16px 0 22px;padding-top:16px;border-top:1px dashed var(--border-strong);}"
+    ".cm-save-msg{font-size:.9rem;color:var(--fg-soft);}"
+    ".cm-save-msg.ok{color:var(--ok);}"
+    ".cm-save-msg.err{color:var(--danger);}"
     "@media (max-width:520px){.cm-panel{padding:20px 18px;}.cm-card{padding:0 18px 18px;}}"
     "@media (prefers-reduced-motion:reduce){.cm-twig .leafshape.on{transition:none;}"
     ".cm-twig .spark.go{animation:none;}}"
@@ -186,6 +201,8 @@ _SCRIPT = r"""<script>
 const S = JSON.parse(document.getElementById('cm-schema').textContent);
 const QS = S.questions;
 const KEY = __DRAFT_KEY__;
+const LOGGED_IN = __LOGGED_IN__;
+const SAVED_KEY = KEY + ':saved';
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const byKey = {}; QS.forEach(q => { byKey[q.key] = q; });
@@ -380,6 +397,56 @@ function buildPreview(){
   return lines.join('\n');
 }
 
+/* 저장한 뒤 서버가 돌려준 id·version을 기억해 둔다 — 같은 카드를 다시
+   저장할 때 새 캐릭터로 오해되지 않고(이름 중복 거절) 고치는 것으로
+   이어지게 하기 위해서다. */
+function getSaved(){
+  try { return JSON.parse(localStorage.getItem(SAVED_KEY) || 'null'); }
+  catch(e) { return null; }
+}
+function setSaved(v){ try { localStorage.setItem(SAVED_KEY, JSON.stringify(v)); } catch(e) {} }
+function buildSaveCard(){
+  const card = buildCardJson();
+  const saved = getSaved();
+  if (saved && saved.id) card.id = saved.id;
+  return card;
+}
+
+if (LOGGED_IN) {
+  $('cm-save').hidden = false;
+  $('cm-save').addEventListener('click', async () => {
+    const card = buildSaveCard();
+    const saved = getSaved();
+    const btn = $('cm-save'), msg = $('cm-save-msg');
+    btn.disabled = true;
+    msg.className = 'cm-save-msg';
+    msg.textContent = '저장하는 중...';
+    try {
+      const res = await fetch('/auth/character/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        body: JSON.stringify({card, base_version: saved ? saved.version : null}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setSaved({id: data.id, version: data.version});
+        msg.className = 'cm-save-msg ok';
+        msg.textContent = `저장했어요(${data.name}). 나무에 연결된 AI에게 이름을 말하면 불러와요.`;
+      } else {
+        msg.className = 'cm-save-msg err';
+        msg.textContent = (data && data.message) || '저장하지 못했어요. 잠시 후 다시 시도해 주세요.';
+      }
+    } catch(e) {
+      msg.className = 'cm-save-msg err';
+      msg.textContent = '저장하지 못했어요 — 연결을 확인하고 다시 시도해 주세요.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+} else {
+  $('cm-save-login').hidden = false;
+}
+
 let mode = 'json';
 function showResult(){
   $('cm-out').textContent = mode === 'json' ? JSON.stringify(buildCardJson(), null, 2) : buildPreview();
@@ -435,8 +502,14 @@ def character_page(logged_in: bool = False) -> str:
         "</div>"
         '<div class="cm-result" id="cm-result">'
         "<h2>캐릭터 카드가 완성됐어요</h2>"
-        '<p class="cm-hint">JSON을 복사해 나무에 연결된 AI에게 "이 캐릭터 등록해줘"라고 '
-        "붙여 넣으면 저장돼요.</p>"
+        '<p class="cm-hint">저장하면 내 저장소에 캐릭터로 남아요. JSON을 복사해 나무에 '
+        '연결된 AI에게 "이 캐릭터 등록해줘"라고 붙여 넣어도 돼요.</p>'
+        '<div class="cm-save">'
+        '<button type="button" class="btn btn-primary" id="cm-save" hidden>저장하기</button>'
+        '<a class="btn btn-primary" id="cm-save-login" href="/auth/github/login" hidden>'
+        "로그인하고 저장하기</a>"
+        '<span class="cm-save-msg" id="cm-save-msg" role="status"></span>'
+        "</div>"
         '<div class="cm-tabs">'
         '<button type="button" class="cm-chip" id="cm-tab-json" aria-pressed="true">JSON</button>'
         '<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">미리보기 글</button>'
@@ -460,6 +533,7 @@ def character_page(logged_in: bool = False) -> str:
         "</div>"
         f'<script type="application/json" id="cm-schema">{_json_for_script(data)}</script>'
         + _SCRIPT.replace("__DRAFT_KEY__", json.dumps(DRAFT_KEY))
+        .replace("__LOGGED_IN__", "true" if logged_in else "false")
     )
     return ui.page(
         "캐릭터 만들기 — 나무 클라우드",

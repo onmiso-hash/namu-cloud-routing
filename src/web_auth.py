@@ -1901,6 +1901,19 @@ def _core_attachments():
     return attachments
 
 
+def _core_character():
+    """캐릭터 카드 저장용 코어 모듈(`character`).
+
+    `_core()`의 네 모듈 묶음에 끼우지 않는 이유는 `_core_tasks`와 같다 — 그 튜플은
+    여러 곳에서 `cfg, db, memo, profile = _core()`로 펼쳐 받고 있어, 한 칸 늘리면
+    캐릭터와 상관없는 호출부를 전부 고쳐야 한다.
+    """
+    _core()
+    import character
+
+    return character
+
+
 def _memory_paths(user_key: str):
     """그 사용자의 기억 파일 묶음(DataPaths).
 
@@ -2541,6 +2554,145 @@ async def memo_remove(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# 캐릭터 저장(namu-character-web 2단계) — POST 전용.
+#
+# 로그인 전에는 서버에 아무것도 쓰지 않는다 — 초안은 브라우저 localStorage에만
+# 있다(character_page.py). 로그인한 뒤에만 이 주소로 카드를 보내 저장한다.
+# 공개 저장소에는 캐릭터를 저장하지 않는다(기존 설계 원칙 — "캐릭터 일기는
+# 비공개 저장소에만 쓴다") — 비공개 확인은 `_check_repo_privacy`와 같은 장부
+# (`identity.get_repo_private`/`user_repo.check_repo_private`)를 그대로 쓴다.
+# 응답은 늘 JSON이다(화면 쪽이 fetch로만 부르고, 자바스크립트 없이 쓸 길이
+# 애초에 없다 — 이 화면 전체가 "자바스크립트가 켜져 있어야 움직여요"다).
+# ---------------------------------------------------------------------------
+def _character_save_sync(user_key: str, card: dict, base_version) -> Response:
+    with closing(identity.connect()) as conn:
+        row = identity.get_by_user_key(conn, user_key)
+        if row is None:
+            return JSONResponse(
+                {"error": "login_required", "message": "로그인이 필요합니다."},
+                status_code=401,
+            )
+        if not row.get("installation_id") or not row.get("repo_full_name"):
+            return JSONResponse(
+                {
+                    "error": "not_connected",
+                    "message": "저장소를 먼저 연결해야 캐릭터를 저장할 수 있습니다.",
+                },
+                status_code=409,
+            )
+
+        private = identity.get_repo_private(conn, user_key)
+        if private is None:
+            try:
+                private = user_repo.check_repo_private(conn, user_key)
+            except Exception as exc:
+                logger.warning(
+                    "캐릭터 저장: 저장소 공개 여부 확인 실패 (user_key=%s): %s", user_key, exc
+                )
+                return JSONResponse(
+                    {
+                        "error": "privacy_unknown",
+                        "message": "저장소가 비공개인지 확인하지 못했습니다. 잠시 후 다시 "
+                        "시도해 주세요.",
+                    },
+                    status_code=503,
+                )
+        if private is False:
+            return JSONResponse(
+                {
+                    "error": "public_repo",
+                    "message": "공개 저장소에는 캐릭터를 저장할 수 없습니다. 저장소를 "
+                    "비공개로 바꾼 뒤 다시 시도해 주세요.",
+                },
+                status_code=409,
+            )
+
+        try:
+            user_repo.ensure_ready(conn, user_key)
+        except user_repo.UserRepoError as exc:
+            logger.warning("캐릭터 저장: 저장소 준비 실패 (user_key=%s): %s", user_key, exc)
+            return JSONResponse(
+                {
+                    "error": "repo_not_ready",
+                    "message": "저장소를 준비하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                },
+                status_code=503,
+            )
+
+    character = _core_character()
+    paths = _memory_paths(user_key)
+    try:
+        result = character.save(card, base_version=base_version, via="web", paths=paths)
+    except ValueError as exc:
+        return JSONResponse({"error": "invalid_card", "message": str(exc)}, status_code=400)
+    except OSError as exc:
+        logger.warning("캐릭터 저장 실패 (user_key=%s): %s", user_key, exc)
+        return JSONResponse(
+            {
+                "error": "save_failed",
+                "message": "저장하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+            },
+            status_code=500,
+        )
+
+    try:
+        with closing(identity.connect()) as conn:
+            user_repo.push(conn, user_key, "캐릭터 저장(웹)")
+    except user_repo.UserRepoError as exc:
+        logger.warning("캐릭터 저장 후 push 실패 (user_key=%s): %s", user_key, exc)
+        return JSONResponse(
+            {
+                "error": "push_failed",
+                "message": "이 서버에는 저장했지만 회원님 저장소에 반영하지 못했습니다. "
+                "잠시 후 다시 시도해 주세요 — 그때까지는 다른 기기에서 보이지 않습니다.",
+                "id": result["id"],
+                "version": result["version"],
+                "name": result["name"],
+            },
+            status_code=502,
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": result["id"],
+            "version": result["version"],
+            "name": result["name"],
+            "created": result["created"],
+        }
+    )
+
+
+async def character_save(request: Request) -> Response:
+    """캐릭터 카드를 저장한다(POST 전용) — `/character` 화면의 "저장하기" 단추가 부른다."""
+    user_key = _session_user_key(request)
+    if not user_key:
+        return JSONResponse(
+            {"error": "login_required", "message": "로그인이 필요합니다."}, status_code=401
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"error": "bad_request", "message": "요청을 읽지 못했습니다."}, status_code=400
+        )
+    card = payload.get("card") if isinstance(payload, dict) else None
+    base_version = payload.get("base_version") if isinstance(payload, dict) else None
+    if not isinstance(card, dict):
+        return JSONResponse(
+            {"error": "bad_request", "message": "card가 없습니다."}, status_code=400
+        )
+    if base_version is not None and not isinstance(base_version, str):
+        return JSONResponse(
+            {"error": "bad_request", "message": "base_version은 글자여야 합니다."},
+            status_code=400,
+        )
+
+    return await run_in_threadpool(_character_save_sync, user_key, card, base_version)
+
+
+# ---------------------------------------------------------------------------
 # 주소 관리(namu-60) — 연결 시험 / 재발급 / 폐기. 셋 다 **POST 전용**이다.
 #
 # GET으로 두면 링크 프리페치나 채팅 미리보기 크롤러가 눌러 버릴 수 있고,
@@ -3012,6 +3164,8 @@ def build_auth_app() -> Starlette:
             # 떼기는 되돌릴 수 없으므로 POST 전용 — 링크 프리페치·미리보기
             # 크롤러가 눌러 버리는 사고를 방법(method) 단계에서 막는다.
             Route("/auth/memo/remove", memo_remove, methods=["POST"]),
+            # 캐릭터 저장(namu-character-web 2단계) — 서버에 쓰는 동작이라 POST 전용.
+            Route("/auth/character/save", character_save, methods=["POST"]),
             # 주소 관리 3종은 POST만 받는다 — GET(링크·프리페치)으로는 절대
             # 실행되지 않아야 한다(파괴적 동작).
             Route("/auth/mcp/test", mcp_test, methods=["POST"]),
