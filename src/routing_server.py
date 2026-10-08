@@ -93,10 +93,11 @@ EXPOSED_TOOLS = frozenset({
     "namu_create_upload_ticket", "namu_create_download_ticket",
     "namu_check_ticket",
     "namu_task_move",
-    # 나무 캐릭터 1단계 — 목록·스키마·저장·불러오기. 2단계 — 일기·핵심 기억. 잊기는 3단계.
+    # 나무 캐릭터 1단계 — 목록·스키마·저장·불러오기. 2단계 — 일기·핵심 기억. 3단계 — 잊기.
     "namu_character_list", "namu_character_schema",
     "namu_character_save", "namu_character_load",
     "namu_character_diary", "namu_character_core",
+    "namu_character_forget",
 })
 
 mcp = MCPServer(
@@ -264,8 +265,10 @@ _TOOL_DESCRIPTIONS = {
         "Load one character by name, alias or id. Returns `persona` (the "
         "character setting text built by the server from the card), "
         "`relationship` (stage, affection, how the character calls the user "
-        "now, time since the last talk), `recent_diary`, `core_memories`, "
-        "`pending_memories`, `guidance`, `card` and its `version`."
+        "now, time since the last talk), `recent_diary` (each with a readable "
+        "`when`), `core_memories`, `pending_memories`, `display` (a ready-made "
+        "markdown quote box to show the user as is), `guidance`, `card` and "
+        "its `version`."
     ),
     "namu_character_diary": (
         "Write one diary entry for a character (by name, alias or id) in this "
@@ -276,10 +279,19 @@ _TOOL_DESCRIPTIONS = {
         "records a new way the character calls the user. `core_candidates` "
         "(max 3, 200 characters each; at most 10 pending in total) are stored "
         "as pending long-term memories; only confirmed entries become core "
-        "memories. Relationship state is recomputed from all diary entries. "
-        "Rejected when the user's repository is public. Returns the applied "
+        "memories. `archive` keeps the whole conversation text as given (max "
+        "50,000 characters per piece) linked to this entry; send it only when "
+        "the user asks to keep the conversation. One conversation gets one "
+        "entry: send the first piece with the entry and each next piece with "
+        "only `append_to` (the entry id) and `archive`; pieces are numbered "
+        "and timestamped. An oversize piece does not block a new entry — the "
+        "entry is saved and `archive_rejected` explains. Relationship state is "
+        "recomputed from all diary entries. Rejected when the user's "
+        "repository is public. Returns `id`, `at`, `when`, the applied "
         "`affection_delta`, `clipped_from`, `relationship`, `stage_change`, "
-        "`pending_added` and `pending_count`."
+        "`pending_added`, `pending_count`, `archived` and `archive`; with "
+        "`append_to`, `appended`, `archive`, `archive_parts` and "
+        "`archive_chars`."
     ),
     "namu_character_core": (
         "List, confirm or reject a character's pending long-term memories. "
@@ -289,6 +301,21 @@ _TOOL_DESCRIPTIONS = {
         "any id is not pending, nothing is changed. Confirm and reject are "
         "rejected when the user's repository is public. Returns `pending`, "
         "`core` and `confirmed` or `rejected`."
+    ),
+    "namu_character_forget": (
+        "Delete a character's records when the user asks to forget them. "
+        "`target` is \"diary\", \"core\", \"archive\" or \"character\" (the "
+        "whole character; takes no `ids`). Three steps: without `ids` it lists "
+        "the entries to choose from (latest first, filtered by `query`); with "
+        "`ids` and no `confirm` it shows what will be deleted, a `confirm` "
+        "code, a notice and the relationship after deleting; with the same "
+        "arguments plus that `confirm` code it deletes. Show the preview and "
+        "the notice to the user and confirm only after the user agrees. "
+        "Forgetting a diary entry also deletes its archive and the pending and "
+        "core memories that came from it; relationship state is recomputed. "
+        "The code is rejected if anything changed after the preview. Deleted "
+        "records stay in the repository's git history (see `notice`). Allowed "
+        "on a public repository."
     ),
 }
 
@@ -327,6 +354,8 @@ _TOOL_ANNOTATIONS = {
     # reject는 대기 후보를 지운다.
     "namu_character_core": _annotations("Confirm or reject character memories", read_only=False,
                                         destructive=True),
+    "namu_character_forget": _annotations("Forget character records", read_only=False,
+                                          destructive=True),
 }
 
 
@@ -1912,7 +1941,7 @@ def namu_list_files(
 
 
 # ---------------------------------------------------------------------------
-# 캐릭터(나무 캐릭터 1·2단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
+# 캐릭터(나무 캐릭터 1~3단계) — 저장·읽기 로직은 코어 character.py에 있다. 여기는
 # 회원 폴더로 갈아 끼우고, 공개 저장소를 막고, 쓴 뒤 올리는 일만 한다.
 # ---------------------------------------------------------------------------
 def _require_private_repo(conn: sqlite3.Connection, user_key: str) -> None:
@@ -2001,13 +2030,15 @@ def namu_character_load(name: str, ctx: Context | None = None) -> dict:
 @tool()
 def namu_character_diary(
     name: str,
-    summary: str,
+    summary: str | None = None,
     affection_delta: int = 0,
     delta_reason: str | None = None,
     mood: str | None = None,
     call_user_change: str | None = None,
     topics: list[str] | None = None,
     core_candidates: list[str] | None = None,
+    archive: str | None = None,
+    append_to: str | None = None,
     ctx: Context | None = None,
 ) -> dict:
     key = _resolve_user(ctx)
@@ -2018,7 +2049,8 @@ def namu_character_diary(
         result = character.write_diary(
             name, summary, affection_delta, delta_reason, mood=mood,
             call_user_change=call_user_change, topics=topics,
-            core_candidates=core_candidates, via=via, paths=_paths_for_user(key),
+            core_candidates=core_candidates, archive=archive, append_to=append_to,
+            via=via, paths=_paths_for_user(key),
         )
         warning = _push_and_collect_warning(conn, key)
     if warning:
@@ -2042,6 +2074,33 @@ def namu_character_core(
             return character.core(name, action, ids, via=via, paths=_paths_for_user(key))
         _require_private_repo(conn, key)
         result = character.core(name, action, ids, via=via, paths=_paths_for_user(key))
+        warning = _push_and_collect_warning(conn, key)
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@tool()
+def namu_character_forget(
+    name: str,
+    target: str,
+    ids: list[str] | None = None,
+    confirm: str | None = None,
+    query: str | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    key = _resolve_user(ctx)
+    _resolve_via(ctx)
+    with closing(identity.connect()) as conn:
+        _sync_or_reject(conn, key)
+        # 비공개 확인을 거치지 않는다 — 지우기는 공개 저장소에서 사적인 글을 걷어내는
+        # 길이기도 해서, 막으면 오히려 설계서 12장의 목적에 어긋난다.
+        result = character.forget(
+            name, target, ids, confirm=confirm, query=query, paths=_paths_for_user(key),
+        )
+        # 실제로 지운 단계에서만 올린다 — 고르기·미리 보기는 아무것도 바꾸지 않는다.
+        if result.get("step") != "done":
+            return result
         warning = _push_and_collect_warning(conn, key)
     if warning:
         result["warning"] = warning

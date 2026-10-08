@@ -1,4 +1,4 @@
-"""캐릭터 도구(나무 캐릭터 1·2단계) — 회원 폴더로 갈라 쓰기, 공개 저장소 거절, 올리기.
+"""캐릭터 도구(나무 캐릭터 1~3단계) — 회원 폴더로 갈라 쓰기, 공개 저장소 거절, 올리기.
 
 저장·검사 로직 자체는 코어(vendor/namu-agent/namu-plugin/test_character.py)가 검사한다.
 여기서는 이 서버가 더하는 몫만 본다.
@@ -187,6 +187,7 @@ def test_character_tools_are_exposed():
         "namu_character_list", "namu_character_schema",
         "namu_character_save", "namu_character_load",
         "namu_character_diary", "namu_character_core",
+        "namu_character_forget",
     } <= rs.EXPOSED_TOOLS
 
 
@@ -234,3 +235,58 @@ def test_diaries_are_kept_per_member():
     rs.namu_character_diary("하린", "앨리스와.", 5, "즐거움", ctx=_FakeCtx(ALICE))
     assert rs.namu_character_load("하린", ctx=_FakeCtx(ALICE))["relationship"]["affection"] == 15
     assert rs.namu_character_load("하린", ctx=_FakeCtx(BOB))["relationship"]["affection"] == 10
+
+
+# ── 3단계: 원문 보관·잊기 ────────────────────────────────────────────────────
+def test_archive_is_passed_to_the_core(_connected_member, tmp_path):
+    saved = rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    out = rs.namu_character_diary("하린", "수다.", archive="허니: 안녕\n하린: 안녕!",
+                                  ctx=_FakeCtx(ALICE))
+    assert out["archived"] is True
+    char_dir = tmp_path / "users" / ALICE / "memory" / "character" / saved["id"]
+    assert len(list((char_dir / "archive").glob("*.yaml"))) == 1
+
+
+
+def test_append_to_adds_a_piece_to_the_same_diary(_connected_member, tmp_path):
+    saved = rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    first = rs.namu_character_diary("하린", "긴 수다.", archive="1부",
+                                    ctx=_FakeCtx(ALICE))
+    more = rs.namu_character_diary("하린", append_to=first["id"], archive="2부",
+                                   ctx=_FakeCtx(ALICE))
+    assert more["appended"] is True and more["archive_parts"] == 2
+    char_dir = tmp_path / "users" / ALICE / "memory" / "character" / saved["id"]
+    assert len(list((char_dir / "diary").glob("*.yaml"))) == 1
+    assert len(list((char_dir / "archive").glob("*.yaml"))) == 2
+
+
+def test_forget_goes_choose_preview_done_and_pushes_once(_connected_member, tmp_path):
+    saved = rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    diary = rs.namu_character_diary("하린", "수다.", 5, "즐거움", ctx=_FakeCtx(ALICE))
+    pushes = _connected_member["pushes"]
+    assert len(pushes) == 2
+
+    chosen = rs.namu_character_forget("하린", "diary", ctx=_FakeCtx(ALICE))
+    assert chosen["step"] == "choose" and chosen["entries"][0]["id"] == diary["id"]
+    preview = rs.namu_character_forget("하린", "diary", [diary["id"]], ctx=_FakeCtx(ALICE))
+    assert preview["step"] == "preview" and preview["confirm"]
+    # 고르기·미리 보기는 아무것도 바꾸지 않으니 올리지 않는다.
+    assert len(pushes) == 2
+
+    done = rs.namu_character_forget("하린", "diary", [diary["id"]],
+                                    confirm=preview["confirm"], ctx=_FakeCtx(ALICE))
+    assert done["step"] == "done" and done["relationship"]["affection"] == 10
+    char_dir = tmp_path / "users" / ALICE / "memory" / "character" / saved["id"]
+    assert not list((char_dir / "diary").glob("*.yaml"))
+    assert pushes == [ALICE] * 3
+
+
+def test_forget_is_allowed_on_a_public_repository(_connected_member, tmp_path):
+    saved = rs.namu_character_save(_card(), ctx=_FakeCtx(ALICE))
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, ALICE, False)
+    preview = rs.namu_character_forget("하린", "character", ctx=_FakeCtx(ALICE))
+    rs.namu_character_forget("하린", "character", confirm=preview["confirm"],
+                             ctx=_FakeCtx(ALICE))
+    assert not (tmp_path / "users" / ALICE / "memory" / "character" / saved["id"]).exists()
+    assert rs.namu_character_list(ctx=_FakeCtx(ALICE))["characters"] == []
