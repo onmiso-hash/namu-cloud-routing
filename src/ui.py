@@ -603,6 +603,8 @@ GITHUB_URL = "https://github.com/onmiso-hash/namu-agent"
 # 그리로 보내면 방문자가 한 번 더 눌러야 진짜 안내서에 닿는다.
 GUIDE_SITE = "https://onmiso-hash.github.io/namu-agent/docs"
 GUIDE_URL = f"{GUIDE_SITE}/index.html"
+# 로그인한 사람의 머리줄에서 '캐릭터' 메뉴가 가리키는 곳(내 캐릭터 목록).
+MY_CHARACTERS_PATH = "/auth/character"
 INSTALL_GUIDE_URL = f"{GUIDE_SITE}/install_guide.html"
 SELFHOST_GUIDE_URL = f"{GUIDE_SITE}/remote_mcp_guide.html"
 
@@ -650,6 +652,18 @@ def topbar(current: str = "", cta: str = "me", lang: str = "ko") -> str:
     """
     en = lang == "en"
     menu = MENU_EN if en else MENU
+    # 로그인한 사람에게 '캐릭터'는 만들기 화면이 아니라 내 캐릭터 목록이다 —
+    # 내 페이지를 거쳐야만 목록에 갈 수 있어 불편했다(2026-10-08). 단추를 하나
+    # 더 붙이지 않고 메뉴 항목을 바꾸는 이유는 머리줄 폭이 이미 빠듯해서다.
+    # 목록 화면에 '+ 새 캐릭터 만들기'가 있어 만들기로 가는 길은 남는다.
+    if cta == "me":
+        mine = "Characters" if en else "내 캐릭터"
+        menu = tuple(
+            (MY_CHARACTERS_PATH, mine) if path in ("/character", "/en/character") else (path, label)
+            for path, label in menu
+        )
+        if current in ("/character", "/en/character"):
+            current = MY_CHARACTERS_PATH
     items = "".join(
         '<li><a href="%s"%s>%s</a></li>'
         % (path, ' class="on"' if path == current else "", html.escape(label))

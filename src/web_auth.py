@@ -117,9 +117,16 @@ _SESSION_COOKIE_NAME = "namu_session"
 # state는 로그인 왕복(브라우저→GitHub→콜백) 동안만 살아있으면 된다 — 짧을수록
 # CSRF에 악용될 수 있는 창이 좁아진다.
 _STATE_COOKIE_TTL_SEC = 600
-# 콜백 직후 저장소가 2개 이상이라 select-repo로 한 번 더 왕복해야 하는 경우까지
-# 감안한 여유(사용자가 화면을 보고 고르는 시간 포함).
-_SESSION_COOKIE_TTL_SEC = 1800
+# 처음엔 저장소 고르기 왕복만 감안해 30분이었는데, 공개 화면(캐릭터 만들기 등)
+# 까지 로그인 상태로 둘러보게 되면서 너무 짧아졌다 — 30일로 늘린다(2026-10-08).
+_SESSION_COOKIE_TTL_SEC = 30 * 24 * 3600
+# 세션 쿠키는 사이트 전체(`/`)에 심는다. 예전엔 `/auth`에만 심어서 공개 화면
+# (`/`, `/character` 등)이 늘 비로그인으로 보였다 — 머리줄의 [내 페이지]가
+# 사라지고, 캐릭터 만들기 화면이 로그인한 사람에게도 "로그인하고 저장하기"만
+# 보여 저장이 한 번도 일어나지 않았다(2026-10-08 실사용에서 발견).
+_SESSION_COOKIE_PATH = "/"
+# 로그인을 마친 뒤 돌아갈 화면. 로그인 왕복(state 쿠키)과 수명이 같다.
+_LOGIN_NEXT_COOKIE_NAME = "namu_login_next"
 
 _DEFAULT_APP_SLUG = "namu-memory-app"
 
@@ -925,7 +932,7 @@ def _html_me_connected(
         "<p>만든 캐릭터를 모아 보고, 고치거나 지울 수 있습니다.</p>"
         '<div class="btn-row" style="margin-bottom:0">'
         '<a class="btn btn-primary" href="/auth/character">내 캐릭터 보기</a>'
-        '<a class="btn" href="/character">+ 새 캐릭터 만들기</a>'
+        '<a class="btn" href="/character?new=1">+ 새 캐릭터 만들기</a>'
         "</div></div>",
     ]
     if mcp_url:
@@ -1221,6 +1228,40 @@ _NOTICE_NO_SECRET_TO_TEST = _html_notice(
 # ---------------------------------------------------------------------------
 # 라우트
 # ---------------------------------------------------------------------------
+def _set_session(resp: Response, user_key: str) -> None:
+    """세션 쿠키를 심는다 — login 콜백의 모든 갈래가 이 함수 하나를 지난다.
+
+    옛 `/auth` 경로 쿠키가 남아 있으면 지운다. 같은 이름이 두 경로에 있으면
+    `/auth` 아래에서는 두 개가 함께 실려 와 어느 쪽이 읽힐지 브라우저 순서에
+    달리게 된다.
+    """
+    resp.set_cookie(
+        _SESSION_COOKIE_NAME,
+        _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
+        max_age=_SESSION_COOKIE_TTL_SEC,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path=_SESSION_COOKIE_PATH,
+    )
+    resp.delete_cookie(_SESSION_COOKIE_NAME, path="/auth")
+
+
+def _safe_next(raw: "str | None") -> "str | None":
+    """로그인 뒤 돌아갈 주소로 쓸 수 있는 **이 사이트 안의 경로**만 통과시킨다.
+
+    `//evil.com`·`/\\evil.com`처럼 브라우저가 다른 사이트로 읽는 모양과
+    줄바꿈이 섞인 값은 버린다 — 열린 리다이렉트를 만들지 않기 위해서다.
+    """
+    if not raw or len(raw) > 200:
+        return None
+    if not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
+        return None
+    if any(c in raw for c in "\r\n\t") or raw.startswith("/auth/github"):
+        return None
+    return raw
+
+
 async def login(request: Request) -> Response:
     state = secrets.token_urlsafe(24)
     query = urlencode({"client_id": ga.client_id(), "state": state})
@@ -1239,6 +1280,20 @@ async def login(request: Request) -> Response:
         samesite="lax",
         path="/auth",
     )
+    next_path = _safe_next(request.query_params.get("next"))
+    if next_path:
+        resp.set_cookie(
+            _LOGIN_NEXT_COOKIE_NAME,
+            _sign_with_expiry(next_path, _STATE_COOKIE_TTL_SEC),
+            max_age=_STATE_COOKIE_TTL_SEC,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/auth",
+        )
+    elif request.cookies.get(_LOGIN_NEXT_COOKIE_NAME):
+        # 앞서 다른 화면에서 시작했다 그만둔 로그인의 돌아갈 곳이 남아 있으면 지운다.
+        resp.delete_cookie(_LOGIN_NEXT_COOKIE_NAME, path="/auth")
     return resp
 
 
@@ -1319,16 +1374,14 @@ async def callback(request: Request) -> Response:
                     already_connected.get("repo_full_name"):
                 logger.info("GitHub 로그인 완료(기존 연결 유지, user_key=%s)", user_key)
                 _check_repo_privacy(conn, user_key)
-                resp = RedirectResponse(url="/auth/me", status_code=302)
-                resp.set_cookie(
-                    _SESSION_COOKIE_NAME,
-                    _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
-                    max_age=_SESSION_COOKIE_TTL_SEC,
-                    httponly=True,
-                    secure=True,
-                    samesite="lax",
-                    path="/auth",
+                # 로그인을 시작한 화면이 돌아갈 곳을 남겼으면(캐릭터 만들기의
+                # "로그인하고 저장하기" 등) 그리로, 아니면 내 페이지로 보낸다.
+                next_path = _safe_next(
+                    _unsign_with_expiry(request.cookies.get(_LOGIN_NEXT_COOKIE_NAME))
                 )
+                resp = RedirectResponse(url=next_path or "/auth/me", status_code=302)
+                _set_session(resp, user_key)
+                resp.delete_cookie(_LOGIN_NEXT_COOKIE_NAME, path="/auth")
                 resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
                 return resp
 
@@ -1360,15 +1413,7 @@ async def callback(request: Request) -> Response:
             if not installation_ids:
                 logger.info("GitHub 로그인 완료(저장소 미연결, user_key=%s)", user_key)
                 resp = RedirectResponse(url="/auth/repo", status_code=302)
-                resp.set_cookie(
-                    _SESSION_COOKIE_NAME,
-                    _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
-                    max_age=_SESSION_COOKIE_TTL_SEC,
-                    httponly=True,
-                    secure=True,
-                    samesite="lax",
-                    path="/auth",
-                )
+                _set_session(resp, user_key)
                 resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
                 return resp
 
@@ -1446,15 +1491,7 @@ async def callback(request: Request) -> Response:
     logger.info("GitHub 로그인 완료 (user_key=%s)", user_key)
 
     resp = HTMLResponse(body_html)
-    resp.set_cookie(
-        _SESSION_COOKIE_NAME,
-        _sign_with_expiry(user_key, _SESSION_COOKIE_TTL_SEC),
-        max_age=_SESSION_COOKIE_TTL_SEC,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        path="/auth",
-    )
+    _set_session(resp, user_key)
     resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
     # "만들었어요" 표시는 이 왕복에서 쓰고 버린다 — 남겨 두면 나중에 저장소를
     # 바꾸려고 다시 온 사람이 옛 이름으로 조용히 연결되는 사고가 난다.
@@ -2744,7 +2781,7 @@ def _html_character_list(rows: list, notice_html: str = "") -> str:
         + notice_html
         + '<p class="lead">저장한 캐릭터를 고치거나 지울 수 있습니다.</p>'
         + listing
-        + '<p><a href="/character">+ 새 캐릭터 만들기</a> · '
+        + '<p><a href="/character?new=1">+ 새 캐릭터 만들기</a> · '
         '<a href="/auth/me">← 내 페이지로</a></p>'
     )
     return _html_page("NAMU 내 캐릭터", body)
@@ -3200,8 +3237,9 @@ async def ask_endpoint(request: Request) -> Response:
 
 async def logout(request: Request) -> Response:
     """세션 쿠키를 지운다. path가 set_cookie와 어긋나면 지워지지 않으므로
-    login/callback과 반드시 같은 `path="/auth"`를 쓴다."""
+    `_set_session`과 같은 경로를 쓰고, 옛 `/auth` 경로 쿠키도 함께 지운다."""
     resp = HTMLResponse(_html_logged_out())
+    resp.delete_cookie(_SESSION_COOKIE_NAME, path=_SESSION_COOKIE_PATH)
     resp.delete_cookie(_SESSION_COOKIE_NAME, path="/auth")
     return resp
 

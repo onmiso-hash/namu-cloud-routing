@@ -79,7 +79,7 @@ def test_page_links_only_to_known_places():
     import pages_en
 
     known = set(pages.PAGES) | set(pages_en.PAGES) | set(character_page.PAGES)
-    known |= {"/auth/github/login", "/auth/me"} | set(ui.ICON_PATHS)
+    known |= {"/auth/github/login", "/auth/me", ui.MY_CHARACTERS_PATH} | set(ui.ICON_PATHS)
     out = character_page.character_page(False)
 
     for href in re.findall(r'href="(/[^"]*)"', out):

@@ -43,7 +43,10 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 
 만들던 내용은 로그인 여부와 상관없이 늘 브라우저(localStorage)에 먼저 남는다.
 로그인하지 않은 채로는 "저장하기" 대신 로그인 유도 단추만 보이고, 서버에는
-아무것도 쓰이지 않는다 — 결과는 복사하기로 직접 가져갈 수 있다. 로그인한
+아무것도 쓰이지 않는다 — 결과는 복사하기로 직접 가져갈 수 있다. 로그인 유도
+단추는 `?next=`로 이 화면에 돌아오게 하고, 브라우저에 표시를 남겨 두었다가
+돌아오면 곧장 저장한다(로그인만 하고 저장은 안 된 채 끝나던 문제, 2026-10-08).
+"+ 새 캐릭터 만들기"는 `?new=1`로 들어와 이미 저장한 카드의 초안을 비운다. 로그인한
 뒤에는 "저장하기"가 `/auth/character/save`(POST, `web_auth.character_save`)로
 카드를 보내 저장한다. 그 주소가 로그인·저장소 연결·비공개 확인까지 다시
 검사하므로, 이 화면은 로그인 여부만 보고 단추를 가를 뿐 보안 판단을 하지
@@ -249,6 +252,7 @@ _TEXT = {
         "save_login": "로그인하고 저장하기",
         "connect_hint": "저장한 캐릭터를 쓰려면 AI에 나무를 연결하세요.",
         "connect_link": "내 AI에 연결하기 →",
+        "mine_link": "내 캐릭터 보기 →",
         "tab_md": "미리보기 글",
         "copy": "복사하기",
         "preview_label": "캐릭터 미리보기",
@@ -301,6 +305,7 @@ _TEXT = {
         "save_login": "Sign in to save",
         "connect_hint": "To use a saved character, connect Namu to your AI.",
         "connect_link": "Connect my AI (Korean) →",
+        "mine_link": "My characters (Korean) →",
         "tab_md": "Preview text",
         "copy": "Copy",
         "preview_label": "Character preview",
@@ -464,6 +469,20 @@ const SAVED_KEY = KEY + ':saved';
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const byKey = {}; QS.forEach(q => { byKey[q.key] = q; });
+const PENDING_KEY = KEY + ':save-after-login';
+
+/* "+ 새 캐릭터 만들기"(`?new=1`)로 들어왔을 때, 이 브라우저의 초안이 이미 저장한
+   캐릭터(또는 고치던 캐릭터)라면 비우고 새로 시작한다. 그대로 두면 저장 번호가
+   남아 새 캐릭터가 앞 캐릭터를 고친 판으로 저장된다. 아직 저장하지 않은 초안은
+   만들던 중이므로 지우지 않는다. */
+if (new URLSearchParams(location.search).has('new') && !document.getElementById('cm-edit-data')) {
+  try {
+    if (localStorage.getItem(SAVED_KEY)) {
+      [KEY, SAVED_KEY, KEY + ':passed'].forEach(k => localStorage.removeItem(k));
+    }
+    history.replaceState(null, '', location.pathname);
+  } catch(e) {}
+}
 
 /* 브라우저에 남은 초안을 읽되, 지금 틀에 맞지 않는 값은 버린다
    (질문이 바뀌었거나 손으로 고친 값이 섞여 있어도 화면이 깨지지 않게). */
@@ -724,6 +743,11 @@ if (LOGGED_IN) {
   });
 } else {
   $('cm-save-login').hidden = false;
+  /* 로그인하고 돌아오면 저장까지 이어서 하라는 표시 — 로그인 단추는 로그인만
+     해 주므로, 표시가 없으면 저장을 누른 사람이 저장되지 않은 채 남는다. */
+  $('cm-save-login').addEventListener('click', () => {
+    try { localStorage.setItem(PENDING_KEY, '1'); } catch(e) {}
+  });
 }
 
 let mode = 'json';
@@ -756,6 +780,13 @@ $('cm-copy').addEventListener('click', async () => {
 $('cm-nav').hidden = false;
 buildLeaves();
 renderStep();
+
+/* 로그인하고 저장하기를 눌러 로그인을 마치고 돌아왔다 — 결과 화면을 열고 바로 저장한다. */
+let pending = null;
+try { pending = localStorage.getItem(PENDING_KEY); localStorage.removeItem(PENDING_KEY); } catch(e) {}
+if (pending && LOGGED_IN && QS.some(answered)) {
+  renderCard(); showResult(); $('cm-save').click();
+}
 })();
 </script>"""
 
@@ -789,13 +820,15 @@ def character_page(logged_in: bool = False, edit: dict | None = None, lang: str 
         f'<p class="cm-hint">{e(t["done_hint"])}</p>'
         '<div class="cm-save">'
         f'<button type="button" class="btn btn-primary" id="cm-save" hidden>{e(t["save"])}</button>'
-        '<a class="btn btn-primary" id="cm-save-login" href="/auth/github/login" hidden>'
+        '<a class="btn btn-primary" id="cm-save-login" '
+        f'href="/auth/github/login?next={PATH_EN if lang == "en" else PATH}" hidden>'
         f"{e(t['save_login'])}</a>"
         '<span class="cm-save-msg" id="cm-save-msg" role="status"></span>'
         "</div>"
         '<p class="cm-connect-hint" id="cm-connect-hint" hidden>'
         f"{e(t['connect_hint'])} "
-        f'<a href="/auth/me">{e(t["connect_link"])}</a></p>'
+        f'<a href="/auth/me">{e(t["connect_link"])}</a> · '
+        f'<a href="{ui.MY_CHARACTERS_PATH}">{e(t["mine_link"])}</a></p>'
         '<div class="cm-tabs">'
         '<button type="button" class="cm-chip" id="cm-tab-json" aria-pressed="true">JSON</button>'
         f'<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">{e(t["tab_md"])}</button>'

@@ -2866,3 +2866,55 @@ def test_character_delete_rejects_stale_confirm_token(client, monkeypatch, tmp_p
     assert "지우지 못했습니다" in r.text
     assert not pushes
     assert wa._core_character().find(result["id"], paths=paths) is not None
+
+
+# ---------------------------------------------------------------------------
+# 로그인 상태가 공개 화면에도 이어지는지 (2026-10-08) — 세션 쿠키가 `/auth`에만
+# 심겨 있어 `/character`·`/`가 늘 비로그인으로 보였고, 캐릭터 저장이 한 번도
+# 일어나지 않았다.
+# ---------------------------------------------------------------------------
+def test_session_cookie_is_site_wide_so_public_pages_see_login(client, monkeypatch):
+    _connect_via_login(client, monkeypatch, github_id=20031, repo="ain/memories")
+    state2 = _do_login(client)
+    fake2, _ = _make_fake_http_json(github_id=20031)
+    monkeypatch.setattr(wa, "_http_json", fake2)
+    r = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode-2"},
+        follow_redirects=False,
+    )
+    session = [h for h in r.headers.get_list("set-cookie")
+               if h.startswith(wa._SESSION_COOKIE_NAME + "=") and "Max-Age=0" not in h]
+    assert session and "Path=/;" in session[0] + ";"
+
+    page = client.get("/character").text
+    assert "const LOGGED_IN = true" in page
+    assert ">내 캐릭터<" in page and 'href="/auth/character"' in page
+    assert 'class="btn" href="/auth/me">내 페이지<' in page
+
+
+def test_login_returns_to_next_page_for_connected_member(client, monkeypatch):
+    _connect_via_login(client, monkeypatch, github_id=20032, repo="ain/memories")
+    r = client.get("/auth/github/login", params={"next": "/character"}, follow_redirects=False)
+    state2 = _extract_state(r.headers["location"])
+    fake2, _ = _make_fake_http_json(github_id=20032)
+    monkeypatch.setattr(wa, "_http_json", fake2)
+    r2 = client.get(
+        "/auth/github/callback",
+        params={"state": state2, "code": "goodcode-2"},
+        follow_redirects=False,
+    )
+    assert r2.headers["location"] == "/character"
+
+
+@pytest.mark.parametrize("raw", [
+    "//evil.com", "/\\evil.com", "https://evil.com", "evil", "/a\r\nSet-Cookie:x",
+    "/auth/github/login", "", None, "/" + "a" * 300,
+])
+def test_safe_next_rejects_outside_or_odd_paths(raw):
+    assert wa._safe_next(raw) is None
+
+
+def test_safe_next_keeps_site_paths():
+    assert wa._safe_next("/character") == "/character"
+    assert wa._safe_next("/en/character") == "/en/character"
