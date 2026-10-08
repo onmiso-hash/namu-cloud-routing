@@ -188,6 +188,7 @@ _CSS = (
     ".cm-save-msg{font-size:.9rem;color:var(--fg-soft);}"
     ".cm-save-msg.ok{color:var(--ok);}"
     ".cm-save-msg.err{color:var(--danger);}"
+    ".cm-connect-hint{margin:0 0 22px;font-size:.9rem;color:var(--fg-soft);}"
     "@media (max-width:520px){.cm-panel{padding:20px 18px;}.cm-card{padding:0 18px 18px;}}"
     "@media (prefers-reduced-motion:reduce){.cm-twig .leafshape.on{transition:none;}"
     ".cm-twig .spark.go{animation:none;}}"
@@ -432,6 +433,7 @@ if (LOGGED_IN) {
         setSaved({id: data.id, version: data.version});
         msg.className = 'cm-save-msg ok';
         msg.textContent = `저장했어요(${data.name}). 나무에 연결된 AI에게 이름을 말하면 불러와요.`;
+        $('cm-connect-hint').hidden = false;
       } else {
         msg.className = 'cm-save-msg err';
         msg.textContent = (data && data.message) || '저장하지 못했어요. 잠시 후 다시 시도해 주세요.';
@@ -510,6 +512,9 @@ def character_page(logged_in: bool = False) -> str:
         "로그인하고 저장하기</a>"
         '<span class="cm-save-msg" id="cm-save-msg" role="status"></span>'
         "</div>"
+        '<p class="cm-connect-hint" id="cm-connect-hint" hidden>'
+        "저장한 캐릭터를 쓰려면 AI에 나무를 연결하세요. "
+        '<a href="/auth/me">내 AI에 연결하기 →</a></p>'
         '<div class="cm-tabs">'
         '<button type="button" class="cm-chip" id="cm-tab-json" aria-pressed="true">JSON</button>'
         '<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">미리보기 글</button>'
