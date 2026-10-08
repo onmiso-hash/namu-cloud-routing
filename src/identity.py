@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_at      TEXT NOT NULL,
     last_seen_at    TEXT NOT NULL,
     mcp_secret      TEXT,
-    mcp_revoked_at  TEXT
+    mcp_revoked_at  TEXT,
+    repo_private    INTEGER
 );
 """
 
@@ -131,6 +132,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         # 폐기 표시 칸(namu-60). 기존 가입자는 전부 NULL = "폐기한 적 없음"이라
         # 기본 동작(비어 있으면 발급)이 그대로 유지된다.
         conn.execute("ALTER TABLE users ADD COLUMN mcp_revoked_at TEXT")
+    if "repo_private" not in existing_cols:
+        # 연결한 저장소가 비공개인지(나무 캐릭터). NULL = 아직 확인 안 함 — 기존
+        # 가입자는 전부 여기서 시작하고, 다음 로그인이나 첫 캐릭터 저장 때 채워진다.
+        conn.execute("ALTER TABLE users ADD COLUMN repo_private INTEGER")
     conn.execute(_MCP_SECRET_INDEX_SQL)
     conn.commit()
     backfill_mcp_secrets(conn)
@@ -423,9 +428,11 @@ def set_installation(
             "repo_full_name은 'owner/repo' 형식이어야 합니다. "
             "repo_full_name must be 'owner/repo'."
         )
+    # 비공개 확인 값은 비운다 — 다른 저장소로 바꿔 연결했을 수 있으므로 옛 저장소의
+    # 답을 새 저장소에 물려주지 않는다(연결을 마친 쪽이 곧바로 다시 확인한다).
     cur = conn.execute(
-        "UPDATE users SET installation_id = ?, repo_full_name = ?, last_seen_at = ? "
-        "WHERE user_key = ?",
+        "UPDATE users SET installation_id = ?, repo_full_name = ?, last_seen_at = ?, "
+        "repo_private = NULL WHERE user_key = ?",
         (installation_id, repo_full_name.strip(), _utc_now_iso(), user_key),
     )
     if cur.rowcount == 0:
@@ -433,6 +440,27 @@ def set_installation(
             f"등록되지 않은 user_key입니다: {user_key} — 먼저 upsert_user로 등록하세요. "
             "Unknown user_key: call upsert_user() first."
         )
+    conn.commit()
+
+
+def get_repo_private(conn: sqlite3.Connection, user_key: str) -> "bool | None":
+    """연결한 저장소가 비공개인지 저장해 둔 답. 확인한 적이 없으면 None."""
+    row = conn.execute(
+        "SELECT repo_private FROM users WHERE user_key = ?", (_validate_user_key(user_key),)
+    ).fetchone()
+    if row is None or row["repo_private"] is None:
+        return None
+    return bool(row["repo_private"])
+
+
+def set_repo_private(conn: sqlite3.Connection, user_key: str, private: "bool | None") -> None:
+    """저장소 비공개 확인 결과를 저장한다(나무 캐릭터 — 캐릭터 일기는 비공개 저장소에만
+    쓴다). 로그인·저장소 연결 때 한 번 묻고 그 답을 계속 쓴다. None은 "모른다"다."""
+    value = None if private is None else int(bool(private))
+    conn.execute(
+        "UPDATE users SET repo_private = ? WHERE user_key = ?",
+        (value, _validate_user_key(user_key)),
+    )
     conn.commit()
 
 

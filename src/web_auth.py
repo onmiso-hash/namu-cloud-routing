@@ -1308,6 +1308,7 @@ async def callback(request: Request) -> Response:
             if already_connected and already_connected.get("installation_id") and \
                     already_connected.get("repo_full_name"):
                 logger.info("GitHub 로그인 완료(기존 연결 유지, user_key=%s)", user_key)
+                _check_repo_privacy(conn, user_key)
                 resp = RedirectResponse(url="/auth/me", status_code=302)
                 resp.set_cookie(
                     _SESSION_COOKIE_NAME,
@@ -1425,6 +1426,8 @@ async def callback(request: Request) -> Response:
                     )
                 else:
                     body_html = _html_select_repo_multi(user_key, pairs, truncated=truncated)
+            # 위 갈래 중 저장소를 연결한 경우만 실제로 묻는다(안 골랐으면 할 일 없음).
+            _check_repo_privacy(conn, user_key)
     except (ValueError, RuntimeError) as exc:
         resp = PlainTextResponse(str(exc), status_code=400)
         resp.delete_cookie(_STATE_COOKIE_NAME, path="/auth")
@@ -1447,6 +1450,23 @@ async def callback(request: Request) -> Response:
     # 바꾸려고 다시 온 사람이 옛 이름으로 조용히 연결되는 사고가 난다.
     resp.delete_cookie(_REPO_HINT_COOKIE_NAME, path="/auth")
     return resp
+
+
+def _check_repo_privacy(conn, user_key: str) -> None:
+    """로그인·저장소 연결을 마칠 때 저장소가 비공개인지 한 번 물어 장부에 적는다.
+
+    나무 캐릭터 — 캐릭터 일기는 비공개 저장소에만 쓰고, 그 판단에 이 답을 계속 쓴다
+    (다시 로그인하면 새로 묻는다). 아직 저장소를 안 고른 사람이면 할 일이 없다.
+    묻지 못해도 로그인은 막지 않는다 — 장부는 "모른다"로 남고, 첫 캐릭터 저장 때
+    다시 묻는다.
+    """
+    record = identity.get_by_user_key(conn, user_key)
+    if not record or not record.get("installation_id") or not record.get("repo_full_name"):
+        return
+    try:
+        user_repo.check_repo_private(conn, user_key)
+    except Exception as exc:  # noqa: BLE001 — 곁가지 확인이라 로그인을 깨지 않는다
+        logger.warning("저장소 비공개 확인 실패(user_key=%s): %s", user_key, exc)
 
 
 def _session_user_key(request: Request) -> "str | None":
@@ -1660,6 +1680,7 @@ async def select_repo(request: Request) -> Response:
     try:
         with closing(identity.connect()) as conn:
             identity.set_installation(conn, user_key, installation_id, repo)
+            _check_repo_privacy(conn, user_key)
             mcp_url = _mcp_url_for(request, conn, user_key)
     except ValueError as exc:
         return PlainTextResponse(str(exc), status_code=400)

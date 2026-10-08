@@ -372,6 +372,25 @@ def _require_connected(conn, user_key: str) -> dict:
     return record
 
 
+def check_repo_private(conn, user_key: str) -> bool:
+    """연결한 저장소가 비공개인지 GitHub에 묻고, 그 답을 장부에 저장한다(나무 캐릭터).
+
+    로그인·저장소 연결 때 한 번 부르고, 그 뒤로는 장부의 답을 계속 쓴다 — 다시
+    로그인하면 새로 묻는다(2026-10-08 허니 결정). 묻지 못하면 장부를 "모른다"(NULL)로
+    두고 예외를 그대로 올린다 — 모르는 것을 비공개로 적으면 공개 저장소에 사적인
+    글을 쓰게 된다.
+    """
+    record = _require_connected(conn, user_key)
+    try:
+        token = github_app.installation_token(record["installation_id"])
+        private = github_app.repo_is_private(record["repo_full_name"], token)
+    except Exception:
+        identity.set_repo_private(conn, user_key, None)
+        raise
+    identity.set_repo_private(conn, user_key, private)
+    return private
+
+
 # ---------------------------------------------------------------------------
 # 0) 첨부 격리 — `attach_file/`은 이 서버 사본으로 내려오지 않는다
 #    (namu-file-upload-download 3단계. 파일 도구보다 **먼저** 깔려야 한다.)
@@ -693,7 +712,11 @@ _COMMIT_AUTHOR_EMAIL = "namu-cloud-routing@users.noreply.github.com"
 # 넣지 않으면 쪽지를 한 번이라도 붙인 회원의 저장소에 다음 push의 `git add -A`가
 # 의미 없는 잠금 파일을 커밋해 올린다. 코어 개인용 동기화(memory_sync.LOCAL_EXCLUDE_LINES)
 # 도 같은 이유로 이 파일을 로컬 제외 목록에 넣는다 — 두 쪽이 같은 목록을 가져야 한다.
-_LOCAL_ONLY_CACHE_RELATIVE_PATHS = ("db/namu.db", "memory/.memo.lock")
+# memory/character/.character.lock도 같은 성격이다(코어 character.py가 카드를 저장하는
+# 동안 잡는 잠금, 코어 v0.1.95).
+_LOCAL_ONLY_CACHE_RELATIVE_PATHS = (
+    "db/namu.db", "memory/.memo.lock", "memory/character/.character.lock",
+)
 
 
 def _exclude_local_only_cache_paths(target: Path) -> None:

@@ -361,6 +361,28 @@ def repo_size_kb(repo_full_name: str, token: str) -> int:
     return size
 
 
+def repo_is_private(repo_full_name: str, token: str) -> bool:
+    """`GET /repos/{owner}/{repo}`의 `private` 필드를 installation token으로 조회한다.
+
+    캐릭터 그릇이 쓴다(나무 캐릭터 설계서 12장) — 캐릭터 일기는 사적인 글이라
+    공개 저장소에는 쓰지 않는다. 우리는 저장소를 만들지 않고 비공개가 미리 골라진
+    생성 화면으로 보낼 뿐이라, 회원이 공개로 바꿔 만들었거나 원래 있던 공개 저장소를
+    연결했을 수 있다.
+
+    응답에 `private`가 참·거짓으로 없으면 RuntimeError — 모를 때 비공개로 치면 공개
+    저장소에 사적인 글을 쓰게 된다.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{repo_full_name}"
+    payload = _get_json(url, token)
+    private = payload.get("private") if isinstance(payload, dict) else None
+    if not isinstance(private, bool):
+        raise RuntimeError(
+            f"GitHub 저장소 메타데이터 응답에 private가 없습니다 (repo={repo_full_name}) — "
+            "GitHub repository metadata response did not contain a boolean 'private'."
+        )
+    return private
+
+
 # ---------------------------------------------------------------------------
 # installation token 캐시 — 프로세스 메모리에만 둔다(디스크 기록 금지).
 # ---------------------------------------------------------------------------
