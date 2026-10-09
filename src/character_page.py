@@ -366,6 +366,245 @@ _TEXT = {
 }
 
 
+# ---------------------------------------------------------------------------
+# AI 연결 안내(설계서 10장·11장 3번·14장 5단계) — 캐릭터를 불러오게 하는 지침 글.
+#
+# 글은 여기 한 곳에서만 만든다. 만들기 화면은 저장 응답(`web_auth.character_save`)에
+# 실려 온 글을 표시만 하고, 내 캐릭터 목록은 그릴 때 이 함수를 부른다 — 문구를
+# 고칠 때 자바스크립트와 파이썬 두 군데를 맞출 일이 없게 하기 위해서다.
+# 도구 이름은 실제 MCP 도구 이름(namu_character_*)으로 적는다. AI가 설계서의
+# 기능 이름(load·diary)으로는 도구를 찾지 못할 수 있다.
+# ---------------------------------------------------------------------------
+_CONNECT_RULES = {
+    "ko": (
+        "{first}namu_character_load(name={qname})를 부르고, 받은 설정 글대로 대화한다.",
+        "대화 중 알게 된 사용자에 대한 새 사실은 namu_record(bowl=profile)로 남긴다. "
+        "둘이 함께 쌓은 추억은 캐릭터 기억이니 일기에 담는다. 어느 쪽인지 애매하면 "
+        "사용자에게 묻는다.",
+        '사용자가 "오늘은 여기까지", "잘 자", "나중에 봐" 같은 마무리 말을 하면 '
+        "namu_character_diary로 일기를 쓴다.",
+        '대화 원문은 사용자가 "이 대화 통째로 남겨 줘"라고 할 때만 일기와 함께 '
+        "보관한다(archive).",
+        "오래 기억할 만한 순간은 일기에 핵심 기억 후보로만 올린다. 사용자에게 물어 "
+        "좋다고 한 것만 namu_character_core로 확정한다.",
+    ),
+    "en": (
+        "{first}call namu_character_load(name={qname}), then talk as the "
+        "setting text you receive describes.",
+        "New facts about the user that come up in conversation go to "
+        "namu_record(bowl=profile). Memories the two of you make together belong to "
+        "the character and go into the diary. If it's unclear which, ask the user.",
+        'When the user says something like "that\'s it for today", "good night" or '
+        '"see you later", write a diary entry with namu_character_diary.',
+        "Keep the full conversation text (archive) with the diary only when the user "
+        'asks, e.g. "save this whole conversation".',
+        "Moments worth keeping for a long time go into the diary only as core memory "
+        "candidates. Confirm with namu_character_core only the ones the user agrees to.",
+    ),
+}
+
+_CONNECT_FRAME = {
+    "ko": {
+        "first_project": "대화가 시작되면 먼저 ",
+        "first": "먼저 ",
+        "project_intro": "이 프로젝트에서는 나무 캐릭터로 대화한다(캐릭터 이름: {name}).",
+        "claude_md_head": "## 나무 캐릭터 — {name}",
+        "claude_md_intro": "사용자가 캐릭터 이름({name})을 부르거나 캐릭터와 대화하자고 하면 "
+        "나무 캐릭터로 대화한다.",
+        "command_desc": "나무 캐릭터 불러오기 — {name}",
+        "command_intro": "지금부터 나무 캐릭터로 대화한다(캐릭터 이름: {name}).",
+    },
+    "en": {
+        "first_project": "When a conversation starts, first ",
+        "first": "First ",
+        "project_intro": "In this project, you talk as a Namu character (name: {name}).",
+        "claude_md_head": "## Namu character — {name}",
+        "claude_md_intro": "When the user calls the character by name ({name}) or asks to "
+        "talk with the character, talk as that Namu character.",
+        "command_desc": "Load the Namu character — {name}",
+        "command_intro": "From now on, talk as a Namu character (name: {name}).",
+    },
+}
+
+# 파일 이름에 쓸 수 없거나 명령 이름을 끊는 글자. 이름의 나머지는 그대로 둔다
+# (한글 이름이면 명령도 `/하린`이 된다 — 설계서 10.2의 예).
+_FILE_UNSAFE = set('/\\:*?"<>|')
+
+
+def _command_file_name(name: str) -> str:
+    out = "".join("-" if (c in _FILE_UNSAFE or c.isspace() or ord(c) < 32) else c for c in name)
+    out = out.strip("-.")
+    return out or "character"
+
+
+def connect_texts(name: str, lang: str = "ko") -> dict:
+    """캐릭터 하나를 AI에 연결하는 세 가지 글(설계서 10.1·10.2).
+
+    돌려주는 것: `project`(claude.ai 프로젝트 지침), `claude_md`(Claude Code의
+    CLAUDE.md에 붙일 줄), `command_path`·`command`(Claude Code 슬래시 명령 파일의
+    위치와 내용). 규칙 다섯 줄은 셋이 같고 머리말만 다르다.
+
+    여기서 만드는 것은 맨 글자다 — HTML이나 스크립트에 넣을 때의 이스케이프는
+    넣는 쪽이 한다(`connect_block_html`은 html.escape, 만들기 화면은 textContent).
+    """
+    lang = "en" if lang == "en" else "ko"
+    name = " ".join(str(name).split())  # 줄바꿈이 끼면 지침의 줄 구조가 깨진다
+    frame, rules = _CONNECT_FRAME[lang], _CONNECT_RULES[lang]
+
+    def numbered(first: str) -> str:
+        # 도구 인자 자리는 JSON 문자열로 적는다 — 이름에 따옴표가 있어도 인자가 끊기지 않는다.
+        qname = json.dumps(name, ensure_ascii=False)
+        lines = [rules[0].format(first=first, qname=qname)] + list(rules[1:])
+        return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+
+    project = frame["project_intro"].format(name=name) + "\n" + numbered(frame["first_project"])
+    claude_md = (
+        frame["claude_md_head"].format(name=name) + "\n"
+        + frame["claude_md_intro"].format(name=name) + "\n"
+        + numbered(frame["first"])
+    )
+    # 머리말(front matter)의 description은 Claude Code가 명령 목록에 보여 주는 설명이다.
+    # 따옴표가 든 이름도 YAML이 깨지지 않게 JSON 문자열(YAML의 큰따옴표 문자열과 호환)로 적는다.
+    command = (
+        "---\n"
+        f"description: {json.dumps(frame['command_desc'].format(name=name), ensure_ascii=False)}\n"
+        "---\n"
+        + frame["command_intro"].format(name=name) + "\n"
+        + numbered(frame["first"])
+        + "\n"
+    )
+    return {
+        "name": name,
+        "project": project,
+        "claude_md": claude_md,
+        "command_path": f".claude/commands/{_command_file_name(name)}.md",
+        "command": command,
+    }
+
+
+# 연결 안내 블록의 화면 글자. 만들기 화면(ko/en)과 내 캐릭터 목록(ko)이 함께 쓴다 —
+# 목록 화면의 말투(합니다체)와 만들기 화면(해요체) 어느 쪽에도 어색하지 않게
+# 안내는 "~세요"로 끝맺는다.
+_CONNECT_UI = {
+    "ko": {
+        "head": "AI에 연결하기 — 프로젝트 지침",
+        "lead": "AI가 이 캐릭터를 불러와 대화하게 하는 글입니다. 쓰는 곳에 맞는 글을 "
+        "복사해 붙여 넣으세요.",
+        "project_h": "claude.ai 프로젝트 지침",
+        "project_hint": "claude.ai에서 캐릭터마다 프로젝트를 하나 만들고, 프로젝트 지침에 "
+        "붙여 넣으세요. 나무 클라우드 커넥터를 켜 두어야 합니다.",
+        "claude_md_h": "Claude Code — CLAUDE.md",
+        "claude_md_hint": "Claude Code로 대화할 폴더의 CLAUDE.md 끝에 덧붙이세요.",
+        "command_h": "Claude Code — 슬래시 명령",
+        "command_hint": "Claude Code에서는 나무 클라우드를 claude.ai 커넥터로 붙여 두었을 때 "
+        "쓰세요. 대화할 폴더의 아래 위치에 이 파일을 만들면 파일 이름이 곧 명령 "
+        "이름(/이름)이 됩니다.",
+        "path_label": "파일 위치",
+        "copy": "복사하기",
+        "copied": "복사했습니다",
+        "selected": "선택해 두었습니다. Ctrl+C로 복사하세요",
+    },
+    "en": {
+        "head": "Connect to your AI — project instructions",
+        "lead": "Text that tells your AI to load this character and talk as them. "
+        "Copy the one for where you chat and paste it in.",
+        "project_h": "claude.ai project instructions",
+        "project_hint": "On claude.ai, make one project per character and paste this into "
+        "the project instructions. The Namu Cloud connector needs to be on.",
+        "claude_md_h": "Claude Code — CLAUDE.md",
+        "claude_md_hint": "Add this to the end of CLAUDE.md in the folder where you use "
+        "Claude Code.",
+        "command_h": "Claude Code — slash command",
+        "command_hint": "In Claude Code, use this when Namu Cloud is attached as a claude.ai "
+        "connector. Create this file at the path below in your folder — the file "
+        "name becomes the command (/name).",
+        "path_label": "File path",
+        "copy": "Copy",
+        "copied": "Copied",
+        "selected": "Selected. Press Ctrl+C to copy",
+    },
+}
+
+# 블록 모양과 복사 스크립트. 한 화면에 블록이 여럿(내 캐릭터 목록)이어도 한 번만
+# 넣는다. 복사는 만들기 화면의 `cm-copy`와 같은 방식이다 — 클립보드가 안 되면
+# (https가 아니거나 권한 거절) 글을 선택해 두고 Ctrl+C를 안내한다.
+# 안내 문구는 블록의 data-copied·data-selected에서 읽어 언어를 따라간다.
+_CONNECT_ASSETS = (
+    "<style>"
+    ".cc-block{margin:0 0 22px;padding:16px 18px;border:1px solid var(--border);"
+    "border-radius:var(--radius);background:var(--bg-card);}"
+    ".cc-block h3{font-size:1.05rem;margin:0 0 4px;}"
+    ".cc-lead{color:var(--fg-soft);font-size:.9rem;margin:0 0 12px;}"
+    ".cc-part{margin-top:14px;padding-top:12px;border-top:1px dashed var(--border-strong);}"
+    ".cc-part h4{font-size:.95rem;margin:0 0 2px;}"
+    ".cc-hint{color:var(--fg-soft);font-size:.85rem;margin:0 0 8px;}"
+    ".cc-path{font-size:.85rem;margin:0 0 8px;}"
+    ".cc-out{white-space:pre-wrap;word-break:break-word;font-size:.85rem;line-height:1.6;"
+    "max-height:260px;overflow:auto;margin:0 0 8px;}"
+    ".cc-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}"
+    ".cc-toast{color:var(--ok);font-size:.88rem;}"
+    "</style>"
+    "<script>"
+    "document.addEventListener('click',async function(ev){"
+    "var b=ev.target.closest&&ev.target.closest('.cc-copy');if(!b)return;"
+    "var box=b.closest('.cc-block'),src=document.getElementById(b.dataset.target),"
+    "msg=b.parentElement.querySelector('.cc-toast');"
+    "try{await navigator.clipboard.writeText(src.textContent);msg.textContent=box.dataset.copied;}"
+    "catch(e){var r=document.createRange();r.selectNodeContents(src);"
+    "var s=getSelection();s.removeAllRanges();s.addRange(r);msg.textContent=box.dataset.selected;}"
+    "setTimeout(function(){msg.textContent='';},2500);"
+    "});"
+    "</script>"
+)
+
+
+def connect_assets() -> str:
+    """연결 안내 블록의 모양과 복사 스크립트 — 화면마다 한 번만 넣는다."""
+    return _CONNECT_ASSETS
+
+
+def connect_block_html(uid: str, texts: dict | None = None, lang: str = "ko",
+                       hidden: bool = False, heading: bool = True) -> str:
+    """연결 안내 블록(세 구역 + 각자의 복사 단추).
+
+    `texts`가 없으면 빈 칸으로 그린다 — 만들기 화면은 저장한 뒤에야 이름을 알므로,
+    저장 응답의 글을 스크립트가 `{uid}-project` 등의 칸에 채운다. `uid`는 한 화면에
+    블록이 여럿일 때 칸 id가 겹치지 않게 붙이는 앞머리다.
+    """
+    t = _CONNECT_UI["en" if lang == "en" else "ko"]
+    e = html.escape
+    texts = texts or {}
+
+    def part(key: str, path: bool = False) -> str:
+        out_id = f"{uid}-{key.replace('_', '-')}"
+        return (
+            '<div class="cc-part">'
+            f"<h4>{e(t[key + '_h'])}</h4>"
+            f'<p class="cc-hint">{e(t[key + "_hint"])}</p>'
+            + (
+                f'<p class="cc-path">{e(t["path_label"])}: '
+                f'<code id="{uid}-command-path">{e(texts.get("command_path", ""))}</code></p>'
+                if path else ""
+            )
+            + f'<pre class="cc-out" id="{out_id}">{e(texts.get(key, ""))}</pre>'
+            '<div class="cc-row">'
+            f'<button type="button" class="btn cc-copy" data-target="{out_id}">{e(t["copy"])}</button>'
+            '<span class="cc-toast" role="status"></span>'
+            "</div></div>"
+        )
+
+    return (
+        f'<div class="cc-block" id="{uid}" data-copied="{e(t["copied"])}" '
+        f'data-selected="{e(t["selected"])}"' + (" hidden" if hidden else "") + ">"
+        + (f"<h3>{e(t['head'])}</h3>" if heading else "")
+        + f'<p class="cc-lead">{e(t["lead"])}</p>'
+        + part("project")
+        + part("claude_md")
+        + part("command", path=True)
+        + "</div>"
+    )
+
+
 def _json_for_script(data: dict) -> str:
     """`<script type="application/json">` 안에 넣어도 안전한 JSON 글자.
 
@@ -473,6 +712,7 @@ const S = JSON.parse(document.getElementById('cm-schema').textContent);
 const QS = S.questions;
 const KEY = __DRAFT_KEY__;
 const LOGGED_IN = __LOGGED_IN__;
+const LANG = __LANG__;
 const T = __TEXT__;
 const fill = (s, o) => s.replace(/\{(\w+)\}/g, (m, k) => k in o ? o[k] : m);
 const SAVED_KEY = KEY + ':saved';
@@ -747,7 +987,7 @@ if (LOGGED_IN) {
       const res = await fetch('/auth/character/save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-        body: JSON.stringify({card, base_version: saved ? saved.version : null}),
+        body: JSON.stringify({card, base_version: saved ? saved.version : null, lang: LANG}),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
@@ -755,6 +995,14 @@ if (LOGGED_IN) {
         msg.className = 'cm-save-msg ok';
         msg.textContent = fill(T.saved, {name: data.name});
         $('cm-connect-hint').hidden = false;
+        /* 연결 안내 글은 서버가 만들어 보낸다(`connect_texts`) — 여기서는 칸에 넣기만 한다.
+           textContent로 넣으므로 이름에 꺾쇠·따옴표가 있어도 태그로 풀리지 않는다. */
+        if (data.connect) {
+          ['project', 'claude_md', 'command', 'command_path'].forEach(k => {
+            $('cm-connect-' + k.replace('_', '-')).textContent = data.connect[k] || '';
+          });
+          $('cm-connect').hidden = false;
+        }
       } else {
         msg.className = 'cm-save-msg err';
         msg.textContent = errorText(data);
@@ -835,6 +1083,7 @@ def character_page(logged_in: bool = False, edit: dict | None = None, lang: str 
     )
     body = (
         _CSS
+        + connect_assets()
         + '<header class="cm-head">'
         f'<span class="eyebrow">{e(t["eyebrow"])}</span>'
         f"<h1>{e(t['h1'])}</h1>"
@@ -861,7 +1110,9 @@ def character_page(logged_in: bool = False, edit: dict | None = None, lang: str 
         f"{e(t['connect_hint'])} "
         f'<a href="/auth/me">{e(t["connect_link"])}</a> · '
         f'<a href="{ui.MY_CHARACTERS_PATH}">{e(t["mine_link"])}</a></p>'
-        '<div class="cm-tabs">'
+        # 저장에 성공하면 스크립트가 서버의 글을 채워 연다(설계서 11장 3번).
+        + connect_block_html("cm-connect", lang=lang, hidden=True)
+        + '<div class="cm-tabs">'
         '<button type="button" class="cm-chip" id="cm-tab-json" aria-pressed="true">JSON</button>'
         f'<button type="button" class="cm-chip" id="cm-tab-md" aria-pressed="false">{e(t["tab_md"])}</button>'
         f'<button type="button" class="btn" id="cm-copy">{e(t["copy"])}</button>'
@@ -886,6 +1137,7 @@ def character_page(logged_in: bool = False, edit: dict | None = None, lang: str 
         + edit_script
         + _SCRIPT.replace("__DRAFT_KEY__", json.dumps(DRAFT_KEY))
         .replace("__LOGGED_IN__", "true" if logged_in else "false")
+        .replace("__LANG__", json.dumps(lang))
         .replace("__TEXT__", _json_for_script(t["js"]))
     )
     return ui.page(

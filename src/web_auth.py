@@ -2608,7 +2608,7 @@ async def memo_remove(request: Request) -> Response:
 # 응답은 늘 JSON이다(화면 쪽이 fetch로만 부르고, 자바스크립트 없이 쓸 길이
 # 애초에 없다 — 이 화면 전체가 "자바스크립트가 켜져 있어야 움직여요"다).
 # ---------------------------------------------------------------------------
-def _character_save_sync(user_key: str, card: dict, base_version) -> Response:
+def _character_save_sync(user_key: str, card: dict, base_version, lang: str = "ko") -> Response:
     with closing(identity.connect()) as conn:
         row = identity.get_by_user_key(conn, user_key)
         if row is None:
@@ -2703,6 +2703,9 @@ def _character_save_sync(user_key: str, card: dict, base_version) -> Response:
             "version": result["version"],
             "name": result["name"],
             "created": result["created"],
+            # 저장 직후 화면에 띄울 AI 연결 안내 글(설계서 11장 3번). 글은
+            # character_page 한 곳에서 만들고 화면은 표시만 한다.
+            "connect": character_page.connect_texts(result["name"], lang),
         }
     )
 
@@ -2733,7 +2736,10 @@ async def character_save(request: Request) -> Response:
             status_code=400,
         )
 
-    return await run_in_threadpool(_character_save_sync, user_key, card, base_version)
+    # 화면 언어(만들기 화면이 보낸다) — 연결 안내 글을 그 언어로 만든다. 모르는 값은 한국어.
+    lang = "en" if isinstance(payload, dict) and payload.get("lang") == "en" else "ko"
+
+    return await run_in_threadpool(_character_save_sync, user_key, card, base_version, lang)
 
 
 # ---------------------------------------------------------------------------
@@ -2755,6 +2761,15 @@ def _html_character_list(rows: list, notice_html: str = "") -> str:
             aliases = ", ".join(html.escape(a) for a in r.get("aliases") or [])
             stage = html.escape(character.stage_desc(r["stage"]))
             when = html.escape(r.get("last_talk_when") or "아직 대화한 적 없음")
+            # AI 연결 안내(설계서 10장) — 만들기 화면에서 저장 직후 보이는 것과 같은 글.
+            # 펼침의 id 앞머리는 순번으로 둔다(캐릭터 id를 id 속성에 그대로 넣지 않는다).
+            connect = (
+                '<details style="margin-top:10px"><summary>AI에 연결하기</summary>'
+                + character_page.connect_block_html(
+                    f"cc-{len(items)}", character_page.connect_texts(r["name"]), heading=False
+                )
+                + "</details>"
+            )
             items.append(
                 '<div class="card" style="margin-bottom:12px">'
                 f'<h3 style="margin:0 0 4px">{name}'
@@ -2769,14 +2784,17 @@ def _html_character_list(rows: list, notice_html: str = "") -> str:
                 f'<input type="hidden" name="char_id" value="{char_id}">'
                 '<button type="submit" class="btn btn-danger">지우기</button>'
                 "</form>"
-                "</div></div>"
+                "</div>"
+                + connect
+                + "</div>"
             )
         listing = "".join(items)
     else:
         listing = "<p>아직 만든 캐릭터가 없습니다.</p>"
 
     body = (
-        '<span class="eyebrow">내 페이지</span>'
+        (character_page.connect_assets() if rows else "")
+        + '<span class="eyebrow">내 페이지</span>'
         "<h1>내 캐릭터</h1>"
         + notice_html
         + '<p class="lead">저장한 캐릭터를 고치거나 지울 수 있습니다.</p>'

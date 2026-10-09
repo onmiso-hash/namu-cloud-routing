@@ -2777,6 +2777,44 @@ def test_character_list_shows_saved_character(client, monkeypatch, tmp_path):
     assert "지우기" in r.text
 
 
+def test_character_save_success_returns_connect_texts(client, monkeypatch, tmp_path):
+    """저장 직후 화면에 띄울 AI 연결 안내 글(설계서 11장 3번)이 응답에 실린다.
+    화면 언어를 보내면 그 언어로, 안 보내면 한국어로 만든다."""
+    row = _connect_via_login(client, monkeypatch, github_id=51007, repo="ok/repo4")
+    with closing(identity.connect()) as conn:
+        identity.set_repo_private(conn, row["user_key"], True)
+    _memory_env(monkeypatch, tmp_path, row["user_key"])
+
+    ko = client.post("/auth/character/save", json={"card": _valid_card(name="하린")}).json()
+    en = client.post(
+        "/auth/character/save", json={"card": _valid_card(name="Rua"), "lang": "en"}
+    ).json()
+
+    assert ko["connect"] == wa.character_page.connect_texts("하린", "ko")
+    assert 'namu_character_load(name="하린")' in ko["connect"]["project"]
+    assert en["connect"] == wa.character_page.connect_texts("Rua", "en")
+    assert en["connect"]["project"].startswith("In this project")
+
+
+def test_character_list_has_connect_guide_per_character(client, monkeypatch, tmp_path):
+    row = _connect_via_login(client, monkeypatch, github_id=52003, repo="ann/char3")
+    paths, _pushes = _memory_env(monkeypatch, tmp_path, row["user_key"])
+    _saved_character(paths, name="하린")
+    _saved_character(paths, name='따옴"표<b>')
+
+    r = client.get("/auth/character")
+
+    assert r.status_code == 200
+    assert r.text.count("<summary>AI에 연결하기</summary>") == 2
+    assert 'id="cc-0-project"' in r.text and 'id="cc-1-project"' in r.text
+    assert "namu_character_load(name=&quot;하린&quot;)" in r.text
+    assert ".claude/commands/하린.md" in r.text
+    # 이름의 꺾쇠는 태그로 풀리지 않는다.
+    assert "<b>" not in r.text
+    # 복사 스크립트는 캐릭터 수와 상관없이 한 번만 들어간다.
+    assert r.text.count("closest('.cc-copy')") == 1
+
+
 def test_character_edit_requires_login():
     c = TestClient(wa.build_auth_app(), base_url="https://testserver")
     r = c.get("/auth/character/edit/01ABC")

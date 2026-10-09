@@ -180,3 +180,73 @@ def test_new_character_keeps_changed_draft_and_saved_marker_carries_name():
     assert "if (v.name !== state.name && !editEl) return null;" in page
     assert "snap: JSON.stringify(state)" in page
     assert "T.pending_empty" in page and "T.pending_no_login" in page
+
+
+# ---------------------------------------------------------------------------
+# AI 연결 안내(설계서 10장·14장 5단계) — `connect_texts`가 만드는 세 글.
+# ---------------------------------------------------------------------------
+_TOOLS = ("namu_character_load", "namu_record(bowl=profile)", "namu_character_diary",
+          "namu_character_core", "archive")
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_connect_texts_carry_the_five_rules_with_real_tool_names(lang):
+    t = character_page.connect_texts("하린", lang)
+
+    assert t["command_path"] == ".claude/commands/하린.md"
+    for key in ("project", "claude_md", "command"):
+        assert 'namu_character_load(name="하린")' in t[key], key
+        for tool in _TOOLS:
+            assert tool in t[key], (key, tool)
+        # 규칙 다섯 줄이 번호와 함께 들어 있다.
+        assert all(f"\n{i}. " in t[key] for i in range(1, 6)), key
+    assert t["command"].startswith("---\ndescription: ")
+    # 설계서의 기능 이름(load·diary)만 적힌 줄이 남지 않았다.
+    assert "(load" not in t["project"] and "(diary" not in t["project"]
+
+
+def test_connect_texts_english_has_no_korean_except_the_name():
+    t = character_page.connect_texts("Harin", "en")
+    assert not _HANGUL.search(json.dumps(t, ensure_ascii=False))
+    assert not _HANGUL.search(json.dumps(character_page._CONNECT_UI["en"], ensure_ascii=False))
+    assert set(character_page._CONNECT_UI["ko"]) == set(character_page._CONNECT_UI["en"])
+
+
+def test_connect_texts_survive_quotes_and_odd_names():
+    t = character_page.connect_texts('하"린 </script>\n둘')
+
+    # 줄바꿈은 빈칸 하나로 접는다 — 지침의 줄 구조가 깨지지 않게.
+    assert t["name"] == '하"린 </script> 둘'
+    # 도구 인자 자리는 JSON 문자열이라 따옴표가 끊기지 않는다.
+    assert 'namu_character_load(name="하\\"린 </script> 둘")' in t["project"]
+    # 머리말의 description은 JSON(=YAML 큰따옴표) 문자열로 읽힌다.
+    desc = t["command"].split("\n")[1].removeprefix("description: ")
+    assert json.loads(desc).endswith('하"린 </script> 둘')
+    # 파일 이름에는 경로를 끊는 글자가 들어가지 않는다.
+    fname = t["command_path"].removeprefix(".claude/commands/")
+    assert "/" not in fname and '"' not in fname and " " not in fname
+    assert character_page.connect_texts("///")["command_path"] == ".claude/commands/character.md"
+
+
+def test_connect_block_escapes_the_texts_into_html():
+    texts = character_page.connect_texts('<b>"악"</b>')
+    block = character_page.connect_block_html("cc-0", texts)
+
+    assert "<b>" not in block
+    assert "&lt;b&gt;" in block
+    assert 'id="cc-0-project"' in block and 'id="cc-0-command-path"' in block
+    assert block.count('class="btn cc-copy"') == 3
+
+
+def test_character_page_has_a_hidden_connect_block_filled_from_the_save_response():
+    for lang, page in (("ko", character_page.character_page(True)),
+                       ("en", character_page.character_page_en(True))):
+        assert 'class="cc-block" id="cm-connect"' in page
+        assert re.search(r'id="cm-connect"[^>]*hidden', page), lang
+        for key in ("project", "claude-md", "command", "command-path"):
+            assert f'id="cm-connect-{key}"' in page, (lang, key)
+        assert f"const LANG = {json.dumps(lang)};" in page
+        assert "lang: LANG" in page
+        assert "data.connect" in page
+        # 복사 실패 때는 cm-copy처럼 글을 선택해 둔다.
+        assert "selectNodeContents(src)" in page
