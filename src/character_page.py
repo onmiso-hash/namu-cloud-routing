@@ -437,12 +437,46 @@ def _command_file_name(name: str) -> str:
     return out or "character"
 
 
-def connect_texts(name: str, lang: str = "ko") -> dict:
-    """캐릭터 하나를 AI에 연결하는 세 가지 글(설계서 10.1·10.2).
+def _josa(word: str, with_final: str, without_final: str) -> str:
+    """이름 뒤에 붙일 조사 — 마지막 글자의 받침으로 고른다(을/를, 과/와, 이/가).
 
-    돌려주는 것: `project`(claude.ai 프로젝트 지침), `claude_md`(Claude Code의
-    CLAUDE.md에 붙일 줄), `command_path`·`command`(Claude Code 슬래시 명령 파일의
-    위치와 내용). 규칙 다섯 줄은 셋이 같고 머리말만 다르다.
+    마지막 글자가 한글 음절이 아니면(영문 이름 등) 받침을 알 수 없으므로
+    "을(를)"처럼 둘을 함께 적는다.
+    """
+    last = word[-1:] if word else ""
+    if "가" <= last <= "힣":
+        return with_final if (ord(last) - 0xAC00) % 28 else without_final
+    return f"{with_final}({without_final})"
+
+
+# 연결 안내 블록에서 이름이 들어가는 화면 글. 지침 글과 함께 `connect_texts`가 만든다 —
+# 만들기 화면은 저장 응답으로 받아 넣으므로 문구가 파이썬 한 곳에만 있다.
+# ko의 {eul}·{gwa}·{iga}는 이름 받침에 맞춘 조사다(`_josa`).
+_CONNECT_GUIDE = {
+    "ko": {
+        "intro": '나무가 연결된 AI에게 "나무를 통해서 {name}{eul} 불러 줘" 또는 '
+        '"나무를 통해서 {name} 캐릭터를 불러와 줘"라고 말해 보세요. '
+        "바로 {name}{gwa} 대화할 수 있어요.",
+        "more_lead": "아래 지침이나 파일을 한 번 설정해 두면, 대화를 열 때 {name}{iga} "
+        "자동으로 불려 오고 기본적으로 지침대로 {name}{gwa} 대화할 수 있어요.",
+    },
+    "en": {
+        "intro": 'Tell an AI connected to Namu "Load {name} through Namu" or '
+        '"Bring in the {name} character through Namu". '
+        "You can start talking with {name} right away.",
+        "more_lead": "Set one of these up once, and {name} loads automatically when you "
+        "open a chat and talks with you following the instructions.",
+    },
+}
+
+
+def connect_texts(name: str, lang: str = "ko") -> dict:
+    """캐릭터 하나와 대화하는 법을 안내하는 글(설계서 10.1·10.2).
+
+    돌려주는 것: `intro`(이름만 말하면 불러온다는 기본 안내), `more_lead`(선택 설정
+    펼침의 첫 안내), 그리고 선택 설정 세 글 — `project`(claude.ai 프로젝트 지침),
+    `claude_md`(Claude Code의 CLAUDE.md에 붙일 줄), `command_path`·`command`(Claude
+    Code 슬래시 명령 파일의 위치와 내용). 규칙 다섯 줄은 셋이 같고 머리말만 다르다.
 
     여기서 만드는 것은 맨 글자다 — HTML이나 스크립트에 넣을 때의 이스케이프는
     넣는 쪽이 한다(`connect_block_html`은 html.escape, 만들기 화면은 textContent).
@@ -473,8 +507,14 @@ def connect_texts(name: str, lang: str = "ko") -> dict:
         + numbered(frame["first"])
         + "\n"
     )
+    guide = {
+        k: v.format(name=name, eul=_josa(name, "을", "를"), gwa=_josa(name, "과", "와"),
+                    iga=_josa(name, "이", "가"))
+        for k, v in _CONNECT_GUIDE[lang].items()
+    }
     return {
         "name": name,
+        **guide,
         "project": project,
         "claude_md": claude_md,
         "command_path": f".claude/commands/{_command_file_name(name)}.md",
@@ -487,12 +527,11 @@ def connect_texts(name: str, lang: str = "ko") -> dict:
 # 안내는 "~세요"로 끝맺는다.
 _CONNECT_UI = {
     "ko": {
-        "head": "AI에 연결하기 — 프로젝트 지침",
-        "lead": "AI가 이 캐릭터를 불러와 대화하게 하는 글입니다. 쓰는 곳에 맞는 글을 "
-        "복사해 붙여 넣으세요.",
+        "head": "대화하는 법",
+        "more": "더 편하게 쓰기 (선택)",
         "project_h": "claude.ai 프로젝트 지침",
-        "project_hint": "claude.ai에서 캐릭터마다 프로젝트를 하나 만들고, 프로젝트 지침에 "
-        "붙여 넣으세요. 나무 클라우드 커넥터를 켜 두어야 합니다.",
+        "project_hint": "claude.ai에서 프로젝트를 만든 뒤, 오른쪽 '지침 → 편집'에 붙여 넣고 "
+        "저장하세요. 나무 클라우드 커넥터를 켜 두어야 합니다.",
         "claude_md_h": "Claude Code — CLAUDE.md",
         "claude_md_hint": "Claude Code로 대화할 폴더의 CLAUDE.md 끝에 덧붙이세요.",
         "command_h": "Claude Code — 슬래시 명령",
@@ -505,12 +544,11 @@ _CONNECT_UI = {
         "selected": "선택해 두었습니다. Ctrl+C로 복사하세요",
     },
     "en": {
-        "head": "Connect to your AI — project instructions",
-        "lead": "Text that tells your AI to load this character and talk as them. "
-        "Copy the one for where you chat and paste it in.",
+        "head": "How to talk",
+        "more": "Make it easier (optional)",
         "project_h": "claude.ai project instructions",
-        "project_hint": "On claude.ai, make one project per character and paste this into "
-        "the project instructions. The Namu Cloud connector needs to be on.",
+        "project_hint": "In claude.ai, create a project, then paste this into Instructions → "
+        "Edit on the right and save. The Namu Cloud connector needs to be on.",
         "claude_md_h": "Claude Code — CLAUDE.md",
         "claude_md_hint": "Add this to the end of CLAUDE.md in the folder where you use "
         "Claude Code.",
@@ -534,7 +572,12 @@ _CONNECT_ASSETS = (
     ".cc-block{margin:0 0 22px;padding:16px 18px;border:1px solid var(--border);"
     "border-radius:var(--radius);background:var(--bg-card);}"
     ".cc-block h3{font-size:1.05rem;margin:0 0 4px;}"
-    ".cc-lead{color:var(--fg-soft);font-size:.9rem;margin:0 0 12px;}"
+    ".cc-intro{margin:0 0 10px;line-height:1.6;}"
+    ".cc-more>summary{cursor:pointer;color:var(--fg-soft);font-size:.92rem;}"
+    # 공통 `details[open] summary::before`가 바깥 펼침(내 캐릭터 목록)이 열리면 이 안쪽
+    # 화살표까지 돌려 놓는다 — 접혀 있을 때는 제자리로 되돌린다.
+    ".cc-more:not([open])>summary::before{transform:none;}"
+    ".cc-lead{color:var(--fg-soft);font-size:.9rem;margin:10px 0 0;}"
     ".cc-part{margin-top:14px;padding-top:12px;border-top:1px dashed var(--border-strong);}"
     ".cc-part h4{font-size:.95rem;margin:0 0 2px;}"
     ".cc-hint{color:var(--fg-soft);font-size:.85rem;margin:0 0 8px;}"
@@ -565,11 +608,12 @@ def connect_assets() -> str:
 
 def connect_block_html(uid: str, texts: dict | None = None, lang: str = "ko",
                        hidden: bool = False, heading: bool = True) -> str:
-    """연결 안내 블록(세 구역 + 각자의 복사 단추).
+    """대화하는 법 블록 — 늘 보이는 기본 안내 한 줄 + 접힌 선택 설정(세 구역과 복사 단추).
 
+    이름만 말하면 불러와지므로 세 글은 필수가 아니다 — 그래서 기본으로 접어 둔다.
     `texts`가 없으면 빈 칸으로 그린다 — 만들기 화면은 저장한 뒤에야 이름을 알므로,
-    저장 응답의 글을 스크립트가 `{uid}-project` 등의 칸에 채운다. `uid`는 한 화면에
-    블록이 여럿일 때 칸 id가 겹치지 않게 붙이는 앞머리다.
+    저장 응답의 글을 스크립트가 `{uid}-intro`·`{uid}-project` 등의 칸에 채운다.
+    `uid`는 한 화면에 블록이 여럿일 때 칸 id가 겹치지 않게 붙이는 앞머리다.
     """
     t = _CONNECT_UI["en" if lang == "en" else "ko"]
     e = html.escape
@@ -597,11 +641,13 @@ def connect_block_html(uid: str, texts: dict | None = None, lang: str = "ko",
         f'<div class="cc-block" id="{uid}" data-copied="{e(t["copied"])}" '
         f'data-selected="{e(t["selected"])}"' + (" hidden" if hidden else "") + ">"
         + (f"<h3>{e(t['head'])}</h3>" if heading else "")
-        + f'<p class="cc-lead">{e(t["lead"])}</p>'
+        + f'<p class="cc-intro" id="{uid}-intro">{e(texts.get("intro", ""))}</p>'
+        + f'<details class="cc-more"><summary>{e(t["more"])}</summary>'
+        f'<p class="cc-lead" id="{uid}-more-lead">{e(texts.get("more_lead", ""))}</p>'
         + part("project")
         + part("claude_md")
         + part("command", path=True)
-        + "</div>"
+        + "</details></div>"
     )
 
 
@@ -998,7 +1044,7 @@ if (LOGGED_IN) {
         /* 연결 안내 글은 서버가 만들어 보낸다(`connect_texts`) — 여기서는 칸에 넣기만 한다.
            textContent로 넣으므로 이름에 꺾쇠·따옴표가 있어도 태그로 풀리지 않는다. */
         if (data.connect) {
-          ['project', 'claude_md', 'command', 'command_path'].forEach(k => {
+          ['intro', 'more_lead', 'project', 'claude_md', 'command', 'command_path'].forEach(k => {
             $('cm-connect-' + k.replace('_', '-')).textContent = data.connect[k] || '';
           });
           $('cm-connect').hidden = false;

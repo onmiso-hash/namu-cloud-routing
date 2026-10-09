@@ -8,6 +8,7 @@
   5. 영어판(`/en/character`)은 같은 틀에 보이는 글자만 바꾼다 — 코어에 질문이
      늘었는데 번역이 빠지면 여기서 걸린다.
 """
+import html
 import json
 import re
 
@@ -238,12 +239,60 @@ def test_connect_block_escapes_the_texts_into_html():
     assert block.count('class="btn cc-copy"') == 3
 
 
+@pytest.mark.parametrize("name, eul, gwa, iga", [
+    ("아인", "을", "과", "이"),      # 받침 있음
+    ("미미", "를", "와", "가"),      # 받침 없음
+    ("Rua", "을(를)", "과(와)", "이(가)"),  # 한글이 아니면 둘을 함께
+    ("", "을(를)", "과(와)", "이(가)"),
+])
+def test_josa_follows_the_final_consonant(name, eul, gwa, iga):
+    assert character_page._josa(name, "을", "를") == eul
+    assert character_page._josa(name, "과", "와") == gwa
+    assert character_page._josa(name, "이", "가") == iga
+
+
+def test_connect_texts_intro_uses_the_right_particles():
+    a = character_page.connect_texts("아인")
+    assert a["intro"] == (
+        '나무가 연결된 AI에게 "나무를 통해서 아인을 불러 줘" 또는 '
+        '"나무를 통해서 아인 캐릭터를 불러와 줘"라고 말해 보세요. 바로 아인과 대화할 수 있어요.'
+    )
+    assert a["more_lead"].startswith("아래 지침이나 파일을 한 번 설정해 두면, 대화를 열 때 아인이 ")
+    assert a["more_lead"].endswith("지침대로 아인과 대화할 수 있어요.")
+    m = character_page.connect_texts("미미")
+    assert "미미를 불러 줘" in m["intro"] and "미미와 대화할" in m["intro"]
+    assert "미미가 자동으로" in m["more_lead"] and "미미와 대화할" in m["more_lead"]
+    assert "Rua을(를) 불러 줘" in character_page.connect_texts("Rua")["intro"]
+    en = character_page.connect_texts("Rua", "en")
+    assert en["intro"] == (
+        'Tell an AI connected to Namu "Load Rua through Namu" or "Bring in the Rua '
+        'character through Namu". You can start talking with Rua right away.'
+    )
+    assert en["more_lead"].startswith("Set one of these up once, and Rua loads")
+
+
+def test_connect_block_keeps_the_three_texts_folded_behind_the_intro():
+    block = character_page.connect_block_html("cc-0", character_page.connect_texts("아인"))
+
+    intro_at = block.index('id="cc-0-intro"')
+    fold_at = block.index('<details class="cc-more"><summary>더 편하게 쓰기 (선택)</summary>')
+    # 기본 안내는 접힘 바깥(앞)에, 세 글과 펼친 안내는 모두 접힘 안에 있다.
+    assert intro_at < fold_at
+    for key in ("more-lead", "project", "claude-md", "command", "command-path"):
+        assert block.index(f'id="cc-0-{key}"') > fold_at, key
+    assert 'class="cc-more" open' not in block  # 기본은 접힘
+    assert "<h3>대화하는 법</h3>" in block
+    assert html.escape("오른쪽 '지침 → 편집'에 붙여 넣고 저장하세요.") in block
+    en = character_page.connect_block_html("x", lang="en")
+    assert "<summary>Make it easier (optional)</summary>" in en and "<h3>How to talk</h3>" in en
+
+
 def test_character_page_has_a_hidden_connect_block_filled_from_the_save_response():
     for lang, page in (("ko", character_page.character_page(True)),
                        ("en", character_page.character_page_en(True))):
         assert 'class="cc-block" id="cm-connect"' in page
         assert re.search(r'id="cm-connect"[^>]*hidden', page), lang
-        for key in ("project", "claude-md", "command", "command-path"):
+        for key in ("intro", "more-lead", "project", "claude-md", "command", "command-path"):
             assert f'id="cm-connect-{key}"' in page, (lang, key)
         assert f"const LANG = {json.dumps(lang)};" in page
         assert "lang: LANG" in page

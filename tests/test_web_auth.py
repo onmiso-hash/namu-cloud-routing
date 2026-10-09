@@ -2805,7 +2805,11 @@ def test_character_list_has_connect_guide_per_character(client, monkeypatch, tmp
     r = client.get("/auth/character")
 
     assert r.status_code == 200
-    assert r.text.count("<summary>AI에 연결하기</summary>") == 2
+    assert r.text.count("<summary>대화하는 법</summary>") == 2
+    assert "AI에 연결하기" not in r.text
+    # 기본 안내는 늘 보이고, 세 글은 접힌 "더 편하게 쓰기 (선택)" 안에 있다.
+    assert "나무를 통해서 하린을 불러 줘" in r.text
+    assert r.text.count('<details class="cc-more"><summary>더 편하게 쓰기 (선택)</summary>') == 2
     assert 'id="cc-0-project"' in r.text and 'id="cc-1-project"' in r.text
     assert "namu_character_load(name=&quot;하린&quot;)" in r.text
     assert ".claude/commands/하린.md" in r.text

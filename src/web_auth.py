@@ -2761,10 +2761,10 @@ def _html_character_list(rows: list, notice_html: str = "") -> str:
             aliases = ", ".join(html.escape(a) for a in r.get("aliases") or [])
             stage = html.escape(character.stage_desc(r["stage"]))
             when = html.escape(r.get("last_talk_when") or "아직 대화한 적 없음")
-            # AI 연결 안내(설계서 10장) — 만들기 화면에서 저장 직후 보이는 것과 같은 글.
+            # 대화하는 법(설계서 10장) — 만들기 화면에서 저장 직후 보이는 것과 같은 글.
             # 펼침의 id 앞머리는 순번으로 둔다(캐릭터 id를 id 속성에 그대로 넣지 않는다).
             connect = (
-                '<details style="margin-top:10px"><summary>AI에 연결하기</summary>'
+                '<details style="margin-top:10px"><summary>대화하는 법</summary>'
                 + character_page.connect_block_html(
                     f"cc-{len(items)}", character_page.connect_texts(r["name"]), heading=False
                 )
