@@ -40,14 +40,16 @@ def _page_data(out: str) -> dict:
     return json.loads(found.group(1))
 
 
-def test_character_page_opens_without_login_and_carries_ten_questions():
+def test_character_page_opens_without_login_and_carries_every_core_question():
+    import character
+
     client = TestClient(wa.build_auth_app(), base_url="https://testserver")
 
     r = client.get("/character")
 
     assert r.status_code == 200
     data = _page_data(r.text)
-    assert len(data["questions"]) == 10
+    assert len(data["questions"]) == len(character.QUESTIONS) == 11
 
 
 def test_character_path_is_a_public_door():
@@ -113,7 +115,7 @@ def test_english_page_opens_without_login():
 
     assert r.status_code == 200
     assert "/en/character" in rs._WEB_PATHS
-    assert len(_page_data(r.text)["questions"]) == 10
+    assert len(_page_data(r.text)["questions"]) == 11
 
 
 def test_english_questions_keep_every_value_and_limit_of_the_core():
@@ -249,7 +251,7 @@ def _page_parts(page: str) -> dict:
     }
 
 
-def _run_save_in_node(tmp_path, *pages: str) -> dict:
+def _run_save_in_node(tmp_path, *pages: str, harness_text: str = _NODE_HARNESS) -> dict:
     """화면들을 한 브라우저에서 차례로 열고, 마지막 화면의 저장 단추가 보낸 것을 돌려준다."""
     node = shutil.which("node")
     if not node:
@@ -257,7 +259,7 @@ def _run_save_in_node(tmp_path, *pages: str) -> dict:
     inp = tmp_path / "in.json"
     inp.write_text(json.dumps([_page_parts(p) for p in pages]), encoding="utf-8")
     harness = tmp_path / "harness.js"
-    harness.write_text(_NODE_HARNESS, encoding="utf-8")
+    harness.write_text(harness_text, encoding="utf-8")
     out = subprocess.run([node, str(harness), str(inp)], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
@@ -304,6 +306,94 @@ def test_create_page_after_edit_page_keeps_photos_of_the_same_character(tmp_path
     assert sent["base_version"] == "v1"
     assert sent["card"]["portrait"] == "attach_file/portrait.png"
     assert sent["card"]["emotion_photos"] == {"기쁨": "attach_file/happy.png"}
+
+
+# ---------------------------------------------------------------------------
+# 캐릭터별 규칙(`custom_rules`) — 코어에 새로 생긴 질문 칸. 다른 여러 줄 칸(예시
+# 대사)처럼 화면에 나오고, 질문 칸 경로(`state`)로 실려 고치기에서 이어진다.
+# 질문이 아닌 칸을 잇는 `KEEP`에 섞이면 고친 값이 원래 값으로 되돌아간다.
+# ---------------------------------------------------------------------------
+_RULES = ["내가 힘들다고 하면 먼저 쉬자고 말해 줘", "밤 열두 시가 넘으면 자라고 해 줘"]
+
+
+def _rules_question(page: str) -> dict:
+    found = [q for q in _page_data(page)["questions"] if q["key"] == "custom_rules"]
+    assert len(found) == 1, "custom_rules 질문이 화면에 없다"
+    return found[0]
+
+
+def test_custom_rules_question_is_on_both_pages_after_sample_lines():
+    ko = _rules_question(character_page.character_page(False))
+    en = _rules_question(character_page.character_page_en(False))
+
+    assert ko["label"] == "지키는 규칙" and ko["type"] == "multi"
+    assert (ko["max_items"], ko["max_length"], ko["required"]) == (5, 100, False)
+    assert en["label"] == "Rules it keeps"
+    for k in ("label", "title", "hint", "custom_label"):
+        assert not _HANGUL.search(en[k]), (k, en[k])
+    assert {k: v for k, v in en.items() if k not in ("label", "title", "hint", "custom_label")} == {
+        k: v for k, v in ko.items() if k not in ("label", "title", "hint", "custom_label")
+    }
+    keys = [q["key"] for q in _page_data(character_page.character_page(False))["questions"]]
+    assert keys.index("custom_rules") == keys.index("sample_lines") + 1
+    assert keys.index("custom_rules") + 1 == keys.index("relationship_ceiling")
+
+
+def test_missing_english_translation_fails_loudly(monkeypatch):
+    en = dict(character_page._QUESTIONS_EN)
+    en.pop("custom_rules")
+    monkeypatch.setattr(character_page, "_QUESTIONS_EN", en)
+    with pytest.raises(KeyError):
+        character_page.schema_data("en")
+
+
+def _edit_card_with_rules() -> dict:
+    return {
+        "schema_version": 1, "id": None, "name": "하린", "aliases": [],
+        "relationship_start": "stranger", "relationship_ceiling": "open",
+        "custom_rules": list(_RULES),
+    }
+
+
+@pytest.mark.parametrize("lang", ["ko", "en"])
+def test_editing_keeps_custom_rules_as_a_question_field(tmp_path, lang):
+    page = character_page.character_page(
+        True, edit={"id": "01JABCDEFGHJKMNPQRSTVWXYZ0", "version": "v1",
+                    "card": _edit_card_with_rules()}, lang=lang)
+    sent = _run_save_in_node(tmp_path, page)
+    assert sent["card"]["custom_rules"] == _RULES
+    assert sent["card"]["name"] == "하린"
+
+
+# 고치기 화면에서 규칙 하나를 더 써넣고 저장한다 — 미리 채운 값이 초안(state)에
+# 있어야 거기에 이어 붙고, KEEP으로 갔다면 고친 값이 아니라 원래 값이 나간다.
+_NODE_ADD_RULE = _NODE_HARNESS.replace(
+    "(async () => { await els['cm-save'].click();",
+    "(async () => {\n"
+    "  const S = JSON.parse(inp.schema);\n"
+    "  const at = S.questions.findIndex(q => q.key === 'custom_rules');\n"
+    "  for (let i = 0; i < at; i++) els['cm-next'].click();\n"
+    "  els['cm-in'].value = '새로 더한 규칙';\n"
+    "  els['cm-add'].click();\n"
+    "  els['cm-tab-md'].click();\n"
+    "  const preview = els['cm-out'].textContent;\n"
+    "  await els['cm-save'].click(); sent.preview = preview;",
+)
+
+
+def test_editing_adds_a_rule_on_top_of_the_prefilled_ones_and_shows_it_in_preview(tmp_path):
+    assert _NODE_ADD_RULE != _NODE_HARNESS
+    page = character_page.character_page(
+        True, edit={"id": "01JABCDEFGHJKMNPQRSTVWXYZ0", "version": "v1",
+                    "card": _edit_card_with_rules()})
+    sent = _run_save_in_node(tmp_path, page, harness_text=_NODE_ADD_RULE)
+    assert sent["card"]["custom_rules"] == _RULES + ["새로 더한 규칙"]
+    preview = sent["preview"]
+    # 미리보기 글에서는 고정 약속 뒤에 규칙 목록으로 보인다(코어 persona_text와 같은 순서).
+    assert preview.index("언제나 지키는 약속") < preview.index("지키는 규칙\n- 내가 힘들다고")
+    assert "- 새로 더한 규칙" in preview
+    # 질문 목록 줄에는 다시 나오지 않는다(예시 대사처럼 따로 묶는다).
+    assert "지키는 규칙: " not in preview
 
 
 def test_new_card_sends_no_photos(tmp_path):

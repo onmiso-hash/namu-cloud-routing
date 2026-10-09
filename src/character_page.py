@@ -61,7 +61,9 @@ JSON이라, 거기 섞으면 안내원 자료에 의미 없는 글이 들어간�
 화면에 기존 카드를 미리 채워 연다(`web_auth.character_edit`). `edit` 인자로
 `{id, version, card}`를 받으면 `#cm-edit-data`에 JSON으로 실어 보내고,
 자바스크립트가 그것을 초안으로 덮어쓴 뒤 처음 질문부터 다시 보여준다 — 질문
-목록·검사 규칙이 만들기와 똑같으므로 틀을 두 벌 두지 않는다. 저장 단추는
+목록·검사 규칙이 만들기와 똑같으므로 틀을 두 벌 두지 않는다. 질문 칸(캐릭터별
+규칙 `custom_rules` 등)은 이 초안으로 미리 채워져 그대로 고칠 수 있고, 질문이 아닌
+칸(사진 등)만 `KEEP`으로 따로 떠 두었다가 이어 싣는다. 저장 단추는
 그대로 `/auth/character/save`를 부르지만, 미리 채운 `version`이 함께 실려
 있어 새 캐릭터가 아니라 그 캐릭터의 다음 판으로 저장된다.
 
@@ -184,6 +186,11 @@ _QUESTIONS_EN = {
         "label": "Sample lines", "title": "Things this character might say",
         "hint": "Helps any AI play them with a similar voice. Up to three lines — skip if none.",
         "options": [], "custom_label": "e.g. Did you have lunch today?",
+    },
+    "custom_rules": {
+        "label": "Rules it keeps", "title": "Rules this character always keeps",
+        "hint": "Write what they must keep in every conversation. Up to five lines — skip if none.",
+        "options": [], "custom_label": "e.g. If I say I'm tired, suggest taking a break first",
     },
     "relationship_ceiling": {
         "label": "How far it can go", "title": "How far can the relationship go?",
@@ -892,10 +899,12 @@ function renderLeaves(){
   });
 }
 
+/* 한 줄씩 쓰는 문장 칸 — 쉼표가 문장 안에 들어갈 수 있어 ' / '로 잇는다. */
+const LINE_KEYS = ['sample_lines', 'custom_rules'];
 function shown(q){
   const v = state[q.key];
   if (q.type === 'choice') return v ? optLabel(q, v) : '';
-  if (Array.isArray(v)) return v.join(q.key === 'sample_lines' ? ' / ' : ', ');
+  if (Array.isArray(v)) return v.join(LINE_KEYS.includes(q.key) ? ' / ' : ', ');
   return v || '';
 }
 
@@ -990,7 +999,7 @@ function buildPreview(){
   const L = a => Array.isArray(a) ? a.join(', ') : (a || '');
   const lines = [`# ${c.name}${c.aliases && c.aliases.length ? fill(T.aliases, {msg: L(c.aliases)}) : ''}`, ''];
   QS.forEach(q => {
-    if (q.key === 'name' || q.key === 'aliases' || q.key === 'sample_lines') return;
+    if (q.key === 'name' || q.key === 'aliases' || LINE_KEYS.includes(q.key)) return;
     lines.push(`${q.label}: ${shown(q)}`);
   });
   if (c.sample_lines && c.sample_lines.length) {
@@ -999,6 +1008,11 @@ function buildPreview(){
   }
   lines.push('', T.promise_head);
   c.promises.forEach(p => lines.push('- ' + p));
+  /* 캐릭터별 규칙은 설정 글(코어 persona_text)처럼 고정 약속 뒤에 싣는다. */
+  if (byKey.custom_rules && c.custom_rules && c.custom_rules.length) {
+    lines.push('', byKey.custom_rules.label);
+    c.custom_rules.forEach(r => lines.push('- ' + r));
+  }
   lines.push('', T.persona_note);
   return lines.join('\n');
 }
