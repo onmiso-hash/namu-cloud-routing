@@ -813,15 +813,25 @@ try { state = clean(JSON.parse(localStorage.getItem(KEY) || 'null')); } catch(e)
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e) {} };
 
 /* 고치기 화면(`/auth/character/edit/...`)으로 들어왔으면 서버가 미리 채워 준
-   카드로 초안을 덮어쓴다 — 이 브라우저에 남아 있던 다른 초안보다 우선한다. */
+   카드로 초안을 덮어쓴다 — 이 브라우저에 남아 있던 다른 초안보다 우선한다.
+   질문이 아닌 칸(대표사진 `portrait`·감정별 사진 `emotion_photos` 등)은 이 화면에서
+   고칠 수 없으므로 `KEEP`에 원래 값을 떠 두었다가 저장할 때 그대로 이어 싣는다 —
+   null로 보내면 웹에서 한 번 고치기만 해도 사진이 지워진다. */
+const KEEP = {};
+const FIXED_KEYS = ['schema_version', 'id', 'expression_level', 'promises'];
 const editEl = document.getElementById('cm-edit-data');
 if (editEl) {
   try {
     const preload = JSON.parse(editEl.textContent);
     state = clean(preload.card);
+    const pc = preload.card || {};
+    S.card_keys.forEach(k => {
+      if (!byKey[k] && !FIXED_KEYS.includes(k) && k in pc) KEEP[k] = pc[k];
+    });
     save();
     localStorage.setItem(SAVED_KEY, JSON.stringify({
-      id: preload.id, version: preload.version, name: state.name || '', snap: JSON.stringify(state)}));
+      id: preload.id, version: preload.version, name: state.name || '', snap: JSON.stringify(state),
+      keep: KEEP}));
   } catch(e) {}
 }
 let step = 0;
@@ -956,8 +966,11 @@ function pick(val, isCustom){
   renderStep();
 }
 
-/* 결과 카드 — 설계서 5.1 모양. 칸 순서와 칸 이름은 서버가 보낸 card_keys를 따른다. */
-function buildCardJson(){
+/* 결과 카드 — 설계서 5.1 모양. 칸 순서와 칸 이름은 서버가 보낸 card_keys를 따른다.
+   `keep`은 질문이 아닌 칸(사진 등)에 이어 실을 원래 값이다 — 저장할 때는
+   `saveKeep(saved)`가 id와 같은 출처에서 골라 넘긴다. */
+function buildCardJson(keep){
+  keep = keep || KEEP;
   const card = {};
   S.card_keys.forEach(k => {
     const q = byKey[k];
@@ -965,7 +978,7 @@ function buildCardJson(){
     else if (k === 'id') card[k] = null;               // 서버가 저장할 때 붙인다
     else if (k === 'expression_level') card[k] = null; // 이 서버는 수위를 정하지 않는다
     else if (k === 'promises') card[k] = S.promises.slice();
-    else if (!q) card[k] = null;
+    else if (!q) card[k] = k in keep ? keep[k] : null; // 고친 캐릭터의 원래 값을 잇는다
     else if (q.type === 'multi') card[k] = Array.isArray(state[k]) ? state[k].slice() : [];
     else if (q.type === 'choice') card[k] = state[k] || null;
     else card[k] = state[k] || '';
@@ -1005,9 +1018,18 @@ function getSaved(){
   return v;
 }
 function setSaved(v){ try { localStorage.setItem(SAVED_KEY, JSON.stringify(v)); } catch(e) {} }
-function buildSaveCard(){
-  const card = buildCardJson();
-  const saved = getSaved();
+/* 저장할 때 이어 실을 원래 값. 고치기 화면이면 이 화면의 `KEEP`. 만들기 화면이면
+   카드에 붙일 id를 준 바로 그 표시(`saved`)의 keep만 쓴다 — 같은 브라우저에서 먼저
+   연 고치기 화면이 표시를 남겨 두었으면 여기서도 그 캐릭터를 고치는 저장이 되는데,
+   keep 없이 보내면 사진 칸이 null로 나가 지워진다. id가 없으면(새 캐릭터) keep도
+   쓰지 않는다. 그 사이 다른 곳에서 사진을 바꿨으면 판 번호가 달라 서버가 거절하므로
+   낡은 keep이 덮어쓰지 않는다. */
+function saveKeep(saved){
+  if (editEl) return KEEP;
+  return (saved && saved.id && saved.keep && typeof saved.keep === 'object') ? saved.keep : {};
+}
+function buildSaveCard(saved){
+  const card = buildCardJson(saveKeep(saved));
   if (saved && saved.id) card.id = saved.id;
   return card;
 }
@@ -1023,8 +1045,8 @@ function errorText(data){
 if (LOGGED_IN) {
   $('cm-save').hidden = false;
   $('cm-save').addEventListener('click', async () => {
-    const card = buildSaveCard();
     const saved = getSaved();
+    const card = buildSaveCard(saved);
     const btn = $('cm-save'), msg = $('cm-save-msg');
     btn.disabled = true;
     msg.className = 'cm-save-msg';
@@ -1037,7 +1059,8 @@ if (LOGGED_IN) {
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
-        setSaved({id: data.id, version: data.version, name: state.name || '', snap: JSON.stringify(state)});
+        setSaved({id: data.id, version: data.version, name: state.name || '', snap: JSON.stringify(state),
+          keep: saveKeep(saved)});
         msg.className = 'cm-save-msg ok';
         msg.textContent = fill(T.saved, {name: data.name});
         $('cm-connect-hint').hidden = false;

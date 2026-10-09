@@ -11,6 +11,8 @@
 import html
 import json
 import re
+import shutil
+import subprocess
 
 import pytest
 from starlette.testclient import TestClient
@@ -181,6 +183,135 @@ def test_new_character_keeps_changed_draft_and_saved_marker_carries_name():
     assert "if (v.name !== state.name && !editEl) return null;" in page
     assert "snap: JSON.stringify(state)" in page
     assert "T.pending_empty" in page and "T.pending_no_login" in page
+
+
+# ---------------------------------------------------------------------------
+# 고치기 화면은 질문이 아닌 칸(대표사진·감정별 사진)을 원래 값 그대로 이어 싣는다.
+# 질문 칸만 남기는 `clean()`을 거친 뒤 `!q` 칸을 null로 보내면, 사진을 단 캐릭터를
+# 웹에서 한 번 고치기만 해도 portrait·emotion_photos가 지워진다(2026-10-10 검수).
+# ---------------------------------------------------------------------------
+def test_edit_page_keeps_non_question_fields_in_the_script():
+    page = character_page.character_page(True, edit={"id": None, "version": None, "card": {}})
+    assert "const KEEP = {};" in page
+    assert "if (!byKey[k] && !FIXED_KEYS.includes(k) && k in pc) KEEP[k] = pc[k];" in page
+    assert "else if (!q) card[k] = k in keep ? keep[k] : null;" in page
+    # 고정 칸(id·약속 등)은 이어 싣지 않는다 — 서버가 정하는 값이다.
+    assert "const FIXED_KEYS = ['schema_version', 'id', 'expression_level', 'promises'];" in page
+
+
+# 화면 스크립트를 실제로 node에서 돌려 저장 단추가 보내는 카드를 받아 본다.
+# DOM은 저장에 필요한 만큼만 흉내 낸다(무엇을 물어도 받아 주는 가짜 요소).
+_NODE_HARNESS = r"""
+const fs = require('fs'), vm = require('vm');
+const pages = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+let inp = null;
+function el(){
+  const h = {};
+  return {textContent:'', innerHTML:'', hidden:false, disabled:false, className:'', value:'',
+    style:{}, dataset:{}, classList:{add(){}, remove(){}, contains(){ return false; }},
+    addEventListener(t, f){ h[t] = f; }, click(){ return h.click && h.click(); },
+    appendChild(){}, setAttribute(){}, querySelectorAll(){ return []; },
+    getBBox(){ return {}; }, scrollIntoView(){}};
+}
+let els = {};
+const store = {};
+globalThis.document = {
+  getElementById(id){
+    if (id === 'cm-schema') return {textContent: inp.schema};
+    if (id === 'cm-edit-data') return inp.edit === null ? null : {textContent: inp.edit};
+    return els[id] || (els[id] = el());
+  },
+  createElementNS(){ return el(); },
+};
+globalThis.localStorage = {getItem: k => k in store ? store[k] : null,
+  setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; }};
+globalThis.location = {search: '', pathname: '/character'};
+globalThis.history = {replaceState(){}};
+globalThis.matchMedia = () => ({matches: true});
+let sent = null;
+globalThis.fetch = async (url, opt) => { sent = JSON.parse(opt.body);
+  return {ok: true, json: async () => ({ok: true, id: 'x', version: 'v', name: 'n'})}; };
+// 같은 브라우저(같은 localStorage)에서 화면을 차례로 연다 — 저장 단추는 마지막 화면 것을 누른다.
+pages.forEach(p => { inp = p; els = {}; vm.runInThisContext(p.script); });
+(async () => { await els['cm-save'].click(); process.stdout.write(JSON.stringify(sent)); })();
+"""
+
+
+def _page_parts(page: str) -> dict:
+    schema = re.search(r'<script type="application/json" id="cm-schema">(.*?)</script>', page, re.S)
+    edit = re.search(r'<script type="application/json" id="cm-edit-data">(.*?)</script>', page, re.S)
+    script = re.search(r"<script>\s*(\(function\(\)\{\s*const S = JSON\.parse.*?)</script>", page, re.S)
+    assert schema and script
+    return {
+        "schema": schema.group(1),
+        "edit": edit.group(1) if edit else None,
+        "script": script.group(1),
+    }
+
+
+def _run_save_in_node(tmp_path, *pages: str) -> dict:
+    """화면들을 한 브라우저에서 차례로 열고, 마지막 화면의 저장 단추가 보낸 것을 돌려준다."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node가 없어 화면 스크립트를 돌릴 수 없다")
+    inp = tmp_path / "in.json"
+    inp.write_text(json.dumps([_page_parts(p) for p in pages]), encoding="utf-8")
+    harness = tmp_path / "harness.js"
+    harness.write_text(_NODE_HARNESS, encoding="utf-8")
+    out = subprocess.run([node, str(harness), str(inp)], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def test_editing_a_card_with_photos_keeps_portrait_and_emotion_photos(tmp_path):
+    keys = character_page.schema_data()["card_keys"]
+    if "portrait" not in keys or "emotion_photos" not in keys:
+        pytest.skip("빌려 쓰는 본체 판에 아직 사진 칸이 없다")
+    card = {
+        "schema_version": 1, "id": None, "name": "하린", "aliases": [],
+        "relationship_start": "stranger", "relationship_ceiling": "open",
+        "portrait": "attach_file/portrait.png",
+        "emotion_photos": {"기쁨": "attach_file/happy.png", "슬픔": "attach_file/sad.png"},
+    }
+    page = character_page.character_page(
+        True, edit={"id": "01JABCDEFGHJKMNPQRSTVWXYZ0", "version": "v1", "card": card})
+    sent = _run_save_in_node(tmp_path, page)
+    assert sent["card"]["portrait"] == "attach_file/portrait.png"
+    assert sent["card"]["emotion_photos"] == {"기쁨": "attach_file/happy.png",
+                                              "슬픔": "attach_file/sad.png"}
+    assert sent["card"]["id"] == "01JABCDEFGHJKMNPQRSTVWXYZ0"
+    assert sent["card"]["name"] == "하린"
+
+
+def test_create_page_after_edit_page_keeps_photos_of_the_same_character(tmp_path):
+    # 고치기 화면이 남긴 표시(id·판 번호)를 같은 브라우저의 만들기 화면(/character)이
+    # 이어받아 같은 캐릭터를 고치는 저장이 된다 — 이때 사진 칸도 같은 표시에서 이어
+    # 실어야 한다. 아니면 null로 나가고 판 번호가 맞아 서버가 받아 사진이 지워진다.
+    keys = character_page.schema_data()["card_keys"]
+    if "portrait" not in keys or "emotion_photos" not in keys:
+        pytest.skip("빌려 쓰는 본체 판에 아직 사진 칸이 없다")
+    card = {
+        "schema_version": 1, "id": None, "name": "하린", "aliases": [],
+        "relationship_start": "stranger", "relationship_ceiling": "open",
+        "portrait": "attach_file/portrait.png",
+        "emotion_photos": {"기쁨": "attach_file/happy.png"},
+    }
+    edit_page = character_page.character_page(
+        True, edit={"id": "01JABCDEFGHJKMNPQRSTVWXYZ0", "version": "v1", "card": card})
+    create_page = character_page.character_page(True)
+    sent = _run_save_in_node(tmp_path, edit_page, create_page)
+    assert sent["card"]["id"] == "01JABCDEFGHJKMNPQRSTVWXYZ0"
+    assert sent["base_version"] == "v1"
+    assert sent["card"]["portrait"] == "attach_file/portrait.png"
+    assert sent["card"]["emotion_photos"] == {"기쁨": "attach_file/happy.png"}
+
+
+def test_new_card_sends_no_photos(tmp_path):
+    # 새로 만들기에는 이어 실을 원래 카드가 없다 — 사진 칸은 비워 보낸다(본체가 기본값을 채운다).
+    page = character_page.character_page(True)
+    sent = _run_save_in_node(tmp_path, page)
+    for k in ("portrait", "emotion_photos"):
+        assert sent["card"].get(k) is None
 
 
 # ---------------------------------------------------------------------------
