@@ -13,6 +13,12 @@
 > ②`fts5-memo-tasks-index`로 검색이 **다섯 그릇 전부**로 넓어졌고, 작업일지는 쓰기까지
 > 열렸다. 본문의 "그릇 3~4개"·"도구 3개"는 전부 **그릇 다섯·도구 열**로 읽는다.
 > 화면 문구의 실제 원본은 `src/pages.py`이며 그쪽이 코드와 함께 갱신된다.
+>
+> **📅 2026-10-10 현행화** — 그 뒤 작업 옮기기(`namu_task_move`) 1종과 나무 캐릭터
+> 도구 7종이 더해져 노출 도구는 **18종**이다(원본은 `routing_server.EXPOSED_TOOLS`).
+> 캐릭터 화면도 생겼다 — 만들기 `/character`(영어 `/en/character`, 상단 메뉴 "캐릭터"),
+> 로그인 뒤 내 캐릭터 목록 `/auth/character`. 화면 코드는 `src/character_page.py`,
+> 회원용 설명은 [`namu_character_guide.md`](namu_character_guide.md)에 있다.
 
 ---
 
@@ -282,6 +288,8 @@ sequenceDiagram
 | GET | `/memory` | 무엇을 기억하나 — 3층·다섯 그릇·파일 주고받기 |
 | GET | `/safety` | 안전 — 원본 위치·권한 범위·주소 관리·그만두기 |
 | GET | `/faq` | 자주 묻는 질문 |
+| GET | `/character` · `/en/character` | 캐릭터 만들기 (2026-10 추가 — 로그인 없이도 열린다) |
+| GET | `/auth/character` | 내 캐릭터 목록 — 고치기·지우기 (2026-10 추가, 로그인 필요) |
 | GET | `/auth/repo` | 2단계 화면 |
 | GET | `/auth/repo/done` | "만들었어요, 다음" → 저장소 이름을 서명 쿠키에 담고 3단계로 |
 

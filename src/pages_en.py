@@ -426,6 +426,10 @@ def memory_page(logged_in: bool = False) -> str:
         "order does not matter.</li>"
         "<li>The same memory can be reached from any AI you connect. Who wrote "
         "what is told apart by the label at the end of the address.</li>"
+        "<li>A character's diary and core memories are kept apart from these "
+        "five containers, so they <b>do not show up in recall or search</b>. "
+        'Characters are made and managed on the <a href="/en/character">'
+        "Character</a> page.</li>"
         "</ul>"
         '<p style="margin-top:26px">'
         + (

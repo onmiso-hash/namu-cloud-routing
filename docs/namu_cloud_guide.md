@@ -4,7 +4,7 @@
 > 가입 절차는 사이트 화면이 안내합니다. 이 문서는 그 뒤에 "안에서 어떻게
 > 도는가"를 알고 싶은 사람을 위한 것입니다.
 
-> 📅 2026-08-08 개정(첨부 파일·다섯 그릇 검색 반영 — 1절·5절 끝) · 2026-08-02 개정(namu-70, 사이트 신설로 2-2절 교체) · 2026-07-31 개정(namu-60)
+> 📅 2026-10-10 개정(나무 캐릭터 도구·작업 옮기기 반영 — 1절) · 2026-08-08 개정(첨부 파일·다섯 그릇 검색 반영 — 1절·5절 끝) · 2026-08-02 개정(namu-70, 사이트 신설로 2-2절 교체) · 2026-07-31 개정(namu-60)
 > · 최초 작성 2026-07-19(namu-54) · 선행 문서: [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md)(경로 B 셀프호스팅 가이드) · [`install_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/install_guide.md)(플러그인 설치 가이드) · [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md)(설계 원본).
 >
 > **범위** — 경로 A는 "중앙에서 우리가 대신 호스팅해주는 공용 서버에 접속만 하면 되는" 형태다(사용자가 직접 서버를 띄우는 경로 B와 반대).
@@ -19,9 +19,9 @@
 | 사용자 수 | 단일 사용자(자기 것 하나) | 멀티유저(주소에 실린 **개인 열쇠**로 사용자별 서랍 라우팅) |
 | 기억의 원본은 어디에 | 자기 PC의 `~/.namu` | **사용자 본인의 GitHub 저장소**(연결 시 직접 고른다). 서버가 갖는 것은 그 저장소의 사본뿐이다 |
 
-노출 도구는 개인용(경로 B)과 동일한 **10종**이다 — 기억 3종(`namu_recall`/`namu_record`/`namu_search`)과 첨부 7종(`namu_upload_file`/`namu_list_files`/`namu_download_file`/`namu_delete_file`/`namu_create_upload_ticket`/`namu_create_download_ticket`/`namu_check_ticket`). 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68).
+노출 도구는 **18종**이다 — 기억 3종(`namu_recall`/`namu_record`/`namu_search`), 첨부 7종(`namu_upload_file`/`namu_list_files`/`namu_download_file`/`namu_delete_file`/`namu_create_upload_ticket`/`namu_create_download_ticket`/`namu_check_ticket`), 작업 옮기기 1종(`namu_task_move`), 캐릭터 7종(`namu_character_list`/`namu_character_schema`/`namu_character_save`/`namu_character_load`/`namu_character_diary`/`namu_character_core`/`namu_character_forget`). 목록의 원본은 `src/routing_server.py`의 `EXPOSED_TOOLS`다. 기록은 개인용과 같은 3층(요약 `summary` · 왜 `reason` · 원문 `body`)으로 남는다(namu-68).
 
-담을 수 있는 그릇은 **다섯 전부**다 — 교훈(learnings)·개인 사실(profile)·작업일지(tasks)·쪽지(memo)·첨부 기록(attachments). 노출되지 않는 것은 `namu_sync_setup`(서버의 저장소 연결(git remote)을 바꾸는 도구라 이걸 원격에 열어두면 저장소 연결을 통째로 빼앗길 수 있다)과 쪽지 떼기·책갈피 2종(그 PC의 파일을 다루는 도구)뿐이다. 경로 B와 같은 기준이다 — [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고.
+담을 수 있는 그릇은 **다섯 전부**다 — 교훈(learnings)·개인 사실(profile)·작업일지(tasks)·쪽지(memo)·첨부 기록(attachments). 캐릭터의 카드·일기·핵심 기억은 이 다섯 그릇과 따로 보관되어 `namu_recall`·`namu_search`에 나오지 않는다 — 캐릭터 쓰는 법은 [`namu_character_guide.md`](namu_character_guide.md). 노출되지 않는 것은 `namu_sync_setup`(서버의 저장소 연결(git remote)을 바꾸는 도구라 이걸 원격에 열어두면 저장소 연결을 통째로 빼앗길 수 있다)과 쪽지 떼기·책갈피 2종(그 PC의 파일을 다루는 도구), 대화 재기(`namu_record_session`)뿐이다. 경로 B와 같은 기준이다 — [`remote_mcp_guide.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_guide.md) 1절 참고.
 
 > **개정 이력** — 최초본은 "그릇 셋(교훈·개인 사실·쪽지), tasks는 노출되지 않는다"고 적었다. 지금은 틀린 설명이다. 작업일지는 `routing_server.namu_record`의 `bowl == "tasks"` 분기로 기록되며(기록할 때 어느 프로젝트인지 함께 적어야 한다 — 웹에는 "지금 열어 둔 폴더"가 없기 때문), 첨부 기록 그릇은 `namu-file-upload-download`(2026-08-07)로 신설됐다.
 
@@ -107,7 +107,7 @@ https://namu-cloud.onnamu.kr/mcp/<내-개인-열쇠>?client=<AI-이름>
 ## 6. 지금 안 되는 것 / 나중 계획
 
 - 접속 주소는 사람이 브라우저로 받아 손으로 붙이는 방식이다. OAuth로 AI 클라이언트가 직접 인증을 받는 형태(동적 클라이언트 등록)는 아직 아니다 — 상세는 [`remote_mcp_design.md`](https://github.com/onmiso-hash/namu-agent/blob/main/docs/remote_mcp_design.md) §11 참고.
-- `namu_sync_setup`과 쪽지 떼기·책갈피 2종은 이 경로에 노출되지 않는다(플러그인 전용).
+- `namu_sync_setup`, 쪽지 떼기·책갈피 2종, `namu_record_session`은 이 경로에 노출되지 않는다(플러그인 전용).
 - 웹 화면(`/auth/memory`)에서 기억을 고쳐 쓰는 것은 아직 안 된다 — 쪽지 떼기만 예외다.
 
 **앞선 판에서 "안 된다"고 적혀 있었으나 지금은 되는 것** (2026-08-08 확인)

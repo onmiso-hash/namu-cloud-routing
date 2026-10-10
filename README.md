@@ -40,6 +40,7 @@ git submodule update --init --recursive
 
 - [`docs/namu_cloud_guide.md`](docs/namu_cloud_guide.md) — 공용 클라우드 MCP(경로 A) 사용 가이드
 - [`docs/namu_attach_files.md`](docs/namu_attach_files.md) — 첨부 파일 주고받기(완료 보고서) — 도구 일곱 개·티켓 주소·서버 사본 격리·크기 상한 실측
+- [`docs/namu_character_guide.md`](docs/namu_character_guide.md) — 나무 캐릭터 안내(회원용) — 만들기·불러오기·캐릭터별 규칙·사진·일기와 핵심 기억
 
 ## 범위 (현 단계)
 
