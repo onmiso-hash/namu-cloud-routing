@@ -64,6 +64,8 @@ def test_questions_and_rules_come_from_the_core():
 
     assert data["questions"] == character.schema()["questions"]
     assert data["promises"] == list(character.PROMISES)
+    # 영어판 약속은 코어와 같은 순서로 한 줄씩 옮긴 것이다 — 코어에 약속이 늘면 여기서 걸린다.
+    assert len(character_page._PROMISES_EN) == len(character.PROMISES)
     assert data["ceiling_rank"] == {c["value"]: c["rank"] for c in character.CEILINGS}
     assert data["start_min_ceiling_rank"] == character.START_MIN_CEILING_RANK
     assert set(data["card_keys"]) == set(character.CARD_KEYS)

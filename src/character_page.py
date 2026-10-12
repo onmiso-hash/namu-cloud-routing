@@ -212,6 +212,7 @@ _PROMISES_EN = (
     "Never hold on through jealousy or hurt feelings",
     "Support real-life relationships and daily life",
     "Never make up memories it isn't sure of",
+    "Confirm lasting wishes and reflect them",
 )
 
 
