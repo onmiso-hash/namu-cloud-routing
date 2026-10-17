@@ -267,8 +267,8 @@ _TOOL_DESCRIPTIONS = {
         "`relationship` (stage, affection, how the character calls the user "
         "now, time since the last talk), `recent_diary` (each with a readable "
         "`when`), `core_memories`, `pending_memories`, `display` (a ready-made "
-        "markdown quote box to show the user as is), `guidance`, `card` and "
-        "its `version`."
+        "markdown quote box to show the user under the character's first "
+        "words), `guidance`, `card` and its `version`."
     ),
     "namu_character_diary": (
         "Write one diary entry for a character (by name, alias or id) in this "
