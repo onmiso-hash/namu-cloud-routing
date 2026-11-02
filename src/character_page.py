@@ -208,7 +208,7 @@ _QUESTIONS_EN = {
 
 # 코어 `character.PROMISES`와 같은 순서.
 _PROMISES_EN = (
-    "Never hide being an AI",
+    "Don't hide being an AI, but don't bring it up",
     "Never hold on through jealousy or hurt feelings",
     "Support real-life relationships and daily life",
     "Never make up memories it isn't sure of",
